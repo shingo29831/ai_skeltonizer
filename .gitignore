@@ -1,0 +1,43 @@
+# Role: Git管理から除外すべきPython開発環境、ビルド成果物、AIコンテキスト出力フォルダなどの不要ファイルを定義する。
+
+# --- Python バイトコード・キャッシュ ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- 仮想環境 ---
+venv/
+.venv/
+env/
+.env
+
+# --- ビルド・パッケージング成果物 ---
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# --- テスト・静的解析ツール ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.cover
+.tox/
+.nox/
+
+# --- エディタ・IDE・OS関連 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- py-skeletonizer の出力フォルダ（AI用コンテキストコピー） ---
+*_ai_context/
+ai_context_output/
+ai_context_bundle.*
