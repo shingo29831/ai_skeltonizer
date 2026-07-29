@@ -5,7 +5,7 @@ Role: PythonソースコードのAST解析を行い、1回のパースでスケ�
 import ast
 from typing import List, Optional, Set, Tuple
 from .role_extractor import RoleEntry, extract_roles_from_ast
-from ....py_skeletonizer.dependency_analyzer import DependencyEntry, extract_dependencies_from_ast
+from .dependency_analyzer import DependencyEntry, extract_dependencies_from_ast
 
 KEEP_IMPLEMENTATION_TAGS = ("@keep", "@ai-full", "@preserve")
 ROLE_COMMENT_TAGS = ("Role:", "AI:", "Rule:", "Depends:", "Notice:")
