@@ -1,6 +1,8 @@
 # src/aiskel/cli.py
 import argparse
 import sys
+import subprocess
+import platform
 from pathlib import Path
 from typing import List, Optional, Set
 
@@ -11,6 +13,24 @@ from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
 from .core.token_counter import format_token_display, estimate_tokens
 from .core.patch_applier import apply_patch
+
+def _get_clipboard_text() -> str:
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            return subprocess.check_output(["pbpaste"], text=True)
+        elif system == "Windows":
+            return subprocess.check_output(["powershell.exe", "-command", "Get-Clipboard"], text=True)
+        elif system == "Linux":
+            try:
+                return subprocess.check_output(["xclip", "-selection", "clipboard", "-o"], text=True)
+            except FileNotFoundError:
+                return subprocess.check_output(["xsel", "--clipboard", "--output"], text=True)
+        else:
+            raise NotImplementedError(f"OS {system} のクリップボード取得は未対応です。")
+    except Exception as e:
+        print(f"クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -23,6 +43,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     # apply サブコマンドの定義
     apply_parser = subparsers.add_parser("apply", help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
     apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時は標準入力から読み込みます)")
+    apply_parser.add_argument("-c", "--clipboard", action="store_true", help="クリップボードからAIの出力テキストを直接読み込みます")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
 
@@ -64,7 +85,13 @@ def main(args: Optional[List[str]] = None) -> int:
         if hasattr(parsed_args, "command") and parsed_args.command == "apply":
             project_root: Path = parsed_args.dir.resolve()
             
-            if parsed_args.patch_file:
+            if parsed_args.clipboard:
+                print("🚀 クリップボードからAIの出力テキストを読み込みます...")
+                patch_text = _get_clipboard_text()
+                if not patch_text.strip():
+                    print("エラー: クリップボードが空です。", file=sys.stderr)
+                    return 1
+            elif parsed_args.patch_file:
                 patch_file: Path = parsed_args.patch_file.resolve()
                 if not patch_file.exists():
                     print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
