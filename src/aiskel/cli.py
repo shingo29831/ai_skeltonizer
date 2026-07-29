@@ -111,17 +111,17 @@ def main(args: Optional[List[str]] = None) -> int:
         print(f"  - 変更なし(スキップ)   : {skipped_count} 件")
         if deleted_count > 0:
             print(f"  - 削除した古いファイル: {deleted_count} 件")
-        print("\n--- 📊 辞書・マニュアル出力 (ai_meta/ フォルダ内に隔離集約) ---")
+        print("\n--- 辞書・マニュアル出力 (ai_meta/ フォルダ内に隔離集約) ---")
         if bundle_path:
             arch_path = bundle_path.parent / "phase1_architecture_bundle.txt"
             if arch_path.exists():
-                print(f"  - [フェーズ1用] アーキテクチャ要約 : ai_meta/{arch_path.name} 🗺️ (変更対象ファイルの特定用)")
-            print(f"  - [フェーズ2用] 統合コンテキスト   : ai_meta/{bundle_path.name} 📦 (実際の実装・修正依頼用)")
+                print(f"  - [フェーズ1用] アーキテクチャ要約 : ai_meta/{arch_path.name} (変更対象ファイルの特定用)")
+            print(f"  - [フェーズ2用] 統合コンテキスト   : ai_meta/{bundle_path.name} (実際の実装・修正依頼用)")
             static_path = bundle_path.parent / "phase2_static_skeleton.txt"
             if static_path.exists():
-                print(f"  - [フェーズ2用] 静的スケルトン     : ai_meta/{static_path.name} 🦴 (型定義などの固定配置用)")
-        print("\n--- 📉 トークン・予算削減アナライザー ---")
-        print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減) 🚀")
+                print(f"  - [フェーズ2用] 静的スケルトン     : ai_meta/{static_path.name} (型定義などの固定配置用)")
+        print("\n--- トークン・予算削減アナライザー ---")
+        print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
         return 0
 
     except Exception as e:

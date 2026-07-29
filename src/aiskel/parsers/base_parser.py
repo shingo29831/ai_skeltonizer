@@ -41,14 +41,13 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
 
     for path in sorted(grouped.keys()):
         file_entries = grouped[path]
-        lines.append(f"## 📁 `{path}`")
+        lines.append(f"## `{path}`")
         module_entries = [e for e in file_entries if e.element_type == "Module"]
         if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
             lines.append(f"> **Module Role**: {module_entries[0].description}")
         lines.append("")
         for entry in [e for e in file_entries if e.element_type != "Module"]:
-            icon = "🔷" if entry.element_type == "Class" else ("🔹" if entry.element_type == "Method" else "🔸")
-            lines.append(f"- {icon} **{entry.element_type} `{entry.name}`**")
+            lines.append(f"- **{entry.element_type} `{entry.name}`**")
             lines.append(f"  - `Signature`: `{entry.signature}`")
             if entry.description and entry.description != "(役割記述なし)":
                 lines.append(f"  - `Role`: {entry.description}")
@@ -65,7 +64,7 @@ def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
     for entry in sorted(entries, key=lambda e: e.file_path):
         if not entry.imported_modules:
             continue
-        lines.append(f"## 🔗 `{entry.file_path}`")
+        lines.append(f"## `{entry.file_path}`")
         for mod in entry.imported_modules:
             lines.append(f"- `{mod}`")
         lines.append("")
