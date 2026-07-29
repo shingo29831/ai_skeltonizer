@@ -104,9 +104,6 @@ def main(args: Optional[List[str]] = None) -> int:
         deleted_count = syncer.clean_deleted_files(target_files)
         updated_count, skipped_count, bundle_path = syncer.sync_files(target_files, tree_text=tree_text, force_rebuild=parsed_args.force)
 
-        meta_dir = output_dir / "ai_meta"
-        (meta_dir / "project_tree.txt").write_text("=== AI Context Project Structure ===\n" + tree_text, encoding="utf-8")
-
         stats = syncer.token_stats
         print("\n=== 同期およびコンテキスト最適化完了 ===")
         print(f"出力先ディレクトリ: {output_dir}")
@@ -116,7 +113,13 @@ def main(args: Optional[List[str]] = None) -> int:
             print(f"  - 削除した古いファイル: {deleted_count} 件")
         print("\n--- 📊 辞書・マニュアル出力 (ai_meta/ フォルダ内に隔離集約) ---")
         if bundle_path:
-            print(f"  - 単一統合バンドル     : ai_meta/{bundle_path.name} 📦")
+            arch_path = bundle_path.parent / "phase1_architecture_bundle.txt"
+            if arch_path.exists():
+                print(f"  - [フェーズ1用] アーキテクチャ要約 : ai_meta/{arch_path.name} 🗺️ (変更対象ファイルの特定用)")
+            print(f"  - [フェーズ2用] 統合コンテキスト   : ai_meta/{bundle_path.name} 📦 (実際の実装・修正依頼用)")
+            static_path = bundle_path.parent / "phase2_static_skeleton.txt"
+            if static_path.exists():
+                print(f"  - [フェーズ2用] 静的スケルトン     : ai_meta/{static_path.name} 🦴 (型定義などの固定配置用)")
         print("\n--- 📉 トークン・予算削減アナライザー ---")
         print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減) 🚀")
         return 0

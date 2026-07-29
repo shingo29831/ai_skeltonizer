@@ -53,7 +53,7 @@ def _build_description(docstring: Optional[str], leading_comments: List[str]) ->
                 combined_lines.append(line)
 
     if not combined_lines:
-        return "(役割記述なし)"
+        return ""
 
     return " / ".join(dict.fromkeys(combined_lines))
 

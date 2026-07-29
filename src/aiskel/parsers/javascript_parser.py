@@ -24,7 +24,7 @@ class JavascriptParser(BaseParser):
         while prev and prev.type == 'comment':
             comments.insert(0, self._get_node_text(prev, source_bytes).strip())
             prev = prev.prev_sibling
-        return " / ".join(comments) if comments else "(役割記述なし)"
+        return " / ".join(comments) if comments else ""
 
     def parse_and_process(
         self, source_code: str, rel_file_path: str, keep_functions: Set[str], only_nodes: Set[str]

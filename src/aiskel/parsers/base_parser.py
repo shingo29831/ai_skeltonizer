@@ -43,14 +43,15 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
         file_entries = grouped[path]
         lines.append(f"## 📁 `{path}`")
         module_entries = [e for e in file_entries if e.element_type == "Module"]
-        if module_entries:
+        if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
             lines.append(f"> **Module Role**: {module_entries[0].description}")
         lines.append("")
         for entry in [e for e in file_entries if e.element_type != "Module"]:
             icon = "🔷" if entry.element_type == "Class" else ("🔹" if entry.element_type == "Method" else "🔸")
             lines.append(f"- {icon} **{entry.element_type} `{entry.name}`**")
             lines.append(f"  - `Signature`: `{entry.signature}`")
-            lines.append(f"  - `Role`: {entry.description}")
+            if entry.description and entry.description != "(役割記述なし)":
+                lines.append(f"  - `Role`: {entry.description}")
         lines.append("")
     return "\n".join(lines)
 

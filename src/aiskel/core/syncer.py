@@ -31,12 +31,9 @@ class ProjectSyncer:
 
         valid_dest_files = {self.output_dir / f.relative_to(self.project_root) for f in current_target_files}
         valid_dest_files.update({
-            self.meta_dir / "project_tree.txt",
-            self.meta_dir / "project_roles.txt",
-            self.meta_dir / "project_dependencies.txt",
-            self.meta_dir / "ai_context_bundle.txt",
-            self.meta_dir / "static_skeleton.txt",
-            self.meta_dir / "ai_architecture_bundle.txt"
+            self.meta_dir / "phase1_architecture_bundle.txt",
+            self.meta_dir / "phase2_context_bundle.txt",
+            self.meta_dir / "phase2_static_skeleton.txt"
         })
 
         deleted_count = 0
@@ -152,10 +149,7 @@ class ProjectSyncer:
         self.meta_dir.mkdir(parents=True, exist_ok=True)
 
         role_map_text = generate_role_map_text(self.all_role_entries)
-        (self.meta_dir / "project_roles.txt").write_text(role_map_text, encoding="utf-8")
-
         dependency_map_text = generate_dependency_map_text(self.all_dependency_entries)
-        (self.meta_dir / "project_dependencies.txt").write_text(dependency_map_text, encoding="utf-8")
 
         bundle_path: Optional[Path] = None
         if self.config.create_bundle:

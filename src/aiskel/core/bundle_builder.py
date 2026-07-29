@@ -63,9 +63,9 @@ def build_bundle_file(
     custom_policy_path: Optional[Path] = None,
 ) -> Path:
     policy_text = _discover_policy_text(project_root, custom_policy_path)
-    bundle_path = output_dir / "ai_context_bundle.txt"
-    static_skeleton_path = output_dir / "static_skeleton.txt"
-    architecture_path = output_dir / "ai_architecture_bundle.txt"
+    bundle_path = output_dir / "phase2_context_bundle.txt"
+    static_skeleton_path = output_dir / "phase2_static_skeleton.txt"
+    architecture_path = output_dir / "phase1_architecture_bundle.txt"
 
     lines: List[str] = []
     static_lines: List[str] = []
