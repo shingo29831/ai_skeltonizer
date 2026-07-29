@@ -9,7 +9,7 @@ from .core.scanner import get_target_files, generate_tree_text
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
-from .core.token_counter import format_token_display
+from .core.token_counter import format_token_display, estimate_tokens
 
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -121,7 +121,24 @@ def main(args: Optional[List[str]] = None) -> int:
             if static_path.exists():
                 print(f"  - [フェーズ2用] 静的スケルトン     : ai_meta/{static_path.name} (型定義などの固定配置用)")
         print("\n--- トークン・予算削減アナライザー ---")
-        print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
+        print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
+        if bundle_path:
+            arch_path = bundle_path.parent / "phase1_architecture_bundle.txt"
+            if arch_path.exists():
+                arch_tokens = estimate_tokens(arch_path.read_text(encoding="utf-8"))
+                arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
+                print(f"  - [フェーズ1] アーキテクチャ要約 : 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
+            
+            ctx_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
+            ctx_red = (1.0 - (ctx_tokens / max(stats.raw_tokens, 1))) * 100
+            print(f"  - [フェーズ2] 統合コンテキスト   : 約 {ctx_tokens:,} tokens ({ctx_red:.1f}% 削減)")
+            
+            static_path = bundle_path.parent / "phase2_static_skeleton.txt"
+            if static_path.exists():
+                static_tokens = estimate_tokens(static_path.read_text(encoding="utf-8"))
+                print(f"  - [フェーズ2] 静的スケルトン     : 約 {static_tokens:,} tokens")
+        else:
+            print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
         return 0
 
     except Exception as e:
