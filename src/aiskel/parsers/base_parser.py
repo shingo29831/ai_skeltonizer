@@ -29,43 +29,27 @@ class BaseParser(ABC):
         pass
 
 def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
-    lines = [
-        "# AI Context: Project Role & Architecture Map",
-        "",
-        "この文書は、プロジェクト内に存在する各モジュール、クラス、および関数の責務とシグネチャを一覧化した退避マニュアルです。",
-        "",
-    ]
+    lines = ["# Role Map"]
     grouped: dict[str, List[RoleEntry]] = {}
     for entry in all_entries:
         grouped.setdefault(entry.file_path, []).append(entry)
 
     for path in sorted(grouped.keys()):
         file_entries = grouped[path]
-        lines.append(f"## `{path}`")
+        lines.append(f"[{path}]")
         module_entries = [e for e in file_entries if e.element_type == "Module"]
         if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
-            lines.append(f"> **Module Role**: {module_entries[0].description}")
-        lines.append("")
+            lines.append(f"Module: {module_entries[0].description}")
         for entry in [e for e in file_entries if e.element_type != "Module"]:
-            lines.append(f"- **{entry.element_type} `{entry.name}`**")
-            lines.append(f"  - `Signature`: `{entry.signature}`")
+            lines.append(f"{entry.element_type} {entry.name}: {entry.signature}")
             if entry.description and entry.description != "(役割記述なし)":
-                lines.append(f"  - `Role`: {entry.description}")
-        lines.append("")
+                lines.append(f"  {entry.description}")
     return "\n".join(lines)
 
 def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
-    lines = [
-        "# AI Context: Module Dependency Graph Map",
-        "",
-        "各ファイルが依存(import)している内部および外部モジュールの一覧です。リファクタリングの影響範囲の特定に使用してください。",
-        "",
-    ]
+    lines = ["# Dependency Graph"]
     for entry in sorted(entries, key=lambda e: e.file_path):
         if not entry.imported_modules:
             continue
-        lines.append(f"## `{entry.file_path}`")
-        for mod in entry.imported_modules:
-            lines.append(f"- `{mod}`")
-        lines.append("")
+        lines.append(f"{entry.file_path} -> {', '.join(entry.imported_modules)}")
     return "\n".join(lines)
