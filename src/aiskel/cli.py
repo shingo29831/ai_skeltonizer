@@ -10,13 +10,23 @@ from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
 from .core.token_counter import format_token_display, estimate_tokens
+from .core.patch_applier import apply_patch
 
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="aiskel",
-        description="多言語プロジェクトのAST解析を行い、AIコンテキスト向けの軽量スケルトンコピー、役割マップ、依存関係グラフ、単一バンドルを生成します。",
+        description="多言語プロジェクトのAIコンテキスト抽出、およびAI出力の自動適用ツール",
         formatter_class=argparse.RawTextHelpFormatter,
     )
+    subparsers = parser.add_subparsers(dest="command", help="実行するコマンド (省略時はコンテキスト抽出を実行)")
+
+    # apply サブコマンドの定義
+    apply_parser = subparsers.add_parser("apply", help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
+    apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時は標準入力から読み込みます)")
+    apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
+
+    # 従来の抽出コマンド用の引数 (サブコマンドなしの場合)
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクト・ルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
     parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
@@ -49,6 +59,34 @@ def _resolve_output_dir(project_root: Path, custom_output_dir: Optional[Path]) -
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
+
+        # apply コマンドの処理
+        if hasattr(parsed_args, "command") and parsed_args.command == "apply":
+            project_root: Path = parsed_args.dir.resolve()
+            
+            if parsed_args.patch_file:
+                patch_file: Path = parsed_args.patch_file.resolve()
+                if not patch_file.exists():
+                    print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
+                    return 1
+                print(f"🚀 AIパッチの適用を開始します (ファイル: {patch_file.name})")
+                patch_text = patch_file.read_text(encoding="utf-8")
+            else:
+                print("🚀 AIの出力テキストをペーストしてください。")
+                print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+                patch_text = sys.stdin.read()
+                print("\n適用を開始します...")
+
+            target_file = parsed_args.target.resolve() if parsed_args.target else None
+            success, fail = apply_patch(patch_text, project_root, target_file)
+            
+            print("\n=== 適用結果 ===")
+            print(f"✅ 成功: {success} 箇所")
+            if fail > 0:
+                print(f"❌ 失敗: {fail} 箇所")
+            return 0 if fail == 0 else 1
+
+        # 従来の抽出処理
         project_root: Path = parsed_args.project_dir.resolve()
 
         if not project_root.exists() or not project_root.is_dir():
