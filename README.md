@@ -1,8 +1,8 @@
-# py-skeletonizer
+# aiskel (AI Skeletonizer)
 
-`py-skeletonizer` は、Pythonプロジェクトのコードベースを抽象構文木（AST）レベルで解析し、AI（LLM）へのインプットに最適化された軽量なコンテキストコピー、役割マップ、依存関係グラフ、および単一ファイルへの統合バンドルを自動生成・同期するCLIツールです。
+`aiskel` は、Python, JavaScript, TypeScript, React (JSX/TSX) などの多言語プロジェクトのコードベースを抽象構文木（AST）レベルで解析し、AI（LLM）へのインプットに最適化された軽量なコンテキストコピー、役割マップ、依存関係グラフ、および単一ファイルへの統合バンドルを自動生成・同期するCLIツールです。
 
-関数やクラスのシグネチャ、Docstring、ファイル冒頭の役割記述（Role）のみを残して内部ロジックを省略（スケルトン化）することで、AIにプロジェクト全体の構造を正確に伝えつつ、消費トークン量を大幅に削減（最大70〜90%以上削減）します。
+関数やクラスのシグネチャ、Docstring/JSDoc、ファイル冒頭の役割記述（Role）のみを残して内部ロジックを省略（スケルトン化）することで、AIにプロジェクト全体の構造を正確に伝えつつ、消費トークン量を大幅に削減（最大70〜90%以上削減）します。
 
 ---
 
@@ -17,7 +17,7 @@ pip install -r requirements.txt
 ```
 
 ### 2. どこからでも使えるようにする（グローバルコマンド化）
-本ツールは `pyproject.toml` にエイリアスが定義されており、以下のコマンドでインストールすることで、システムのどのパス（ディレクトリ）からでも `py-skeletonizer` または `pyskel` というコマンド名で直接実行できるようになります。
+本ツールは `pyproject.toml` にエイリアスが定義されており、以下のコマンドでインストールすることで、システムのどのパス（ディレクトリ）からでも `aiskel` または `skelify` というコマンド名で直接実行できるようになります。
 
 ```bash
 # カレントディレクトリのパッケージを環境にインストール（どこからでも実行可能になります）
@@ -31,20 +31,20 @@ pip install -e .
 
 ## 🚀 使い方とオプション詳細 (Usage & Options)
 
-環境へのインストールが完了すると、以下の構文で任意のPythonプロジェクトを解析できます。
+環境へのインストールが完了すると、以下の構文で任意のプロジェクトを解析できます。
 
 ```bash
-py-skeletonizer [解析対象プロジェクトのパス] [出力先パス] [オプション]
+aiskel [解析対象プロジェクトのパス] [出力先パス] [オプション]
 # または
-pyskel [解析対象プロジェクトのパス] [出力先パス] [オプション]
+skelify [解析対象プロジェクトのパス] [出力先パス] [オプション]
 ```
-※ パスを省略して `pyskel` とだけ入力して実行すると、現在開いているディレクトリ（カレントディレクトリ）を自動的に対象として解析を開始します。
+※ パスを省略して `aiskel` とだけ入力して実行すると、現在開いているディレクトリ（カレントディレクトリ）を自動的に対象として解析を開始します。
 
 ### コマンドライン引数・オプション一覧
 
 | オプション | 短縮形 | 引数の型 | 説明 |
 | :--- | :--- | :--- | :--- |
-| `project_dir` | (位置引数) | `Path` | 【任意】 解析対象とするPythonプロジェクトのルートディレクトリ。省略時はカレントディレクトリ（`.`）が指定されます。 |
+| `project_dir` | (位置引数) | `Path` | 【任意】 解析対象とするプロジェクトのルートディレクトリ。省略時はカレントディレクトリ（`.`）が指定されます。 |
 | `output_dir` | (位置引数) | `Path` | 【任意】 スケルトン群やメタデータを出力するディレクトリ。省略した場合は、自動的に `[対象プロジェクト名]_ai_context` というフォルダ名で作成されます。 |
 | `--full-path` | `-f` | `str` | 【複数指定可】 スケルトン化（中身の省略）を行わず、**フルコードのまま完全に保持したい**ファイルやフォルダのパスを指定します。 |
 | `--keep-func` | `-k` | `str` | 【複数指定可】 内部ロジックを削除せず保持したい**特定の関数名やメソッド名**を指定します。カンマ区切りでの複数指定も可能です。 |
@@ -52,7 +52,7 @@ pyskel [解析対象プロジェクトのパス] [出力先パス] [オプショ
 | `--focus-deps` | - | なし | `--focus` で指定したファイルの直接依存ファイルも自動的に抽出対象に含めます。 |
 | `--only-nodes` | - | `str` | 【複数指定可】 指定したクラスや関数**のみ**を抽出し、それ以外のノードをASTから完全に削除（Prune）します（カンマ区切り）。 |
 | `--no-bundle` | - | なし | 単一統合バンドルファイル（`ai_context_bundle.*`）の書き出しをスキップします。 |
-| `--format` | - | `xml` \| `markdown` | 統合バンドルファイルの出力フォーマットを指定します（デフォルト: `xml`）。ブラウザAIへのコピペにはXMLが推奨されます。 |
+| `--format` | - | `xml` \| `markdown` | 統合バンドルファイルの出力フォーマットを指定します（デフォルト: `txt`）。ブラウザAIへのコピペにはXMLが推奨されます。 |
 | `--policy` | - | `Path` | バンドルファイルの冒頭に自動注入するカスタムポリシー（開発ルールなど）のファイルを指定します。省略時は自動探索されます。 |
 | `--force` | - | なし | タイムスタンプによるファイルの差分チェックを無視し、全ファイルを強制的に再解析・再処理します。 |
 | `--no-ui` | - | なし | UI/プレゼンテーション層のファイル（.tsx, .html等）を除外してロジック層のみを抽出します。 |
@@ -64,30 +64,30 @@ pyskel [解析対象プロジェクトのパス] [出力先パス] [オプショ
 
 ### 1. 最もシンプルな実行（出力先自動生成）
 ```bash
-py-skeletonizer ./my_project
+aiskel ./my_project
 ```
 * `./my_project_ai_context/` が自動生成され、その中の `ai_meta/` フォルダに統合バンドルや各種マップが集約されます。
 
 ### 2. 詳細なオプションを指定した高度な実行
 ```bash
-py-skeletonizer ./my_project ./ai_ready_context \
-  -f "src/core/crypto.py" \
+aiskel ./my_project ./ai_ready_context \
+  -f "src/core/crypto.ts" \
   -f "plugins/" \
-  -k "validate_token,AuthService.login" \
-  --format markdown \
+  -k "validateToken,AuthService.login" \
+  --format xml \
   --policy ./my_rules.md \
   --force
 ```
-* **解説**: `./my_project` を解析し `./ai_ready_context` に出力します。暗号化モジュールとプラグインフォルダはフルコードを維持し、`validate_token` 関数と `AuthService.login` メソッドの中身は削除せず保護します。また、Markdown形式でバンドルを出力し、独自の開発ルールファイルを注入して強制再生成を行います。
+* **解説**: `./my_project` を解析し `./ai_ready_context` に出力します。暗号化モジュールとプラグインフォルダはフルコードを維持し、`validateToken` 関数と `AuthService.login` メソッドの中身は削除せず保護します。また、XML形式でバンドルを出力し、独自の開発ルールファイルを注入して強制再生成を行います。
 
 ### 3. 特定の機能開発に絞ったフォーカスモード（極限のトークン節約）
 ```bash
-py-skeletonizer ./my_project ./ai_ready_context \
-  --focus "src/auth/login.py,src/auth/session.py" \
+aiskel ./my_project ./ai_ready_context \
+  --focus "src/auth/login.ts,src/auth/session.ts" \
   --focus-deps \
-  --only-nodes "AuthService,validate_token"
+  --only-nodes "AuthService,validateToken"
 ```
-* **解説**: 認証機能の改修に特化した抽出を行います。`login.py` と `session.py`、およびそれらが依存するファイルのみを対象とし、さらにASTレベルで `AuthService` クラスと `validate_token` 関数以外のノードを完全に削除（Prune）して、AIに渡すコンテキストを必要最低限に絞り込みます。
+* **解説**: 認証機能の改修に特化した抽出を行います。`login.ts` と `session.ts`、およびそれらが依存するファイルのみを対象とし、さらにASTレベルで `AuthService` クラスと `validateToken` 関数以外のノードを完全に削除（Prune）して、AIに渡すコンテキストを必要最低限に絞り込みます。
 
 ---
 
@@ -102,31 +102,34 @@ ai_ready_context/
 │   ├── project_roles.txt        # 各モジュール・クラス・関数の責務集約レポート ✨
 │   ├── project_dependencies.txt # 影響範囲を特定するためのインポート依存関係グラフ 🔗
 │   ├── ai_architecture_bundle.txt # 変更対象の特定に特化した超軽量アーキテクチャ要約 🗺️
-│   └── ai_context_bundle.xml    # AIへのコピペに最適な全コード統合単一バンドル 📦
-└── src/                         # 元の構造を維持したまま、中身を省略（...）したPythonコード群
+│   └── ai_context_bundle.txt    # AIへのコピペに最適な全コード統合単一バンドル 📦
+└── src/                         # 元の構造を維持したまま、中身を省略（... または /* ... */）したコード群
 ```
 
 ### スケルトン化のビフォー・アフター
 
-#### 元のコード (`src/auth.py`)
-```python
-# Role: ユーザー認証とトークン制御を担うコアコンポーネント
+#### 元のコード (`src/auth.ts`)
+```typescript
+// Role: ユーザー認証とトークン制御を担うコアコンポーネント
 
-def login(username, password):
-    """ユーザーの認証チェックを行います"""
-    if not username or not password:
-        return False
-    # 複雑なDBクエリやハッシュ計算ロジック（数十行）
-    return True
+export function login(username, password) {
+    /** ユーザーの認証チェックを行います */
+    if (!username || !password) {
+        return false;
+    }
+    // 複雑なDBクエリやハッシュ計算ロジック（数十行）
+    return true;
+}
 ```
 
 #### スケルトン化された出力コード
-```python
-# Role: ユーザー認証とトークン制御を担うコアコンポーネント
+```typescript
+// Role: ユーザー認証とトークン制御を担うコアコンポーネント
 
-def login(username, password):
-    """ユーザーの認証チェックを行います"""
-    ...
+export function login(username, password) {
+    /** ユーザーの認証チェックを行います */
+    /* ... */
+}
 ```
 これにより、AIは「どのファイルがどんな役割を持ち、どんな関数が存在するか」という高度なコンテキストを最小限のトークン消費量で把握することができます。
 
@@ -149,7 +152,7 @@ AIが特定したファイルを対象に、実際のコードを抽出して実
 
 1. フェーズ1で特定されたファイルを `--focus` オプションに指定して再抽出します。
    ```bash
-   pyskel . ./ai_ready_context --focus "src/auth/login.py,src/core/utils.py" --focus-deps
+   aiskel . ./ai_ready_context --focus "src/auth/login.ts,src/core/utils.ts" --focus-deps
    ```
 2. 出力された該当ファイルの完全なコード（または抽出されたスケルトン）をAIに渡し、具体的なコードの記述を依頼します。
 3. **コマンドラインオプションのさらなる活用**:

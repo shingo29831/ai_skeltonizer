@@ -1,11 +1,12 @@
+# pyproject.toml
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "py-skeletonizer"
+name = "aiskel"
 version = "0.1.0"
-description = "AIコンテキスト向けのPythonコード最適化・スケルトン生成ツール"
+description = "AIコンテキスト向けの多言語コード最適化・スケルトン生成ツール"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -15,6 +16,10 @@ authors = [
 # コア依存モジュール (pip install -e . 実行時に自動インストールされます)
 dependencies = [
     "pathspec>=0.12.0",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript"
 ]
 
 [project.optional-dependencies]
@@ -25,9 +30,9 @@ dev = [
 ]
 
 [project.scripts]
-# コマンドラインから 'py-skeletonizer' または 'pyskel' として直接実行できるようにするエイリアス設定
-py-skeletonizer = "py_skeletonizer.cli:main"
-pyskel = "py_skeletonizer.cli:main"
+# コマンドラインから 'aiskel' または 'skelify' として直接実行できるようにするエイリアス設定
+aiskel = "aiskel.cli:main"
+skelify = "aiskel.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

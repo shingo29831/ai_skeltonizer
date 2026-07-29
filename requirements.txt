@@ -1,6 +1,13 @@
+# requirements.txt
 # --- コア依存ライブラリ (本番実行で必須) ---
 # Git仕様に準拠した.gitignoreルール(ワイルドカード、否定パターンなど)の解析に必要
 pathspec>=0.12.0
+
+# 多言語AST解析用パーサー
+tree-sitter>=0.22.0
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
 
 # --- 開発・テスト用ライブラリ (品質保証・静的解析用) ---
 # 振る舞いテストの実行
