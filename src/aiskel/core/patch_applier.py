@@ -1,7 +1,7 @@
 # src/aiskel/core/patch_applier.py
 import re
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 def _find_and_replace(content: str, search_lines: List[str], replace_lines: List[str]) -> Tuple[Optional[str], str]:
     """
@@ -113,15 +113,158 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
 
     return None, "検索テキストがファイル内に全く見つかりませんでした。"
 
-def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None) -> Tuple[int, int]:
+
+def _find_function_range(lines: List[str], func_name: str) -> Tuple[int, int]:
     """
-    パッチテキストを解析し、<<<< ==== >>>> ブロックに従ってファイルを書き換える。
-    戻り値: (成功した置換数, 失敗した置換数)
+    行リストから指定された関数名の定義範囲（開始行、終了行）を返す。
+    インデントレベルを解析して関数の終端を判定する。
+    """
+    pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:async\s+)?(?:def|function)\s+' + re.escape(func_name) + r'\s*\(')
+    
+    start_idx = -1
+    base_indent = 0
+    for i, line in enumerate(lines):
+        match = pattern.match(line)
+        if match:
+            start_idx = i
+            base_indent = len(match.group(1))
+            break
+            
+    if start_idx == -1:
+        return -1, -1
+        
+    end_idx = start_idx + 1
+    while end_idx < len(lines):
+        line = lines[end_idx]
+        if line.strip():
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= base_indent:
+                # JS/TSの閉じカッコ行は関数に含める
+                if line.strip().startswith('}'):
+                    end_idx += 1
+                break
+        end_idx += 1
+        
+    return start_idx, end_idx
+
+
+def _replace_functions_in_lines(target_lines: List[str], source_lines: List[str], file_path: Path, project_root: Path) -> Tuple[int, int, List[str]]:
+    """
+    source_lines 内の関数を抽出し、target_lines 内の同名関数を置換する。
+    """
+    success = 0
+    fail = 0
+    result_lines = list(target_lines)
+    
+    func_pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:async\s+)?(?:def|function)\s+([a-zA-Z0-9_]+)\s*\(')
+    
+    i = 0
+    while i < len(source_lines):
+        match = func_pattern.match(source_lines[i])
+        if match:
+            func_name = match.group(2)
+            s_start, s_end = _find_function_range(source_lines[i:], func_name)
+            if s_start != -1:
+                s_start += i
+                s_end += i
+                new_func_lines = source_lines[s_start:s_end]
+                
+                t_start, t_end = _find_function_range(result_lines, func_name)
+                if t_start != -1:
+                    result_lines = result_lines[:t_start] + new_func_lines + result_lines[t_end:]
+                    print(f"✅ 関数置換成功: {func_name} ({file_path.relative_to(project_root)})")
+                    success += 1
+                else:
+                    print(f"❌ 関数置換失敗: 対象ファイルに関数 '{func_name}' が見つかりません。")
+                    fail += 1
+                
+                i = s_end - 1
+        i += 1
+        
+    return success, fail, result_lines
+
+
+def _apply_function_replacement(patch_text: str, project_root: Path, target_file: Path | None) -> Tuple[int, int]:
+    """
+    パッチテキスト内の関数定義を抽出し、対象ファイルの同名関数を丸ごと置換するフォールバック処理。
     """
     success_count = 0
     fail_count = 0
+    
+    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
+    current_file = target_file
+    lines = patch_text.splitlines()
+    i = 0
+    
+    file_contents: Dict[Path, List[str]] = {}
+    
+    while i < len(lines):
+        line = lines[i]
+        
+        if target_file is None:
+            file_match = file_pattern.search(line)
+            if file_match:
+                rel_path = file_match.group(1)
+                resolved_path = (project_root / rel_path).resolve()
+                if resolved_path.exists():
+                    current_file = resolved_path
+                    if current_file not in file_contents:
+                        file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+        
+        # Markdownのコードブロックを検知
+        if line.strip().startswith("```"):
+            block_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                block_lines.append(lines[i])
+                i += 1
+                
+            if current_file and current_file.exists():
+                if current_file not in file_contents:
+                    file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+                    
+                s, f, new_lines = _replace_functions_in_lines(file_contents[current_file], block_lines, current_file, project_root)
+                success_count += s
+                fail_count += f
+                file_contents[current_file] = new_lines
+                
+        i += 1
 
-    # ファイルパスを抽出する正規表現 (例: "ファイルパス: src/main.py" または "File: src/main.py")
+    # コードブロックが一つも処理されなかった場合、テキスト全体を対象に試行
+    if success_count == 0 and fail_count == 0 and current_file and current_file.exists():
+        if current_file not in file_contents:
+            file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+        s, f, new_lines = _replace_functions_in_lines(file_contents[current_file], lines, current_file, project_root)
+        success_count += s
+        fail_count += f
+        file_contents[current_file] = new_lines
+
+    # 変更を保存
+    for path, content_lines in file_contents.items():
+        original_content = path.read_text(encoding="utf-8")
+        new_content = "\n".join(content_lines)
+        if original_content.endswith("\n") and not new_content.endswith("\n"):
+            new_content += "\n"
+        path.write_text(new_content, encoding="utf-8")
+        
+    return success_count, fail_count
+
+
+def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None) -> Tuple[int, int]:
+    """
+    パッチテキストを解析し、ファイルを書き換える。
+    置換ブロック(<<<<)がない場合は、関数単位の自動置換へフォールバックする。
+    戻り値: (成功した置換数, 失敗した置換数)
+    """
+    # 置換ブロックが存在しない場合は関数単位の置換へフォールバック
+    if "<<<<" not in patch_text or "====" not in patch_text or ">>>>" not in patch_text:
+        print("ℹ️ 置換ブロック(<<<<)が見つからないため、関数単位の自動置換を試みます...")
+        return _apply_function_replacement(patch_text, project_root, target_file)
+
+    success_count = 0
+    fail_count = 0
+
+    # ファイルパスを抽出する正規表現
     file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
     
     current_file: Path | None = target_file
