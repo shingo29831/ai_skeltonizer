@@ -18,19 +18,33 @@ def _get_clipboard_text() -> str:
     system = platform.system()
     try:
         if system == "Darwin":
-            return subprocess.check_output(["pbpaste"], text=True)
+            text = subprocess.check_output(["pbpaste"], encoding="utf-8")
         elif system == "Windows":
-            return subprocess.check_output(["powershell.exe", "-command", "Get-Clipboard"], text=True)
+            # -Raw を付与して空行の欠落を防ぎ、UTF-8エンコーディングを強制する
+            text = subprocess.check_output(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw"
+                ],
+                encoding="utf-8"
+            )
         elif system == "Linux":
             try:
-                return subprocess.check_output(["xclip", "-selection", "clipboard", "-o"], text=True)
+                text = subprocess.check_output(["xclip", "-selection", "clipboard", "-o"], encoding="utf-8")
             except FileNotFoundError:
-                return subprocess.check_output(["xsel", "--clipboard", "--output"], text=True)
+                text = subprocess.check_output(["xsel", "--clipboard", "--output"], encoding="utf-8")
         else:
-            raise NotImplementedError(f"OS {system} のクリップボード取得は未対応です。")
+            print(f"⚠️ OS {system} のクリップボード自動取得は未対応です。", file=sys.stderr)
+            return ""
+            
+        # パッチ適用を安定させるため、改行コードを \n に正規化
+        return text.replace("\r\n", "\n").replace("\r", "\n")
     except Exception as e:
-        print(f"クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"⚠️ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
+        # 強制終了せず空文字列を返し、標準入力からのペーストへフォールバックさせる
+        return ""
 
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
