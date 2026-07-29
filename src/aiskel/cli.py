@@ -42,8 +42,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
 
     # apply サブコマンドの定義
     apply_parser = subparsers.add_parser("apply", help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
-    apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時は標準入力から読み込みます)")
-    apply_parser.add_argument("-c", "--clipboard", action="store_true", help="クリップボードからAIの出力テキストを直接読み込みます")
+    apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
 
@@ -85,24 +84,23 @@ def main(args: Optional[List[str]] = None) -> int:
         if hasattr(parsed_args, "command") and parsed_args.command == "apply":
             project_root: Path = parsed_args.dir.resolve()
             
-            if parsed_args.clipboard:
-                print("🚀 クリップボードからAIの出力テキストを読み込みます...")
-                patch_text = _get_clipboard_text()
-                if not patch_text.strip():
-                    print("エラー: クリップボードが空です。", file=sys.stderr)
-                    return 1
-            elif parsed_args.patch_file:
+            if parsed_args.patch_file:
                 patch_file: Path = parsed_args.patch_file.resolve()
                 if not patch_file.exists():
                     print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
                     return 1
                 print(f"🚀 AIパッチの適用を開始します (ファイル: {patch_file.name})")
                 patch_text = patch_file.read_text(encoding="utf-8")
-            else:
-                print("🚀 AIの出力テキストをペーストしてください。")
-                print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+            elif not sys.stdin.isatty():
+                # パイプやリダイレクトからの標準入力
                 patch_text = sys.stdin.read()
-                print("\n適用を開始します...")
+            else:
+                # 引数なし、パイプなしの場合はデフォルトでクリップボードから読み込む
+                print("🚀 クリップボードからAIの出力テキストを読み込みます...")
+                patch_text = _get_clipboard_text()
+                if not patch_text.strip():
+                    print("エラー: クリップボードが空です。", file=sys.stderr)
+                    return 1
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
             success, fail = apply_patch(patch_text, project_root, target_file)
