@@ -43,6 +43,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     # apply サブコマンドの定義
     apply_parser = subparsers.add_parser("apply", help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
     apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
+    apply_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
 
@@ -91,16 +92,28 @@ def main(args: Optional[List[str]] = None) -> int:
                     return 1
                 print(f"🚀 AIパッチの適用を開始します (ファイル: {patch_file.name})")
                 patch_text = patch_file.read_text(encoding="utf-8")
+            elif parsed_args.paste:
+                print("🚀 AIの出力テキストをペーストしてください。")
+                print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+                patch_text = sys.stdin.read()
+                print("\n適用を開始します...")
             elif not sys.stdin.isatty():
                 # パイプやリダイレクトからの標準入力
                 patch_text = sys.stdin.read()
             else:
-                # 引数なし、パイプなしの場合はデフォルトでクリップボードから読み込む
-                print("🚀 クリップボードからAIの出力テキストを読み込みます...")
+                # デフォルト: クリップボードから読み込みを試みる
                 patch_text = _get_clipboard_text()
-                if not patch_text.strip():
-                    print("エラー: クリップボードが空です。", file=sys.stderr)
-                    return 1
+                if not patch_text or "<<<<" not in patch_text:
+                    if not patch_text:
+                        print("⚠️ クリップボードが空です。")
+                    else:
+                        print("⚠️ クリップボードに置換ブロック(<<<<)が見つかりません。")
+                    print("🚀 AIの出力テキストをペーストしてください。")
+                    print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+                    patch_text = sys.stdin.read()
+                    print("\n適用を開始します...")
+                else:
+                    print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
             success, fail = apply_patch(patch_text, project_root, target_file)

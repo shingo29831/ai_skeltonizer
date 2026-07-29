@@ -159,27 +159,39 @@ AIが特定したファイルを対象に、実際のコードを抽出して実
 AIから提案されたコードの修正（検索・置換ブロック）を、手動でコピペすることなくソースコードに自動適用するフェーズです。
 
 #### 1. クリップボードから直接適用（最速ワークフロー）
-AIの回答テキストをコピーした状態で、以下のコマンドを実行するだけでソースコードが自動で書き換わります。
-- **Mac / Linux**:
-  ```bash
-  pbpaste | aiskel apply
-  ```
-- **Windows (PowerShell)**:
-  ```powershell
-  Get-Clipboard | aiskel apply
-  ```
+AIの回答テキストをコピーした状態で、以下のコマンドを実行するだけで**自動的にクリップボードの内容を読み込み**、ソースコードが書き換わります。
 
-#### 2. ターミナルにペーストして適用
-コマンドを実行してから、手動でペーストすることも可能です。
 ```bash
 aiskel apply
 ```
-実行後、AIの回答をペーストし、**Windowsなら `Ctrl+Z` ➔ `Enter`**、**Mac/Linuxなら `Ctrl+D`** を押すと適用が開始されます。
+※ OS標準のクリップボード機能を利用して直接読み込むため、面倒なパイプ処理や手動ペースト操作は一切不要です。
 
-#### 3. 対象ファイルを強制指定する
+#### 2. 対象ファイルを強制指定する
 AIがファイルパスを出力し忘れた場合や、パスが間違っている場合は `-t` (または `--target`) オプションで対象ファイルを強制指定できます。
+
 ```bash
-pbpaste | aiskel apply -t src/core/utils.ts
+aiskel apply -t src/core/utils.ts
 ```
+
+#### 3. パイプやファイルからの読み込み
+CI/CD環境や、保存したテキストファイルから適用することも可能です。
+
+```bash
+# ファイルを指定して適用
+aiskel apply patch.txt
+
+# パイプからの入力を適用
+cat patch.txt | aiskel apply
+```
+
+---
+
+## 💡 Tips: AI Studio等でのプロンプトキャッシュ活用（コスト削減）
+Google AI Studio や Anthropic Console 等で**プロンプトキャッシュ機能**を利用する場合、以下のファイルを `System Instructions` (システムプロンプト) に固定配置することを強く推奨します。
+
+- `ai_meta/phase1_architecture_bundle.txt` (全体構造)
+- `ai_meta/phase2_static_skeleton.txt` (型定義・インターフェース)
+
+これらをシステムプロンプトとしてキャッシュさせることで、毎回のチャット送信時の**入力トークン課金を大幅に削減**しつつ、AIが常にプロジェクト全体の正確な仕様を把握した状態で回答できるようになります。
 
 ※ AI Studio等でプロンプトキャッシュを利用する場合は、`phase1_architecture_bundle.txt` や `phase2_static_skeleton.txt`（型定義等）を System Instructions に固定配置することで、長期的な入力トークン課金を大幅に削減できます。
