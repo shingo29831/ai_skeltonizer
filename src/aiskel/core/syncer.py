@@ -59,17 +59,31 @@ class ProjectSyncer:
         return deleted_count
 
     def _read_text_safely(self, file_path: Path) -> Optional[str]:
-        for enc in ("utf-8-sig", "utf-8", "cp932", "euc_jp"):
+        # 試行するエンコーディングのリスト。より厳密なものから順に試す。
+        encodings_to_try = ["utf-8-sig", "utf-8", "cp932", "euc_jp", "shift_jis", "iso-2022-jp"]
+        
+        for enc in encodings_to_try:
             try:
                 with open(file_path, "r", encoding=enc) as f:
-                    return f.read().lstrip("\ufeff")
+                    content = f.read()
+                    # BOMを除去 (utf-8-sig で読み込んだ場合は不要だが、念のため)
+                    if content.startswith("\ufeff"):
+                        content = content[1:]
+                    return content
             except (UnicodeDecodeError, OSError):
+                # デコード失敗またはファイルアクセスエラーの場合は次のエンコーディングを試す
                 continue
         
+        # 上記いずれのエンコーディングでも読み込めない場合、
+        # 不正なバイトは '?' に置換して強制的にUTF-8として読み込む。
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read().lstrip("\ufeff")
+                content = f.read()
+                if content.startswith("\ufeff"):
+                    content = content[1:]
+                return content
         except OSError:
+            # ファイルアクセス自体に失敗した場合は None を返す
             return None
 
     def _read_and_analyze_only(self, src_file: Path, rel_path: str) -> str:
@@ -83,7 +97,10 @@ class ProjectSyncer:
                 self.all_role_entries.extend(roles)
                 self.all_dependency_entries.append(dep)
             return content
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[警告] ファイルの事前解析中にエラーが発生しました (スキップします): {src_file}")
+            print(f"エラー詳細: {type(e).__name__}: {e}")
             return ""
 
     def sync_files(self, target_files: List[Path], tree_text: str, force_rebuild: bool = False) -> Tuple[int, int, Optional[Path]]:
@@ -149,7 +166,16 @@ class ProjectSyncer:
                 shutil.copystat(src_file, dest_file)
                 updated_count += 1
             except Exception as e:
-                raise RuntimeError(f"ファイル処理中にエラーが発生しました: {src_file} ({e})")
+                import traceback
+                error_details = traceback.format_exc()
+                raise RuntimeError(
+                    f"ファイル処理中に致命的なエラーが発生しました。\n"
+                    f"対象ファイル: {src_file}\n"
+                    f"エラー種別: {type(e).__name__}\n"
+                    f"エラーメッセージ: {str(e)}\n"
+                    f"--- スタックトレース ---\n{error_details}\n"
+                    f"------------------------"
+                ) from e
 
         self.meta_dir.mkdir(parents=True, exist_ok=True)
 
