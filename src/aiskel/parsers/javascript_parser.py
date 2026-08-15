@@ -16,7 +16,7 @@ class JavascriptParser(BaseParser):
         self.parser = Parser(self.language)
 
     def _get_node_text(self, node, source_bytes: bytes) -> str:
-        return source_bytes[node.start_byte:node.end_byte].decode('utf-8')
+        return source_bytes[node.start_byte:node.end_byte].decode('utf-8', errors='replace')
 
     def _get_leading_comments(self, node, source_bytes: bytes) -> str:
         prev = node.prev_sibling
@@ -77,7 +77,8 @@ class JavascriptParser(BaseParser):
                 if full_name not in keep_functions and name not in keep_functions:
                     body_node = node.child_by_field_name('body')
                     if body_node and body_node.type == 'statement_block':
-                        replacements.append((body_node.start_byte + 1, body_node.end_byte - 1, "\n  /* ... */\n"))
+                        # +1, -1によるマルチバイト文字の分断を防ぐため、ブロック全体を置換する
+                        replacements.append((body_node.start_byte, body_node.end_byte, "{ /* ... */ }"))
 
             for child in node.children:
                 traverse(child, current_class)
@@ -87,4 +88,4 @@ class JavascriptParser(BaseParser):
         for start, end, text in sorted(replacements, key=lambda x: x[0], reverse=True):
             source_bytes = source_bytes[:start] + text.encode('utf-8') + source_bytes[end:]
 
-        return source_bytes.decode('utf-8'), roles, DependencyEntry(file_path=rel_file_path, imported_modules=sorted(list(deps)))
+        return source_bytes.decode('utf-8', errors='replace'), roles, DependencyEntry(file_path=rel_file_path, imported_modules=sorted(list(deps)))
