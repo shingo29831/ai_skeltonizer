@@ -59,13 +59,18 @@ class ProjectSyncer:
         return deleted_count
 
     def _read_text_safely(self, file_path: Path) -> Optional[str]:
-        for enc in ("utf-8-sig", "cp932", "utf-8"):
+        for enc in ("utf-8-sig", "utf-8", "cp932", "euc_jp"):
             try:
                 with open(file_path, "r", encoding=enc) as f:
                     return f.read().lstrip("\ufeff")
             except (UnicodeDecodeError, OSError):
                 continue
-        return None
+        
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read().lstrip("\ufeff")
+        except OSError:
+            return None
 
     def _read_and_analyze_only(self, src_file: Path, rel_path: str) -> str:
         content = self._read_text_safely(src_file)
