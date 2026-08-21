@@ -41,3 +41,6 @@ Thumbs.db
 *_ai_context/
 ai_context_output/
 ai_context_bundle.*
+
+# aiskel output directory
+ai_meta/

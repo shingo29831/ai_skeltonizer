@@ -93,6 +93,7 @@ def _resolve_output_dir(project_root: Path, custom_output_dir: Optional[Path]) -
     return project_root / "ai_meta"
 
 def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
+    """出力ディレクトリが生成される前に .gitignore に追記する"""
     try:
         try:
             rel_path = output_dir.relative_to(project_root).as_posix()
@@ -189,6 +190,7 @@ def main(args: Optional[List[str]] = None) -> int:
             print("エラー: ソースディレクトリと出力先ディレクトリに同じパスは指定できません。", file=sys.stderr)
             return 1
 
+        # ディレクトリが生成される前に .gitignore を更新
         _ensure_gitignore_updated(project_root, output_dir)
 
         resolved_full_paths = {
