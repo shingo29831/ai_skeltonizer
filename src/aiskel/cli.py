@@ -90,7 +90,7 @@ def _process_comma_separated_args(arg_list: List[str]) -> Set[str]:
 def _resolve_output_dir(project_root: Path, custom_output_dir: Optional[Path]) -> Path:
     if custom_output_dir is not None:
         return custom_output_dir.resolve()
-    return project_root.with_name(f"{project_root.name}_ai_context")
+    return project_root / "ai_meta"
 
 def main(args: Optional[List[str]] = None) -> int:
     try:
@@ -209,32 +209,16 @@ def main(args: Optional[List[str]] = None) -> int:
         print(f"  - 変更なし(スキップ)   : {skipped_count} 件")
         if deleted_count > 0:
             print(f"  - 削除した古いファイル: {deleted_count} 件")
-        print("\n--- 辞書・マニュアル出力 (ai_meta/ フォルダ内に隔離集約) ---")
-        if bundle_path:
-            arch_path = bundle_path.parent / "phase1_architecture_bundle.txt"
-            if arch_path.exists():
-                print(f"  - [フェーズ1用] アーキテクチャ要約 : ai_meta/{arch_path.name} (変更対象ファイルの特定用)")
-            print(f"  - [フェーズ2用] 統合コンテキスト   : ai_meta/{bundle_path.name} (実際の実装・修正依頼用)")
-            static_path = bundle_path.parent / "phase2_static_skeleton.txt"
-            if static_path.exists():
-                print(f"  - [フェーズ2用] 静的スケルトン     : ai_meta/{static_path.name} (型定義などの固定配置用)")
+        print("\n--- 辞書・マニュアル出力 ---")
+        if bundle_path and bundle_path.exists():
+            print(f"  - アーキテクチャ要約 : {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
+            
         print("\n--- トークン・予算削減アナライザー ---")
         print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
-        if bundle_path:
-            arch_path = bundle_path.parent / "phase1_architecture_bundle.txt"
-            if arch_path.exists():
-                arch_tokens = estimate_tokens(arch_path.read_text(encoding="utf-8"))
-                arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
-                print(f"  - [フェーズ1] アーキテクチャ要約 : 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
-            
-            ctx_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
-            ctx_red = (1.0 - (ctx_tokens / max(stats.raw_tokens, 1))) * 100
-            print(f"  - [フェーズ2] 統合コンテキスト   : 約 {ctx_tokens:,} tokens ({ctx_red:.1f}% 削減)")
-            
-            static_path = bundle_path.parent / "phase2_static_skeleton.txt"
-            if static_path.exists():
-                static_tokens = estimate_tokens(static_path.read_text(encoding="utf-8"))
-                print(f"  - [フェーズ2] 静的スケルトン     : 約 {static_tokens:,} tokens")
+        if bundle_path and bundle_path.exists():
+            arch_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
+            arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
+            print(f"  - アーキテクチャ要約 : 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
         else:
             print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
         return 0

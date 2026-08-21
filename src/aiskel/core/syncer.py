@@ -18,7 +18,7 @@ class ProjectSyncer:
         self.all_dependency_entries: List[DependencyEntry] = []
         self.file_contents_map: Dict[str, str] = {}
         self.token_stats = TokenStats()
-        self.meta_dir = output_dir / "ai_meta"
+        self.meta_dir = output_dir
 
     def _is_outdated(self, src_file: Path, dest_file: Path) -> bool:
         if not dest_file.exists():
@@ -31,9 +31,7 @@ class ProjectSyncer:
 
         valid_dest_files = {self.output_dir / f.relative_to(self.project_root) for f in current_target_files}
         valid_dest_files.update({
-            self.meta_dir / "phase1_architecture_bundle.txt",
-            self.meta_dir / "phase2_context_bundle.txt",
-            self.meta_dir / "phase2_static_skeleton.txt"
+            self.meta_dir / "phase1_architecture_bundle.txt"
         })
 
         deleted_count = 0
@@ -51,7 +49,7 @@ class ProjectSyncer:
             for d in dirs:
                 dir_path = Path(root) / d
                 try:
-                    if dir_path != self.meta_dir and not any(dir_path.iterdir()):
+                    if not any(dir_path.iterdir()):
                         dir_path.rmdir()
                 except OSError:
                     pass
