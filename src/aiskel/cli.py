@@ -92,6 +92,36 @@ def _resolve_output_dir(project_root: Path, custom_output_dir: Optional[Path]) -
         return custom_output_dir.resolve()
     return project_root / "ai_meta"
 
+def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
+    try:
+        try:
+            rel_path = output_dir.relative_to(project_root).as_posix()
+        except ValueError:
+            # 出力先がプロジェクトルート外の場合は何もしない
+            return
+            
+        if rel_path == ".":
+            return
+            
+        gitignore_path = project_root / ".gitignore"
+        ignore_entry = f"{rel_path}/"
+        
+        if gitignore_path.exists():
+            content = gitignore_path.read_text(encoding="utf-8")
+            lines = [line.strip() for line in content.splitlines()]
+            if rel_path in lines or ignore_entry in lines:
+                return
+            
+            with gitignore_path.open("a", encoding="utf-8") as f:
+                if content and not content.endswith("\n"):
+                    f.write("\n")
+                f.write(f"\n# aiskel output directory\n{ignore_entry}\n")
+        else:
+            gitignore_path.write_text(f"# aiskel output directory\n{ignore_entry}\n", encoding="utf-8")
+            
+    except Exception as e:
+        print(f"⚠️ .gitignore の更新に失敗しました: {e}", file=sys.stderr)
+
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
@@ -158,6 +188,8 @@ def main(args: Optional[List[str]] = None) -> int:
         if project_root == output_dir:
             print("エラー: ソースディレクトリと出力先ディレクトリに同じパスは指定できません。", file=sys.stderr)
             return 1
+
+        _ensure_gitignore_updated(project_root, output_dir)
 
         resolved_full_paths = {
             (project_root / Path(p)).resolve() if not Path(p).is_absolute() else Path(p).resolve()
