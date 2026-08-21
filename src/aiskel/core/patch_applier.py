@@ -3,13 +3,13 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
-def _find_and_replace(content: str, search_lines: List[str], replace_lines: List[str]) -> Tuple[Optional[str], str]:
+def _find_and_replace(content: str, search_lines: List[str], replace_lines: List[str], force_replace: bool = False) -> Tuple[Optional[str], str, bool]:
     """
     完全一致、または柔軟なマッチングで置換を行う
-    戻り値: (置換後の文字列, エラーメッセージ)
+    戻り値: (置換後の文字列, エラーメッセージ, 置換済みフラグ)
     """
     if not search_lines:
-        return None, "検索ブロックが空です。"
+        return None, "検索ブロックが空です。", False
 
     # 検索ブロックの前後の空行を取り除く
     s_start = 0
@@ -20,7 +20,7 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
         s_end -= 1
         
     if s_start >= s_end:
-        return None, "検索ブロックに有効なテキストが含まれていません。"
+        return None, "検索ブロックに有効なテキストが含まれていません。", False
         
     core_search = search_lines[s_start:s_end]
     
@@ -29,8 +29,12 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
     search_text = "\n".join(core_search)
     replace_text = "\n".join(replace_lines)
     
+    # 置換済み判定
+    if not force_replace and replace_text.strip() and replace_text in content_normalized:
+        return content_normalized, "", True
+
     if search_text in content_normalized:
-        return content_normalized.replace(search_text, replace_text), ""
+        return content_normalized.replace(search_text, replace_text), "", False
 
     # 2. 行単位の柔軟なマッチング (インデント無視)
     content_lines = content_normalized.splitlines()
@@ -48,7 +52,7 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
             result = "\n".join(new_lines)
             if content.endswith("\n") and not result.endswith("\n"):
                 result += "\n"
-            return result, ""
+            return result, "", False
 
     # 3. 途中の空行も完全に無視したマッチング
     non_empty_content = [(idx, line.strip()) for idx, line in enumerate(content_lines) if line.strip()]
@@ -69,7 +73,7 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
                 result = "\n".join(new_lines)
                 if content.endswith("\n") and not result.endswith("\n"):
                     result += "\n"
-                return result, ""
+                return result, "", False
 
     # 4. 最初と最後の行によるブロックマッチング (究極のフォールバック)
     if ne_search_len >= 2:
@@ -87,11 +91,11 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
                 result = "\n".join(new_lines)
                 if content.endswith("\n") and not result.endswith("\n"):
                     result += "\n"
-                return result, ""
+                return result, "", False
         elif len(first_matches) == 0:
-            return None, f"検索ブロックの最初の行が見つかりません: '{first_line}'"
+            return None, f"検索ブロックの最初の行が見つかりません: '{first_line}'", False
         elif len(last_matches) == 0:
-            return None, f"検索ブロックの最後の行が見つかりません: '{last_line}'"
+            return None, f"検索ブロックの最後の行が見つかりません: '{last_line}'", False
 
     # どこまで一致したかを調べる（デバッグ用）
     best_match_count = 0
@@ -109,9 +113,9 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
                 best_match_line = non_empty_search[match_count]
 
     if best_match_count > 0:
-        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります:\n    '{best_match_line}'"
+        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります:\n    '{best_match_line}'", False
 
-    return None, "検索テキストがファイル内に全く見つかりませんでした。"
+    return None, "検索テキストがファイル内に全く見つかりませんでした。", False
 
 
 def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tuple[int, int]:
@@ -193,12 +197,13 @@ def _replace_blocks_in_lines(target_lines: List[str], source_lines: List[str], f
     return success, fail, result_lines
 
 
-def _apply_block_replacement(patch_text: str, project_root: Path, target_file: Path | None) -> Tuple[int, int]:
+def _apply_block_replacement(patch_text: str, project_root: Path, target_file: Path | None) -> Tuple[int, int, int]:
     """
     パッチテキスト内の関数・クラス定義を抽出し、対象ファイルの同名ブロックを丸ごと置換するフォールバック処理。
     """
     success_count = 0
     fail_count = 0
+    skipped_count = 0
     
     file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
     current_file = target_file
@@ -256,14 +261,14 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
             new_content += "\n"
         path.write_text(new_content, encoding="utf-8")
         
-    return success_count, fail_count
+    return success_count, fail_count, skipped_count
 
 
-def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None) -> Tuple[int, int]:
+def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None, force_replace: bool = False) -> Tuple[int, int, int]:
     """
     パッチテキストを解析し、ファイルを書き換える。
     置換ブロック(<<<<)がない場合は、関数・クラス単位の自動置換へフォールバックする。
-    戻り値: (成功した置換数, 失敗した置換数)
+    戻り値: (成功した置換数, 失敗した置換数, スキップした置換数)
     """
     # 置換ブロックが存在しない場合は関数・クラス単位の置換へフォールバック
     if "<<<<" not in patch_text or "====" not in patch_text or ">>>>" not in patch_text:
@@ -272,6 +277,7 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
 
     success_count = 0
     fail_count = 0
+    skipped_count = 0
 
     # ファイルパスを抽出する正規表現
     file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
@@ -319,9 +325,12 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
 
             if current_file.exists():
                 content = current_file.read_text(encoding="utf-8")
-                new_content, error_msg = _find_and_replace(content, search_lines, replace_lines)
+                new_content, error_msg, is_skipped = _find_and_replace(content, search_lines, replace_lines, force_replace)
                 
-                if new_content is not None:
+                if is_skipped:
+                    print(f"⏭️ 置換スキップ(適用済み): {current_file.relative_to(project_root)}")
+                    skipped_count += 1
+                elif new_content is not None:
                     current_file.write_text(new_content, encoding="utf-8")
                     print(f"✅ 適用成功: {current_file.relative_to(project_root)}")
                     success_count += 1
@@ -335,4 +344,4 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                 
         i += 1
 
-    return success_count, fail_count
+    return success_count, fail_count, skipped_count

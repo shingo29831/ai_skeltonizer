@@ -60,6 +60,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
+    apply_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
 
     # 従来の抽出コマンド用の引数 (サブコマンドなしの場合)
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクト・ルートディレクトリのパス")
@@ -130,10 +131,17 @@ def main(args: Optional[List[str]] = None) -> int:
                     print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
-            success, fail = apply_patch(patch_text, project_root, target_file)
+            success, fail, skipped = apply_patch(
+                patch_text, 
+                project_root, 
+                target_file,
+                force_replace=getattr(parsed_args, "force_replace", False)
+            )
             
             print("\n=== 適用結果 ===")
             print(f"✅ 成功: {success} 箇所")
+            if skipped > 0:
+                print(f"⏭️ スキップ(適用済み): {skipped} 箇所")
             if fail > 0:
                 print(f"❌ 失敗: {fail} 箇所")
             return 0 if fail == 0 else 1
