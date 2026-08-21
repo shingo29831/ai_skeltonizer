@@ -215,15 +215,17 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     while i < len(lines):
         line = lines[i]
         
-        if target_file is None:
-            file_match = file_pattern.search(line)
-            if file_match:
-                rel_path = file_match.group(1)
-                resolved_path = (project_root / rel_path).resolve()
-                if resolved_path.exists():
-                    current_file = resolved_path
-                    if current_file not in file_contents:
-                        file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+        # テキスト内にファイルパス指定があれば、常にそれを優先して対象ファイルを更新する
+        file_match = file_pattern.search(line)
+        if file_match:
+            rel_path = file_match.group(1)
+            resolved_path = (project_root / rel_path).resolve()
+            current_file = resolved_path
+            if current_file not in file_contents:
+                if current_file.exists():
+                    file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+                else:
+                    file_contents[current_file] = []
         
         # Markdownのコードブロックを検知
         if line.strip().startswith("```"):
@@ -233,31 +235,48 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
                 block_lines.append(lines[i])
                 i += 1
                 
-            if current_file and current_file.exists():
+            if current_file:
                 if current_file not in file_contents:
-                    file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+                    if current_file.exists():
+                        file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+                    else:
+                        file_contents[current_file] = []
                     
-                s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
-                success_count += s
-                fail_count += f
-                file_contents[current_file] = new_lines
+                if not current_file.exists() and not file_contents[current_file]:
+                    file_contents[current_file].extend(block_lines)
+                    success_count += 1
+                    print(f"✨ 新規作成(ブロック追加): {current_file.relative_to(project_root)}")
+                else:
+                    s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
+                    success_count += s
+                    fail_count += f
+                    file_contents[current_file] = new_lines
                 
         i += 1
 
     # コードブロックが一つも処理されなかった場合、テキスト全体を対象に試行
-    if success_count == 0 and fail_count == 0 and current_file and current_file.exists():
+    if success_count == 0 and fail_count == 0 and current_file:
         if current_file not in file_contents:
-            file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
-        s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], lines, current_file, project_root)
-        success_count += s
-        fail_count += f
-        file_contents[current_file] = new_lines
+            if current_file.exists():
+                file_contents[current_file] = current_file.read_text(encoding="utf-8").splitlines()
+            else:
+                file_contents[current_file] = []
+                
+        if not current_file.exists() and not file_contents[current_file]:
+            file_contents[current_file] = lines
+            success_count += 1
+            print(f"✨ 新規作成(全体追加): {current_file.relative_to(project_root)}")
+        else:
+            s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], lines, current_file, project_root)
+            success_count += s
+            fail_count += f
+            file_contents[current_file] = new_lines
 
     # 変更を保存
     for path, content_lines in file_contents.items():
-        original_content = path.read_text(encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
         new_content = "\n".join(content_lines)
-        if original_content.endswith("\n") and not new_content.endswith("\n"):
+        if new_content and not new_content.endswith("\n"):
             new_content += "\n"
         path.write_text(new_content, encoding="utf-8")
         
@@ -289,14 +308,13 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
     while i < len(lines):
         line = lines[i]
         
-        # ターゲットが明示指定されていない場合のみ、テキストからファイルパスを探す
-        if target_file is None:
-            file_match = file_pattern.search(line)
-            if file_match:
-                rel_path = file_match.group(1)
-                current_file = (project_root / rel_path).resolve()
-                i += 1
-                continue
+        # ターゲット指定の有無に関わらず、テキスト内のファイルパス指定を優先する
+        file_match = file_pattern.search(line)
+        if file_match:
+            rel_path = file_match.group(1)
+            current_file = (project_root / rel_path).resolve()
+            i += 1
+            continue
 
         # 置換ブロックの開始を検知
         if line.strip() == "<<<<":
@@ -339,8 +357,18 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                     print(f"  -> {error_msg}")
                     fail_count += 1
             else:
-                print(f"❌ 適用失敗: ファイルが存在しません -> {current_file}")
-                fail_count += 1
+                try:
+                    current_file.parent.mkdir(parents=True, exist_ok=True)
+                    new_content = "\n".join(replace_lines)
+                    if new_content and not new_content.endswith("\n"):
+                        new_content += "\n"
+                    current_file.write_text(new_content, encoding="utf-8")
+                    print(f"✨ 新規作成成功: {current_file.relative_to(project_root)}")
+                    success_count += 1
+                except Exception as e:
+                    print(f"❌ 新規作成失敗: {current_file.relative_to(project_root)}")
+                    print(f"  -> {e}")
+                    fail_count += 1
                 
         i += 1
 
