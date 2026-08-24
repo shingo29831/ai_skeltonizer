@@ -100,7 +100,21 @@ def process_code_all_in_one(
 
         return skeleton_code, roles, dependency
     except SyntaxError as e:
-        raise ValueError(f"構文解析に失敗しました。無効なPythonコードです ({rel_file_path}): {e}")
+        error_msg = f"構文解析に失敗しました。無効なPythonコードです ({rel_file_path}): {e}\n"
+        if e.text is not None:
+            error_msg += f"エラー発生箇所: {repr(e.text)}\n"
+        
+        lines = source_code.splitlines(keepends=True)
+        if e.lineno is not None:
+            start = max(0, e.lineno - 3)
+            end = min(len(lines), e.lineno + 2)
+            error_msg += "--- 周辺のコード ---\n"
+            for i in range(start, end):
+                prefix = ">> " if i + 1 == e.lineno else "   "
+                error_msg += f"{prefix}{i + 1}: {repr(lines[i])}\n"
+            error_msg += "--------------------\n"
+            
+        raise ValueError(error_msg)
 
 
 def generate_skeleton_code(source_code: str, keep_functions: Optional[Set[str]] = None) -> str:
