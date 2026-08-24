@@ -205,7 +205,8 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     fail_count = 0
     skipped_count = 0
     
-    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
+    # Windowsのドライブレター(C:)等に対応するためコロン(:)とバックスラッシュ(\)を許可
+    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-:\\]+)`?', re.IGNORECASE)
     current_file = target_file
     lines = patch_text.splitlines()
     i = 0
@@ -218,8 +219,12 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
         # テキスト内にファイルパス指定があれば、常にそれを優先して対象ファイルを更新する
         file_match = file_pattern.search(line)
         if file_match:
-            rel_path = file_match.group(1)
-            resolved_path = (project_root / rel_path).resolve()
+            raw_path_str = file_match.group(1)
+            raw_path = Path(raw_path_str)
+            if raw_path.is_absolute():
+                resolved_path = raw_path.resolve()
+            else:
+                resolved_path = (project_root / raw_path).resolve()
             current_file = resolved_path
             if current_file not in file_contents:
                 if current_file.exists():
@@ -245,7 +250,11 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
                 if not current_file.exists() and not file_contents[current_file]:
                     file_contents[current_file].extend(block_lines)
                     success_count += 1
-                    print(f"✨ 新規作成(ブロック追加): {current_file.relative_to(project_root)}")
+                    try:
+                        disp_path = current_file.relative_to(project_root)
+                    except ValueError:
+                        disp_path = current_file
+                    print(f"✨ 新規作成(ブロック追加): {disp_path}")
                 else:
                     s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
                     success_count += s
@@ -265,7 +274,11 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
         if not current_file.exists() and not file_contents[current_file]:
             file_contents[current_file] = lines
             success_count += 1
-            print(f"✨ 新規作成(全体追加): {current_file.relative_to(project_root)}")
+            try:
+                disp_path = current_file.relative_to(project_root)
+            except ValueError:
+                disp_path = current_file
+            print(f"✨ 新規作成(全体追加): {disp_path}")
         else:
             s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], lines, current_file, project_root)
             success_count += s
@@ -298,8 +311,8 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
     fail_count = 0
     skipped_count = 0
 
-    # ファイルパスを抽出する正規表現
-    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-]+)`?', re.IGNORECASE)
+    # Windowsのドライブレター(C:)等に対応するためコロン(:)とバックスラッシュ(\)を許可
+    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-:\\]+)`?', re.IGNORECASE)
     
     current_file: Path | None = target_file
     lines = patch_text.splitlines()
@@ -311,8 +324,12 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
         # ターゲット指定の有無に関わらず、テキスト内のファイルパス指定を優先する
         file_match = file_pattern.search(line)
         if file_match:
-            rel_path = file_match.group(1)
-            current_file = (project_root / rel_path).resolve()
+            raw_path_str = file_match.group(1)
+            raw_path = Path(raw_path_str)
+            if raw_path.is_absolute():
+                current_file = raw_path.resolve()
+            else:
+                current_file = (project_root / raw_path).resolve()
             i += 1
             continue
 
@@ -345,28 +362,38 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                 content = current_file.read_text(encoding="utf-8")
                 new_content, error_msg, is_skipped = _find_and_replace(content, search_lines, replace_lines, force_replace)
                 
+                try:
+                    disp_path = current_file.relative_to(project_root)
+                except ValueError:
+                    disp_path = current_file
+                    
                 if is_skipped:
-                    print(f"⏭️ 置換スキップ(適用済み): {current_file.relative_to(project_root)}")
+                    print(f"⏭️ 置換スキップ(適用済み): {disp_path}")
                     skipped_count += 1
                 elif new_content is not None:
                     current_file.write_text(new_content, encoding="utf-8")
-                    print(f"✅ 適用成功: {current_file.relative_to(project_root)}")
+                    print(f"✅ 適用成功: {disp_path}")
                     success_count += 1
                 else:
-                    print(f"❌ 適用失敗: {current_file.relative_to(project_root)}")
+                    print(f"❌ 適用失敗: {disp_path}")
                     print(f"  -> {error_msg}")
                     fail_count += 1
             else:
+                try:
+                    disp_path = current_file.relative_to(project_root)
+                except ValueError:
+                    disp_path = current_file
+                    
                 try:
                     current_file.parent.mkdir(parents=True, exist_ok=True)
                     new_content = "\n".join(replace_lines)
                     if new_content and not new_content.endswith("\n"):
                         new_content += "\n"
                     current_file.write_text(new_content, encoding="utf-8")
-                    print(f"✨ 新規作成成功: {current_file.relative_to(project_root)}")
+                    print(f"✨ 新規作成成功: {disp_path}")
                     success_count += 1
                 except Exception as e:
-                    print(f"❌ 新規作成失敗: {current_file.relative_to(project_root)}")
+                    print(f"❌ 新規作成失敗: {disp_path}")
                     print(f"  -> {e}")
                     fail_count += 1
                 
