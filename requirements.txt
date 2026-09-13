@@ -8,6 +8,8 @@ tree-sitter>=0.22.0
 tree-sitter-python
 tree-sitter-javascript
 tree-sitter-typescript
+tree-sitter-c
+tree-sitter-cpp
 
 # --- 開発・テスト用ライブラリ (品質保証・静的解析用) ---
 # 振る舞いテストの実行

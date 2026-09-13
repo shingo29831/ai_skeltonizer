@@ -19,7 +19,9 @@ dependencies = [
     "tree-sitter>=0.22.0",
     "tree-sitter-python",
     "tree-sitter-javascript",
-    "tree-sitter-typescript"
+    "tree-sitter-typescript",
+    "tree-sitter-c",
+    "tree-sitter-cpp"
 ]
 
 [project.optional-dependencies]
