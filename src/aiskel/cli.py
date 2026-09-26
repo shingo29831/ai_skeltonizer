@@ -3,8 +3,9 @@ import argparse
 import sys
 import subprocess
 import platform
+import re
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from .config import SkeletonConfig
 from .core.scanner import get_target_files, generate_tree_text
@@ -13,6 +14,24 @@ from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
 from .core.token_counter import format_token_display, estimate_tokens
 from .core.patch_applier import apply_patch
+
+def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
+    """
+    パッチテキストから <commit> タグで囲まれたメッセージを抽出し、
+    タグ部分を完全に除去したクリーンなパッチテキストと共に返す。
+    """
+    pattern = re.compile(r'<commit>\s*(.*?)\s*</commit>', re.DOTALL | re.IGNORECASE)
+    match = pattern.search(patch_text)
+    if match:
+        msg = match.group(1).strip()
+        # Markdownのコードブロック記法が含まれていた場合は除去
+        msg = re.sub(r'^`{1,5}[a-zA-Z]*\s*', '', msg)
+        msg = re.sub(r'\s*`{1,5}$', '', msg).strip()
+        
+        # パッチテキストから <commit> ブロックを完全に除去する
+        clean_patch_text = pattern.sub('', patch_text)
+        return (msg if msg else None), clean_patch_text
+    return None, patch_text
 
 def _get_clipboard_text() -> str:
     system = platform.system()
@@ -175,7 +194,22 @@ def main(args: Optional[List[str]] = None) -> int:
                     print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
-            success, fail, skipped = apply_patch(
+            
+            commit_msg, patch_text = _extract_commit_message(patch_text)
+            
+            if is_revert and commit_msg:
+                try:
+                    last_commit_msg = subprocess.check_output(["git", "log", "-1", "--pretty=%B"], cwd=project_root, encoding="utf-8", stderr=subprocess.DEVNULL).strip()
+                    if last_commit_msg.splitlines()[0].strip() == commit_msg.splitlines()[0].strip():
+                        print(f"\n📦 直前のコミットが対象パッチのコミットと一致しました: {commit_msg}")
+                        print("コミットを破棄(git reset --hard HEAD~1)して元に戻します...")
+                        subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=project_root, check=True)
+                        print("✅ コミットの破棄が完了しました。")
+                        return 0
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    pass
+
+            success, fail, skipped, modified_files = apply_patch(
                 patch_text, 
                 project_root, 
                 target_file,
@@ -190,6 +224,18 @@ def main(args: Optional[List[str]] = None) -> int:
                 print(f"⏭️ スキップ(適用済み): {skipped} 箇所")
             if fail > 0:
                 print(f"❌ 失敗: {fail} 箇所")
+
+            if not is_revert and commit_msg and success > 0 and fail == 0:
+                print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
+                print("自動コミットを実行します...")
+                try:
+                    for f in modified_files:
+                        subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
+                    subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
+                    print("✅ 自動コミットが完了しました。")
+                except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                    print(f"⚠️ 自動コミットに失敗しました: {e}")
+
             return 0 if fail == 0 else 1
 
         # 従来の抽出処理
