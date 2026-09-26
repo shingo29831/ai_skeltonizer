@@ -18,20 +18,18 @@ from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets
 
 def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
-    """
-    パッチテキストから <commit> タグで囲まれたメッセージを抽出し、
-    タグ部分を完全に除去したクリーンなパッチテキストと共に返す。
-    """
-    pattern = re.compile(r'<commit>\s*(.*?)\s*</commit>', re.DOTALL | re.IGNORECASE)
-    match = pattern.search(patch_text)
-    if match:
-        msg = match.group(1).strip()
-        # Markdownのコードブロック記法が含まれていた場合は除去
+    # ソースコード内の正規表現リテラルに誤マッチしないようタグ文字列を分割定義
+    tag_start = "<" + "commit>"
+    tag_end = "</" + "commit>"
+    pattern = re.compile(re.escape(tag_start) + r'\s*(.*?)\s*' + re.escape(tag_end), re.DOTALL | re.IGNORECASE)
+    
+    matches = list(pattern.finditer(patch_text))
+    if matches:
+        last_match = matches[-1]
+        msg = last_match.group(1).strip()
         msg = re.sub(r'^`{1,5}[a-zA-Z]*\s*', '', msg)
         msg = re.sub(r'\s*`{1,5}$', '', msg).strip()
-        
-        # パッチテキストから <commit> ブロックを完全に除去する
-        clean_patch_text = pattern.sub('', patch_text)
+        clean_patch_text = patch_text[:last_match.start()] + patch_text[last_match.end():]
         return (msg if msg else None), clean_patch_text
     return None, patch_text
 
@@ -41,7 +39,6 @@ def _get_clipboard_text() -> str:
         if system == "Darwin":
             text = subprocess.check_output(["pbpaste"], encoding="utf-8")
         elif system == "Windows":
-            # -Raw を付与して空行の欠落を防ぎ、UTF-8エンコーディングを強制する
             text = subprocess.check_output(
                 [
                     "powershell.exe",
@@ -57,15 +54,43 @@ def _get_clipboard_text() -> str:
             except FileNotFoundError:
                 text = subprocess.check_output(["xsel", "--clipboard", "--output"], encoding="utf-8")
         else:
-            print(f"⚠️ OS {system} のクリップボード自動取得は未対応です。", file=sys.stderr)
+            print(f"⚠ OS {system} のクリップボード自動取得は未対応です。", file=sys.stderr)
             return ""
             
-        # パッチ適用を安定させるため、改行コードを \n に正規化
         return text.replace("\r\n", "\n").replace("\r", "\n")
     except Exception as e:
-        print(f"⚠️ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
-        # 強制終了せず空文字列を返し、標準入力からのペーストへフォールバックさせる
+        print(f"⚠ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
         return ""
+
+def _run_validation_test(project_root: Path, test_command: Optional[str]) -> Tuple[bool, str]:
+    cmd = test_command
+    if not cmd or cmd == "auto":
+        if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
+            cmd = "pytest"
+        elif (project_root / "package.json").exists():
+            cmd = "npm test"
+        elif (project_root / "Cargo.toml").exists():
+            cmd = "cargo test"
+        elif (project_root / "go.mod").exists():
+            cmd = "go test ./..."
+        else:
+            cmd = "pytest"
+    
+    print(f"\n🧪 検証テストを実行中: {cmd}")
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace"
+        )
+        return (proc.returncode == 0), proc.stdout
+    except Exception as e:
+        return False, f"テスト実行コマンドの起動に失敗しました: {e}"
 
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -75,34 +100,33 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command", help="実行するコマンド (省略時はコンテキスト抽出を実行)")
 
-    # apply サブコマンドの定義
     apply_parser = subparsers.add_parser("apply", aliases=["a"], help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
     apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
     apply_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
-    apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
+    apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します")
     apply_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
-    apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻す(リバート)処理を行います")
+    apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻すリバート処理を行います")
+    apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
+    apply_parser.add_argument("--test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時は自動検出)")
 
-    # revert サブコマンドの定義 (apply --revert のエイリアス)
-    revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻す(リバート)処理を行います")
-    revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
+    revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
+    revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス")
     revert_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
-    revert_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
-    revert_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
+    revert_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
+    revert_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します")
     revert_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
+    revert_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビューを表示します")
 
-    # copy サブコマンドの定義 (aiskel c, aiskel cp)
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
     copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
-    copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
-    # 従来の抽出コマンド用の引数 (サブコマンドなしの場合)
-    parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクト・ルートディレクトリのパス")
+    parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
     parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
-    parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装（中身）を削除せず保持する関数やメソッド名")
+    parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装を削除せず保持する関数やメソッド名")
     parser.add_argument("--focus", action="append", default=[], help="指定したファイルまたはディレクトリのみを処理対象とする")
     parser.add_argument("--focus-deps", action="store_true", help="--focusで指定したファイルの直接依存ファイルも自動的に対象に含める")
     parser.add_argument("--only-nodes", action="append", default=[], help="指定したクラスや関数のみを抽出し、それ以外を完全に削除する")
@@ -110,10 +134,10 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", help="単一バンドルファイルの出力フォーマット")
     parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
     parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
-    parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイル（.tsx, .html等）を除外してロジック層のみを抽出する")
+    parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
     parser.add_argument("--git-diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
-    parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします (書式: path[:func,...])")
-    parser.add_argument("--max-chars", type=int, default=100_000, help="クリップボードコピー時の最大文字数 (デフォルト: 100000)")
+    parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
+    parser.add_argument("--max-chars", type=int, default=100_000, help="クリップボードコピー時の最大文字数")
     return parser.parse_args(args)
 
 def _process_comma_separated_args(arg_list: List[str]) -> Set[str]:
@@ -131,12 +155,10 @@ def _resolve_output_dir(project_root: Path, custom_output_dir: Optional[Path]) -
     return project_root / "ai_meta"
 
 def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
-    """出力ディレクトリが生成される前に .gitignore に追記する"""
     try:
         try:
             rel_path = output_dir.relative_to(project_root).as_posix()
         except ValueError:
-            # 出力先がプロジェクトルート外の場合は何もしない
             return
             
         if rel_path == ".":
@@ -159,13 +181,12 @@ def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
             gitignore_path.write_text(f"# aiskel output directory\n{ignore_entry}\n", encoding="utf-8")
             
     except Exception as e:
-        print(f"⚠️ .gitignore の更新に失敗しました: {e}", file=sys.stderr)
+        print(f"⚠ .gitignore の更新に失敗しました: {e}", file=sys.stderr)
 
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
 
-        # copy コマンドまたは --copy 引数の処理
         is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c", "cp")
         copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
         if copy_specs:
@@ -182,12 +203,13 @@ def main(args: Optional[List[str]] = None) -> int:
                 print("   AIチャットへそのままペーストしてご利用いただけます。")
                 return 0
             except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
-                print(f"❌ コピー失敗: {e}", file=sys.stderr)
+                print(f"✖ コピー失敗: {e}", file=sys.stderr)
                 return 1
 
-        # apply / revert コマンドの処理
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
             is_revert = getattr(parsed_args, "revert", False) or parsed_args.command in ("revert", "r")
+            is_dry_run = getattr(parsed_args, "dry_run", False)
+            test_option = getattr(parsed_args, "test", None)
             project_root: Path = parsed_args.dir.resolve()
             
             if parsed_args.patch_file:
@@ -205,16 +227,14 @@ def main(args: Optional[List[str]] = None) -> int:
                 patch_text = sys.stdin.read()
                 print(f"\n{action_name}を開始します...")
             elif not sys.stdin.isatty():
-                # パイプやリダイレクトからの標準入力
                 patch_text = sys.stdin.read()
             else:
-                # デフォルト: クリップボードから読み込みを試みる
                 patch_text = _get_clipboard_text()
                 if not patch_text or "<<<<" not in patch_text:
                     if not patch_text:
-                        print("⚠️ クリップボードが空です。")
+                        print("⚠ クリップボードが空です。")
                     else:
-                        print("⚠️ クリップボードに置換ブロック(<<<<)が見つかりません。")
+                        print("⚠ クリップボードに置換ブロック(<<<<)が見つかりません。")
                     action_name = "リバート" if is_revert else "適用"
                     print("🚀 AIの出力テキストをペーストしてください。")
                     print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
@@ -224,7 +244,6 @@ def main(args: Optional[List[str]] = None) -> int:
                     print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
-            
             commit_msg, patch_text = _extract_commit_message(patch_text)
             
             if is_revert and commit_msg:
@@ -234,7 +253,7 @@ def main(args: Optional[List[str]] = None) -> int:
                         print(f"\n📦 直前のコミットが対象パッチのコミットと一致しました: {commit_msg}")
                         print("コミットを破棄(git reset --hard HEAD~1)して元に戻します...")
                         subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=project_root, check=True)
-                        print("✅ コミットの破棄が完了しました。")
+                        print("✔ コミットの破棄が完了しました。")
                         return 0
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
@@ -244,21 +263,41 @@ def main(args: Optional[List[str]] = None) -> int:
                 project_root, 
                 target_file,
                 force_replace=getattr(parsed_args, "force_replace", False),
-                revert=is_revert
+                revert=is_revert,
+                dry_run=is_dry_run
             )
-            if len(patch_result) >= 4:
-                success, fail, skipped, modified_files = patch_result[0], patch_result[1], patch_result[2], patch_result[3]
-            else:
-                success, fail, skipped = patch_result[0], patch_result[1], patch_result[2]
-                modified_files = set()
+            success, fail, skipped, modified_files = patch_result[0], patch_result[1], patch_result[2], patch_result[3]
             
             action_name = "リバート" if is_revert else "適用"
-            print(f"\n=== {action_name}結果 ===")
-            print(f"✅ 成功: {success} 箇所")
+            mode_prefix = "[DRY-RUN] " if is_dry_run else ""
+            print(f"\n=== {mode_prefix}{action_name}結果 ===")
+            print(f"✔ 成功: {success} 箇所")
             if skipped > 0:
-                print(f"⏭️ スキップ(適用済み): {skipped} 箇所")
+                print(f"⏭ スキップ (適用済み): {skipped} 箇所")
             if fail > 0:
-                print(f"❌ 失敗: {fail} 箇所")
+                print(f"✖ 失敗: {fail} 箇所")
+
+            if is_dry_run:
+                return 0 if fail == 0 else 1
+
+            if not is_revert and test_option is not None and success > 0 and fail == 0:
+                test_ok, test_output = _run_validation_test(project_root, test_option)
+                if test_ok:
+                    print("✅ 検証テストに成功しました。")
+                else:
+                    print("\n❌ 検証テストが失敗しました。変更を即座に自動リバート（ロールバック）します...", file=sys.stderr)
+                    if test_output:
+                        print("\n--- テスト失敗ログ ---", file=sys.stderr)
+                        print(test_output, file=sys.stderr)
+                        print("----------------------\n", file=sys.stderr)
+                    try:
+                        for f in modified_files:
+                            subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, check=True, stderr=subprocess.DEVNULL)
+                        print("🔄 git checkout により変更ファイルを元の状態に復元しました。", file=sys.stderr)
+                    except Exception:
+                        apply_patch(patch_text, project_root, target_file, force_replace=True, revert=True)
+                        print("🔄 逆パッチ適用により変更箇所を元に戻しました。", file=sys.stderr)
+                    return 1
 
             if not is_revert and commit_msg and success > 0 and fail == 0:
                 print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
@@ -267,26 +306,22 @@ def main(args: Optional[List[str]] = None) -> int:
                     for f in modified_files:
                         subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
                     subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
-                    print("✅ 自動コミットが完了しました。")
+                    print("✔ 自動コミットが完了しました。")
                 except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    print(f"⚠️ 自動コミットに失敗しました: {e}")
+                    print(f"⚠ 自動コミットに失敗しました: {e}")
 
             return 0 if fail == 0 else 1
 
-        # 従来の抽出処理
         project_root: Path = parsed_args.project_dir.resolve()
-
         if not project_root.exists() or not project_root.is_dir():
             print(f"エラー: 指定されたソースディレクトリが存在しません: {project_root}", file=sys.stderr)
             return 1
 
         output_dir: Path = _resolve_output_dir(project_root, parsed_args.output_dir)
-
         if project_root == output_dir:
             print("エラー: ソースディレクトリと出力先ディレクトリに同じパスは指定できません。", file=sys.stderr)
             return 1
 
-        # ディレクトリが生成される前に .gitignore を更新
         _ensure_gitignore_updated(project_root, output_dir)
 
         resolved_full_paths = {
@@ -341,14 +376,14 @@ def main(args: Optional[List[str]] = None) -> int:
             print(f"  - 削除した古いファイル: {deleted_count} 件")
         print("\n--- 辞書・マニュアル出力 ---")
         if bundle_path and bundle_path.exists():
-            print(f"  - アーキテクチャ要約 : {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
+            print(f"  - アーキテクチャ要素: {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
             
         print("\n--- トークン・予算削減アナライザー ---")
         print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
         if bundle_path and bundle_path.exists():
             arch_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
             arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
-            print(f"  - アーキテクチャ要約 : 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
+            print(f"  - アーキテクチャ要素: 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
         else:
             print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
         return 0

@@ -1,7 +1,9 @@
+# src/aiskel/core/code_extractor.py
+import difflib
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from .patch_applier import _find_block_range
+from .patch_applier import _find_block_range, _extract_blocks
 from .token_counter import estimate_tokens
 
 LANGUAGE_EXTENSIONS = {
@@ -35,15 +37,10 @@ LANGUAGE_EXTENSIONS = {
 }
 
 def detect_language(path: Path) -> str:
-    """ファイル拡張子からMarkdownコードブロック用言語識別子を特定する"""
     ext = path.suffix.lower()
     return LANGUAGE_EXTENSIONS.get(ext, "")
 
 def parse_target_spec(spec: str) -> Tuple[str, List[str]]:
-    """
-    指定文字列を (ファイルパス文字列, ノード名リスト) に分解する。
-    Windowsのドライブレター (例: C:\\path\\to\\file.py:func) を安全に扱う。
-    """
     cleaned_spec = spec.strip()
     if not cleaned_spec:
         raise ValueError("対象の指定が空です。")
@@ -62,9 +59,6 @@ def parse_target_spec(spec: str) -> Tuple[str, List[str]]:
     return path_part, nodes
 
 def extract_node_code(lines: List[str], node_name: str) -> Optional[List[str]]:
-    """
-    指定された行リストから指定された関数またはクラスのコード行を抽出する。
-    """
     for block_type in ("class", "def", "function"):
         start_idx, end_idx = _find_block_range(lines, node_name, block_type)
         if start_idx != -1 and end_idx != -1:
@@ -76,12 +70,6 @@ def extract_and_format_snippets(
     project_root: Path,
     max_chars: int = 100_000
 ) -> Tuple[str, int, int]:
-    """
-    指定された複数ターゲットのコードを抽出し、AI入力用に整形して返す。
-    
-    戻り値: (整形済みテキスト, トークン推定値, 抽出したノード/ファイル総数)
-    文字数が max_chars を超える場合は ValueError を送出する。
-    """
     if not specs:
         raise ValueError("コピー対象のファイルまたは要素が指定されていません。")
 
@@ -105,6 +93,22 @@ def extract_and_format_snippets(
         content = target_path.read_text(encoding="utf-8")
         lines = content.splitlines()
 
+        # ワイルドカード指定 (*): 定義されている関数・クラスの一覧リストを出力
+        if nodes == ["*"]:
+            blocks = _extract_blocks(lines)
+            if not blocks:
+                snippet_blocks.append(f"ファイルパス: {rel_display_path} (関数・クラス一覧: 0件)\n(定義されている関数・クラスはありません)")
+            else:
+                items_text = []
+                for b_type, b_name, s_start, s_end in blocks:
+                    type_name = "class" if b_type == "class" else "function"
+                    items_text.append(f"  - [{type_name}] {b_name} (L{s_start + 1}-L{s_end})")
+                summary_list = "\n".join(items_text)
+                header = f"ファイルパス: {rel_display_path} (定義ノード一覧: {len(blocks)}件)"
+                snippet_blocks.append(f"{header}\n```text\n{summary_list}\n```")
+            total_items += len(blocks) if blocks else 1
+            continue
+
         if not nodes:
             total_items += 1
             header = f"ファイルパス: {rel_display_path}"
@@ -114,8 +118,18 @@ def extract_and_format_snippets(
             extracted_parts: List[str] = []
             for node_name in nodes:
                 node_lines = extract_node_code(lines, node_name)
+                # タイポ時のサジェスト生成: 類似した関数・クラス名を提案して開発者の再入力コストを削減
                 if node_lines is None:
-                    raise KeyError(f"ファイル '{rel_display_path}' 内に関数またはクラス '{node_name}' が見つかりませんでした。")
+                    available_blocks = _extract_blocks(lines)
+                    available_names = [b[1] for b in available_blocks]
+                    close_matches = difflib.get_close_matches(node_name, available_names, n=3, cutoff=0.5)
+                    if close_matches:
+                        suggestion = f"もしかして: {', '.join(repr(m) for m in close_matches)} ですか？"
+                    elif available_names:
+                        suggestion = f"(利用可能なノード: {', '.join(available_names)})"
+                    else:
+                        suggestion = "(定義されている関数・クラスはありません)"
+                    raise KeyError(f"ファイル '{rel_display_path}' 内に関数またはクラス '{node_name}' が見つかりませんでした。{suggestion}")
                 extracted_parts.append("\n".join(node_lines).rstrip())
                 total_items += 1
 
@@ -131,8 +145,7 @@ def extract_and_format_snippets(
     if char_count > max_chars:
         raise ValueError(
             f"抽出されたコードの総文字数 ({char_count:,} 文字) が上限 ({max_chars:,} 文字) を超えています。"
-            "クリップボードおよびエディタのフリーズを防ぐため処理を中断しました。"
-            "対象を絞り込むか、--max-chars オプションで上限を引き上げてください。"
+            "--max-chars オプションで上限を引き上げるか、対象を絞り込んでください。"
         )
 
     estimated_tokens = estimate_tokens(formatted_result)
