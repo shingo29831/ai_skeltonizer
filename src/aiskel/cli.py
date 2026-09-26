@@ -55,12 +55,21 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", help="実行するコマンド (省略時はコンテキスト抽出を実行)")
 
     # apply サブコマンドの定義
-    apply_parser = subparsers.add_parser("apply", help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
+    apply_parser = subparsers.add_parser("apply", aliases=["a"], help="AIが出力した置換ブロック(<<<< ==== >>>>)をソースコードに自動適用します")
     apply_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
     apply_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
     apply_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     apply_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
     apply_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
+    apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻す(リバート)処理を行います")
+
+    # revert サブコマンドの定義 (apply --revert のエイリアス)
+    revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻す(リバート)処理を行います")
+    revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
+    revert_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
+    revert_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    revert_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
+    revert_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
 
     # 従来の抽出コマンド用の引数 (サブコマンドなしの場合)
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクト・ルートディレクトリのパス")
@@ -127,8 +136,9 @@ def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
 
-        # apply コマンドの処理
-        if hasattr(parsed_args, "command") and parsed_args.command == "apply":
+        # apply / revert コマンドの処理
+        if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
+            is_revert = getattr(parsed_args, "revert", False) or parsed_args.command in ("revert", "r")
             project_root: Path = parsed_args.dir.resolve()
             
             if parsed_args.patch_file:
@@ -136,13 +146,15 @@ def main(args: Optional[List[str]] = None) -> int:
                 if not patch_file.exists():
                     print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
                     return 1
-                print(f"🚀 AIパッチの適用を開始します (ファイル: {patch_file.name})")
+                action_name = "リバート" if is_revert else "適用"
+                print(f"🚀 AIパッチの{action_name}を開始します (ファイル: {patch_file.name})")
                 patch_text = patch_file.read_text(encoding="utf-8")
             elif parsed_args.paste:
+                action_name = "リバート" if is_revert else "適用"
                 print("🚀 AIの出力テキストをペーストしてください。")
                 print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
                 patch_text = sys.stdin.read()
-                print("\n適用を開始します...")
+                print(f"\n{action_name}を開始します...")
             elif not sys.stdin.isatty():
                 # パイプやリダイレクトからの標準入力
                 patch_text = sys.stdin.read()
@@ -154,10 +166,11 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("⚠️ クリップボードが空です。")
                     else:
                         print("⚠️ クリップボードに置換ブロック(<<<<)が見つかりません。")
+                    action_name = "リバート" if is_revert else "適用"
                     print("🚀 AIの出力テキストをペーストしてください。")
                     print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
                     patch_text = sys.stdin.read()
-                    print("\n適用を開始します...")
+                    print(f"\n{action_name}を開始します...")
                 else:
                     print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
@@ -166,10 +179,12 @@ def main(args: Optional[List[str]] = None) -> int:
                 patch_text, 
                 project_root, 
                 target_file,
-                force_replace=getattr(parsed_args, "force_replace", False)
+                force_replace=getattr(parsed_args, "force_replace", False),
+                revert=is_revert
             )
             
-            print("\n=== 適用結果 ===")
+            action_name = "リバート" if is_revert else "適用"
+            print(f"\n=== {action_name}結果 ===")
             print(f"✅ 成功: {success} 箇所")
             if skipped > 0:
                 print(f"⏭️ スキップ(適用済み): {skipped} 箇所")

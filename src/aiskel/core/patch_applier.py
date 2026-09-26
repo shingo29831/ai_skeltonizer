@@ -296,7 +296,7 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     return success_count, fail_count, skipped_count
 
 
-def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None, force_replace: bool = False) -> Tuple[int, int, int]:
+def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = None, force_replace: bool = False, revert: bool = False) -> Tuple[int, int, int]:
     """
     パッチテキストを解析し、ファイルを書き換える。
     置換ブロック(<<<<)がない場合は、関数・クラス単位の自動置換へフォールバックする。
@@ -304,6 +304,9 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
     """
     # 置換ブロックが存在しない場合は関数・クラス単位の置換へフォールバック
     if "<<<<" not in patch_text or "====" not in patch_text or ">>>>" not in patch_text:
+        if revert:
+            print("❌ エラー: リバート処理には置換ブロック(<<<< ==== >>>>)が必須です。関数・クラス単位の自動置換はリバートできません。")
+            return 0, 1, 0
         print("ℹ️ 置換ブロック(<<<<)が見つからないため、関数・クラス単位の自動置換を試みます...")
         return _apply_block_replacement(patch_text, project_root, target_file)
 
@@ -358,6 +361,9 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                 replace_lines.append(lines[i])
                 i += 1
 
+            if revert:
+                search_lines, replace_lines = replace_lines, search_lines
+
             if current_file.exists():
                 content = current_file.read_text(encoding="utf-8")
                 new_content, error_msg, is_skipped = _find_and_replace(content, search_lines, replace_lines, force_replace)
@@ -368,14 +374,14 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                     disp_path = current_file
                     
                 if is_skipped:
-                    print(f"⏭️ 置換スキップ(適用済み): {disp_path}")
+                    print(f"⏭️ {'リバート' if revert else '置換'}スキップ(適用済み): {disp_path}")
                     skipped_count += 1
                 elif new_content is not None:
                     current_file.write_text(new_content, encoding="utf-8")
-                    print(f"✅ 適用成功: {disp_path}")
+                    print(f"✅ {'リバート' if revert else '適用'}成功: {disp_path}")
                     success_count += 1
                 else:
-                    print(f"❌ 適用失敗: {disp_path}")
+                    print(f"❌ {'リバート' if revert else '適用'}失敗: {disp_path}")
                     print(f"  -> {error_msg}")
                     fail_count += 1
             else:
@@ -384,18 +390,22 @@ def apply_patch(patch_text: str, project_root: Path, target_file: Path | None = 
                 except ValueError:
                     disp_path = current_file
                     
-                try:
-                    current_file.parent.mkdir(parents=True, exist_ok=True)
-                    new_content = "\n".join(replace_lines)
-                    if new_content and not new_content.endswith("\n"):
-                        new_content += "\n"
-                    current_file.write_text(new_content, encoding="utf-8")
-                    print(f"✨ 新規作成成功: {disp_path}")
-                    success_count += 1
-                except Exception as e:
-                    print(f"❌ 新規作成失敗: {disp_path}")
-                    print(f"  -> {e}")
+                if revert:
+                    print(f"❌ リバート失敗: 対象ファイルが存在しません: {disp_path}")
                     fail_count += 1
+                else:
+                    try:
+                        current_file.parent.mkdir(parents=True, exist_ok=True)
+                        new_content = "\n".join(replace_lines)
+                        if new_content and not new_content.endswith("\n"):
+                            new_content += "\n"
+                        current_file.write_text(new_content, encoding="utf-8")
+                        print(f"✨ 新規作成成功: {disp_path}")
+                        success_count += 1
+                    except Exception as e:
+                        print(f"❌ 新規作成失敗: {disp_path}")
+                        print(f"  -> {e}")
+                        fail_count += 1
                 
         i += 1
 
