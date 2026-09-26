@@ -14,6 +14,8 @@ from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
 from .core.token_counter import format_token_display, estimate_tokens
 from .core.patch_applier import apply_patch
+from .core.clipboard import set_clipboard_text
+from .core.code_extractor import extract_and_format_snippets
 
 def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
     """
@@ -90,6 +92,12 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     revert_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
     revert_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
 
+    # copy サブコマンドの定義
+    copy_parser = subparsers.add_parser("copy", aliases=["c"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
+    copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
+    copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
+    copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+
     # 従来の抽出コマンド用の引数 (サブコマンドなしの場合)
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクト・ルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
@@ -104,6 +112,8 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
     parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイル（.tsx, .html等）を除外してロジック層のみを抽出する")
     parser.add_argument("--git-diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
+    parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします (書式: path[:func,...])")
+    parser.add_argument("--max-chars", type=int, default=100_000, help="クリップボードコピー時の最大文字数 (デフォルト: 100000)")
     return parser.parse_args(args)
 
 def _process_comma_separated_args(arg_list: List[str]) -> Set[str]:
@@ -154,6 +164,26 @@ def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
+
+        # copy コマンドまたは --copy 引数の処理
+        is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c")
+        copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
+        if copy_specs:
+            project_root = (parsed_args.dir if is_copy_cmd else parsed_args.project_dir).resolve()
+            max_chars = parsed_args.max_chars
+            try:
+                formatted_text, est_tokens, item_count = extract_and_format_snippets(
+                    copy_specs, project_root, max_chars=max_chars
+                )
+                set_clipboard_text(formatted_text)
+                print(f"📋 クリップボードに {item_count} 件のコードをコピーしました。")
+                print(f"   - 総文字数   : {len(formatted_text):,} 文字")
+                print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
+                print("   AIチャットへそのままペーストしてご利用いただけます。")
+                return 0
+            except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
+                print(f"❌ コピー失敗: {e}", file=sys.stderr)
+                return 1
 
         # apply / revert コマンドの処理
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
