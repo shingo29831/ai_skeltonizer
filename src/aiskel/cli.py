@@ -209,13 +209,18 @@ def main(args: Optional[List[str]] = None) -> int:
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
 
-            success, fail, skipped, modified_files = apply_patch(
+            patch_result = apply_patch(
                 patch_text, 
                 project_root, 
                 target_file,
                 force_replace=getattr(parsed_args, "force_replace", False),
                 revert=is_revert
             )
+            if len(patch_result) >= 4:
+                success, fail, skipped, modified_files = patch_result[0], patch_result[1], patch_result[2], patch_result[3]
+            else:
+                success, fail, skipped = patch_result[0], patch_result[1], patch_result[2]
+                modified_files = set()
             
             action_name = "リバート" if is_revert else "適用"
             print(f"\n=== {action_name}結果 ===")
