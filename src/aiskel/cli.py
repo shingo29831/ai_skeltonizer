@@ -92,8 +92,8 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     revert_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します (AIがファイルパスを出力しなかった場合に使用)")
     revert_parser.add_argument("--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
 
-    # copy サブコマンドの定義
-    copy_parser = subparsers.add_parser("copy", aliases=["c"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
+    # copy サブコマンドの定義 (aiskel c, aiskel cp)
+    copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
     copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
@@ -166,7 +166,7 @@ def main(args: Optional[List[str]] = None) -> int:
         parsed_args = parse_arguments(args)
 
         # copy コマンドまたは --copy 引数の処理
-        is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c")
+        is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c", "cp")
         copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
         if copy_specs:
             project_root = (parsed_args.dir if is_copy_cmd else parsed_args.project_dir).resolve()
