@@ -59,7 +59,7 @@ QT_UI_EVENT_HANDLERS = {
 }
 
 
-# なぜ必要か: 関数内で明示的に送出される例外を抽出し、AIによる不適切なエラー握り潰しや未処理例外を抑止
+# なぜ必要か: AST内の明示的raiseに加え、Docstring記載の仕様例外も拾い集めてAIのエラー設計漏れを防止
 def _extract_raises_from_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> List[str]:
     raises = set()
     for sub in ast.walk(node):
@@ -71,6 +71,14 @@ def _extract_raises_from_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> L
                     raises.add(sub.exc.func.id)
                 elif isinstance(sub.exc.func, ast.Attribute):
                     raises.add(sub.exc.func.attr)
+
+    # なぜ必要か: DocstringのRaises記述からも抽出して下位層送出例外の把握漏れを防止
+    doc = ast.get_docstring(node)
+    if doc:
+        doc_raises = re.findall(r"(?:Raises|raises)\s*:\s*\n?\s*([A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception)", doc)
+        for exc in doc_raises:
+            raises.add(exc)
+
     return sorted(list(raises))
 
 
@@ -117,8 +125,35 @@ def _build_description(docstring: Optional[str], leading_comments: List[str], en
     )
 
 
-# なぜ必要か: メソッド呼び出し構文（obj.prop vs obj.func()）や抽象契約のAI誤認を最小トークンで防止
+# なぜ必要か: メソッド修飾子に加え、Webルート・CLI・バリデータ等の重要エントリーポイント契約をAIに見失わせない
 CRITICAL_METHOD_DECORATORS = {"property", "classmethod", "staticmethod", "abstractmethod"}
+# なぜ必要か: APIルーティングやCLIコマンド定義の消失によるエンドポイント特定不能バグを防止
+ROUTING_AND_ENTRY_DECORATORS = {
+    "get", "post", "put", "delete", "patch", "route", "api_view",
+    "command", "group", "task", "shared_task", "field_validator", "validator", "model_validator"
+}
+
+
+def _format_decorator(d: ast.AST) -> Optional[str]:
+    # なぜ必要か: 引数付きデコレータ(@app.get('/path')等)を要約しURL・コマンドの消失を防止
+    try:
+        if isinstance(d, ast.Call):
+            func_name = ast.unparse(d.func)
+            base_ident = func_name.split(".")[-1]
+            if base_ident in ROUTING_AND_ENTRY_DECORATORS or base_ident in CRITICAL_METHOD_DECORATORS:
+                compact_args = [ast.unparse(a) for a in d.args[:2]]
+                args_repr = f"({', '.join(compact_args)})" if compact_args else "()"
+                if len(args_repr) > 40:
+                    args_repr = "(...)"
+                return f"@{func_name}{args_repr}"
+        elif isinstance(d, (ast.Name, ast.Attribute)):
+            d_str = ast.unparse(d)
+            base_ident = d_str.split(".")[-1]
+            if base_ident in CRITICAL_METHOD_DECORATORS or base_ident in ROUTING_AND_ENTRY_DECORATORS:
+                return f"@{d_str}"
+    except Exception:
+        pass
+    return None
 
 
 def _get_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -129,13 +164,9 @@ def _get_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str
         
         decs = []
         for d in getattr(node, "decorator_list", []):
-            d_name = ""
-            if isinstance(d, ast.Name):
-                d_name = d.id
-            elif isinstance(d, ast.Attribute):
-                d_name = d.attr
-            if d_name in CRITICAL_METHOD_DECORATORS:
-                decs.append(f"@{d_name} ")
+            dec_str = _format_decorator(d)
+            if dec_str:
+                decs.append(f"{dec_str} ")
         dec_prefix = "".join(decs)
         return f"{dec_prefix}{prefix}{node.name}({args_str}){returns_str}"
     except Exception:
