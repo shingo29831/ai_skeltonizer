@@ -1,5 +1,6 @@
 """Module: @role: ソースコードから特定ノード（関数・クラス・定数）の構文単位での抽出およびMarkdownスニペット整形を担当する。"""
 import difflib
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 
