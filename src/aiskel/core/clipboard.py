@@ -1,14 +1,42 @@
 """Module: @role: OSネイティブのクリップボードとのテキスト送受信インターフェースを提供する。"""
+import ctypes
 import platform
 import subprocess
 import sys
+import time
+
+
+def _set_windows_clipboard_powershell(text: str) -> None:
+    # なぜ必要か: Win32 API失敗時のフォールバック。UTF-8入力明示で文字化けを防止
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard"
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    proc.communicate(text.encode("utf-8"))
+    if proc.returncode != 0:
+        raise RuntimeError(f"PowerShell Set-Clipboard failed with code {proc.returncode}")
 
 
 def _get_windows_clipboard() -> str:
-    import ctypes
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     CF_UNICODETEXT = 13
+
+    # 64-bit環境でのポインタ切り捨てを防止する型シグネチャ定義
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_int
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_int
+
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_int
 
     if not user32.OpenClipboard(None):
         return ""
@@ -28,32 +56,66 @@ def _get_windows_clipboard() -> str:
 
 
 def _set_windows_clipboard(text: str) -> None:
-    import ctypes
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    GMEM_MOVEABLE = 2
-    CF_UNICODETEXT = 13
-
-    if not user32.OpenClipboard(None):
-        raise RuntimeError("クリップボードを開けませんでした。")
     try:
-        user32.EmptyClipboard()
-        # なぜ必要か: UTF-16LEヌル終端バイナリを直接配置しPowerShell経由のCP932文字化けを完全防止
-        data = text.encode("utf-16le") + b"\x00\x00"
-        h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-        if not h_mem:
-            raise RuntimeError("クリップボード用メモリの確保に失敗しました。")
-        p_mem = kernel32.GlobalLock(h_mem)
-        if not p_mem:
-            kernel32.GlobalFree(h_mem)
-            raise RuntimeError("メモリのロックに失敗しました。")
-        ctypes.memmove(p_mem, data, len(data))
-        kernel32.GlobalUnlock(h_mem)
-        if not user32.SetClipboardData(CF_UNICODETEXT, h_mem):
-            kernel32.GlobalFree(h_mem)
-            raise RuntimeError("クリップボードへのデータ設定に失敗しました。")
-    finally:
-        user32.CloseClipboard()
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        GMEM_MOVEABLE = 0x0002
+        CF_UNICODETEXT = 13
+
+        # 64-bit環境でのポインタ切り捨てを防止する型シグネチャ定義
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.restype = ctypes.c_int
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.restype = ctypes.c_void_p
+
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.OpenClipboard.restype = ctypes.c_int
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype = ctypes.c_int
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = ctypes.c_int
+
+        # 他プロセスのクリップボード排他ロックを考慮し最大5回リトライ
+        opened = False
+        for _ in range(5):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.02)
+
+        if not opened:
+            raise RuntimeError("OpenClipboard failed")
+
+        try:
+            user32.EmptyClipboard()
+            data = text.encode("utf-16le") + b"\x00\x00"
+            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not h_mem:
+                raise RuntimeError("GlobalAlloc failed")
+
+            p_mem = kernel32.GlobalLock(h_mem)
+            if not p_mem:
+                kernel32.GlobalFree(h_mem)
+                raise RuntimeError("GlobalLock failed")
+
+            ctypes.memmove(p_mem, data, len(data))
+            kernel32.GlobalUnlock(h_mem)
+
+            if not user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                kernel32.GlobalFree(h_mem)
+                raise RuntimeError("SetClipboardData failed")
+        finally:
+            user32.CloseClipboard()
+
+    except Exception:
+        _set_windows_clipboard_powershell(text)
 
 
 def get_clipboard_text() -> str:
