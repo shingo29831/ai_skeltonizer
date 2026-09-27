@@ -248,10 +248,12 @@ def _format_constant_entry(
                 keys_count = len(val_node.keys)
                 if unparsed and keys_count <= 8 and len(unparsed) <= 80:
                     return f"{target_name} = {unparsed}{comment_suffix}"
-                # 辞書値が長くても対応拡張子・キー一覧を展開してAIの推測を防止
+                # なぜ必要か: 言語拡張子マッピング等の多要素辞書でも対応キー一覧を展開しAIの推測を防止
                 key_reprs = [ast.unparse(k) for k in val_node.keys if k is not None]
-                if key_reprs and len(key_reprs) <= 12:
-                    return f"{target_name}: dict(keys: {', '.join(key_reprs)}){comment_suffix}"
+                if key_reprs:
+                    if len(key_reprs) <= 20:
+                        return f"{target_name}: dict(keys: {', '.join(key_reprs)}){comment_suffix}"
+                    return f"{target_name}: dict(keys: {', '.join(key_reprs[:15])}, ...+{len(key_reprs)-15}){comment_suffix}"
             except Exception:
                 pass
 
