@@ -128,9 +128,13 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
 
 
 # なぜ必要か: 内部パス正規化と外部サードパーティ分離によりリファクタリング影響範囲分析を支援 (要件2-3)
+# なぜ必要か: 内部パス正規化と外部サードパーティ分離によりリファクタリング影響範囲分析を支援し、空エントリを排除してトークン削減
 def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
     lines = ["# Dependency Graph"]
     for entry in sorted(entries, key=lambda e: e.file_path):
+        # なぜ必要か: 依存関係を持たないファイルの空ヘッダ出力を抑制し要約トークンを最適化
+        if not entry.internal_imports and not entry.external_imports:
+            continue
         lines.append(f"[{entry.file_path}]")
         if entry.internal_imports:
             lines.append(f"  internal: {', '.join(entry.internal_imports)}")

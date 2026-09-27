@@ -63,8 +63,24 @@ def extract_node_code(lines: List[str], node_name: str) -> Optional[List[str]]:
         start_idx, end_idx = _find_block_range(lines, node_name, block_type)
         if start_idx != -1 and end_idx != -1:
             return lines[start_idx:end_idx]
-    return None
 
+    # なぜ必要か: AIが要約に従って「ClassName.method_name」形式で指定した場合にクラス内から抽出しKeyErrorを防止
+    if "." in node_name:
+        class_name, method_name = node_name.split(".", 1)
+        c_start, c_end = _find_block_range(lines, class_name, "class")
+        if c_start != -1 and c_end != -1:
+            class_lines = lines[c_start:c_end]
+            for block_type in ("def", "function"):
+                m_start, m_end = _find_block_range(class_lines, method_name, block_type)
+                if m_start != -1 and m_end != -1:
+                    return class_lines[m_start:m_end]
+        # なぜ必要か: クラス名が不一致でも同名メソッドが存在すればフォールバック取得して作業中断を防止
+        for block_type in ("def", "function"):
+            start_idx, end_idx = _find_block_range(lines, method_name, block_type)
+            if start_idx != -1 and end_idx != -1:
+                return lines[start_idx:end_idx]
+
+    return None
 def extract_and_format_snippets(
     specs: List[str],
     project_root: Path,
