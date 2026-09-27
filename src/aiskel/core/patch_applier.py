@@ -1,4 +1,5 @@
 # src/aiskel/core/patch_applier.py
+"""Module: @role: パッチテキストの解析およびインメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入を実行する。"""
 import difflib
 import re
 from pathlib import Path
@@ -31,6 +32,122 @@ def _has_import_statements(lines: List[str]) -> bool:
                 return True
     return False
 
+def _extract_import_lines(lines: List[str]) -> List[str]:
+    # なぜ必要か: 新規関数ブロックに含まれるimport文を抽出し、既存ファイル上部にマージするため
+    import_patterns = [
+        re.compile(r'^\s*(?:from\s+[a-zA-Z0-9_\.]+\s+import|import\s+[a-zA-Z0-9_\.]+)'),
+        re.compile(r'^\s*(?:export\s+)?import\s+'),
+        re.compile(r'^\s*(?:const|let|var)\s+.*=\s*require\('),
+        re.compile(r'^\s*#\s*include\s+[<"]'),
+        re.compile(r'^\s*(?:package|import)\s+'),
+        re.compile(r'^\s*(?:use\s+[a-zA-Z0-9_:]+|extern\s+crate)'),
+        re.compile(r'^\s*using\s+[a-zA-Z0-9_\.]+;'),
+        re.compile(r'^\s*(?:namespace|use)\s+[a-zA-Z0-9_\\]+;'),
+    ]
+    extracted = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            i += 1
+            continue
+        if any(pattern.search(line) for pattern in import_patterns):
+            extracted.append(line)
+            open_parens = line.count('(') - line.count(')')
+            while open_parens > 0 and i + 1 < len(lines):
+                i += 1
+                next_line = lines[i]
+                extracted.append(next_line)
+                open_parens += next_line.count('(') - next_line.count(')')
+        i += 1
+    return extracted
+
+def _merge_import_lines(target_lines: List[str], import_lines: List[str]) -> List[str]:
+    # なぜ必要か: 新規関数が依存するimport文を重複なくファイルの適切な位置（importブロック末尾）に挿入するため
+    if not import_lines:
+        return target_lines
+
+    existing_stripped = {l.strip() for l in target_lines}
+    new_imports = [l for l in import_lines if l.strip() and l.strip() not in existing_stripped]
+    if not new_imports:
+        return target_lines
+
+    import_patterns = [
+        re.compile(r'^\s*(?:from\s+[a-zA-Z0-9_\.]+\s+import|import\s+[a-zA-Z0-9_\.]+)'),
+        re.compile(r'^\s*(?:export\s+)?import\s+'),
+        re.compile(r'^\s*(?:const|let|var)\s+.*=\s*require\('),
+        re.compile(r'^\s*#\s*include\s+[<"]'),
+        re.compile(r'^\s*(?:package|import)\s+'),
+        re.compile(r'^\s*(?:use\s+[a-zA-Z0-9_:]+|extern\s+crate)'),
+        re.compile(r'^\s*using\s+[a-zA-Z0-9_\.]+;'),
+        re.compile(r'^\s*(?:namespace|use)\s+[a-zA-Z0-9_\\]+;'),
+    ]
+    last_import_idx = -1
+    for idx, line in enumerate(target_lines):
+        if any(p.search(line) for p in import_patterns):
+            last_import_idx = idx
+
+    if last_import_idx != -1:
+        insert_idx = last_import_idx + 1
+        return target_lines[:insert_idx] + new_imports + target_lines[insert_idx:]
+
+    insert_idx = 0
+    in_docstring = False
+    docstring_char = ""
+    for idx, line in enumerate(target_lines):
+        stripped = line.strip()
+        if not in_docstring:
+            if stripped.startswith(('"""', "'''")):
+                docstring_char = stripped[:3]
+                if stripped.count(docstring_char) >= 2 and len(stripped) > 3:
+                    insert_idx = idx + 1
+                    break
+                in_docstring = True
+            elif stripped.startswith(("#", "//")):
+                insert_idx = idx + 1
+            elif stripped:
+                insert_idx = idx
+                break
+        else:
+            if docstring_char in stripped:
+                insert_idx = idx + 1
+                break
+
+    return target_lines[:insert_idx] + new_imports + [""] + target_lines[insert_idx:]
+
+def _find_new_block_insert_index(lines: List[str], file_path: Path) -> int:
+    # なぜ必要か: Pythonでif __name__ == '__main__':より前、その他の言語では末尾に新規関数を挿入するため
+    ext = file_path.suffix.lower()
+    if ext == ".py":
+        main_pattern = re.compile(r'^[ \t]*if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:')
+        for idx, line in enumerate(lines):
+            if main_pattern.match(line):
+                insert_idx = idx
+                while insert_idx > 0 and not lines[insert_idx - 1].strip():
+                    insert_idx -= 1
+                return insert_idx
+    return len(lines)
+
+def _insert_block_into_lines(target_lines: List[str], block_lines: List[str], insert_idx: int) -> List[str]:
+    # なぜ必要か: 挿入時に前後コードとの空行(2行)を整え、PEP 8等のスタイル規約を維持するため
+    before = target_lines[:insert_idx]
+    after = target_lines[insert_idx:]
+
+    while before and not before[-1].strip():
+        before.pop()
+    while after and not after[0].strip():
+        after.pop(0)
+
+    result = list(before)
+    if result:
+        result.extend(["", ""])
+    result.extend(block_lines)
+    if after:
+        result.extend(["", ""])
+        result.extend(after)
+    return result
+
 def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
     blocks = []
     i = 0
@@ -40,11 +157,21 @@ def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
         if match:
             b_type = match.group(1) or 'function'
             b_name = match.group(2) or match.group(3)
-            s_start, s_end = _find_block_range(lines[i:], b_name, b_type)
-            if s_start != -1:
-                s_start += i
+            # なぜ必要か: デコレータ行(@...)がBLOCK_PATTERNの直前にある場合にブロック範囲に含めるため
+            actual_start = i
+            while actual_start > 0:
+                prev_line = lines[actual_start - 1]
+                prev_stripped = prev_line.strip()
+                if not prev_stripped:
+                    break
+                if prev_stripped.startswith('@'):
+                    actual_start -= 1
+                else:
+                    break
+            _, s_end = _find_block_range(lines[i:], b_name, b_type)
+            if s_end != -1:
                 s_end += i
-                blocks.append((b_type, b_name, s_start, s_end))
+                blocks.append((b_type, b_name, actual_start, s_end))
                 i = max(s_end - 1, i)
         i += 1
     return blocks
@@ -254,9 +381,17 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
         
     return start_idx, end_idx
 
-def _replace_blocks_in_lines(target_lines: List[str], source_lines: List[str], file_path: Path, project_root: Path) -> Tuple[int, int, List[str]]:
+def _replace_blocks_in_lines(
+    target_lines: List[str],
+    source_lines: List[str],
+    file_path: Path,
+    project_root: Path,
+    allow_create: bool = True,
+    force_replace: bool = False
+) -> Tuple[int, int, int, List[str]]:
     success = 0
     fail = 0
+    skipped = 0
     result_lines = list(target_lines)
     
     blocks = _extract_blocks(source_lines)
@@ -269,15 +404,33 @@ def _replace_blocks_in_lines(target_lines: List[str], source_lines: List[str], f
         except ValueError:
             disp_path = file_path
 
+        block_text = "\n".join(new_block_lines).strip()
+
         if t_start != -1:
-            result_lines = result_lines[:t_start] + new_block_lines + result_lines[t_end:]
-            print(f"✔ {type_label}置換成功: {block_name} ({disp_path})")
-            success += 1
+            target_block_text = "\n".join(result_lines[t_start:t_end]).strip()
+            if not force_replace and target_block_text == block_text:
+                print(f"⏭ {type_label}置換スキップ (適用済み): {block_name} ({disp_path})")
+                skipped += 1
+            else:
+                result_lines = result_lines[:t_start] + new_block_lines + result_lines[t_end:]
+                print(f"✔ {type_label}置換成功: {block_name} ({disp_path})")
+                success += 1
+        elif allow_create:
+            # なぜ必要か: モードBで対象ファイル内に存在しないブロックを新規関数・クラスとして追加するため
+            current_content = "\n".join(result_lines)
+            if not force_replace and block_text in current_content:
+                print(f"⏭ {type_label}追加スキップ (適用済み): {block_name} ({disp_path})")
+                skipped += 1
+            else:
+                insert_idx = _find_new_block_insert_index(result_lines, file_path)
+                result_lines = _insert_block_into_lines(result_lines, new_block_lines, insert_idx)
+                print(f"✨ {type_label}新規作成成功: {block_name} ({disp_path})")
+                success += 1
         else:
             print(f"✖ {type_label}置換失敗: 対象ファイルに{type_label} '{block_name}' が見つかりません。")
             fail += 1
         
-    return success, fail, result_lines
+    return success, fail, skipped, result_lines
 
 def generate_diff_display(file_path: Path, original: str, updated: str, project_root: Path) -> str:
     """変更前後の文字列からカラー付き Unified Diff を生成する"""
@@ -358,9 +511,10 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
                     success_count += 1
                     modified_files.add(current_file)
                 else:
-                    s, f, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
+                    s, f, sk, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
                     success_count += s
                     fail_count += f
+                    skipped_count += sk
                     if s > 0:
                         modified_files.add(current_file)
                     file_contents[current_file] = new_lines
@@ -500,41 +654,71 @@ def apply_patch(
                     existing_has_imports = _has_import_statements(content_lines)
                     replace_has_imports = _has_import_statements(replace_lines)
                     blocks = _extract_blocks(replace_lines)
+                    existing_blocks = _extract_blocks(content_lines)
 
+                    # なぜ必要か: 新規関数の追加ブロックにimport文が含まれる場合でも、既存ファイル内の他の関数群を誤って全体置換で上書き消去しないよう判定
                     is_partial = False
                     if blocks:
-                        if existing_has_imports and not replace_has_imports:
-                            is_partial = True
-                        elif not replace_has_imports:
-                            existing_blocks = _extract_blocks(content_lines)
-                            if len(blocks) < len(existing_blocks):
+                        if not replace_has_imports:
+                            if existing_has_imports or existing_blocks or len(content_lines) > len(replace_lines):
+                                is_partial = True
+                        else:
+                            existing_names = {b[1] for b in existing_blocks}
+                            replace_names = {b[1] for b in blocks}
+                            if existing_names and not existing_names.issubset(replace_names):
                                 is_partial = True
 
                     if is_partial:
-                        if len(blocks) == 1 and len(replace_lines) <= (blocks[0][3] - blocks[0][2] + 5):
+                        # 新規関数ブロックに含まれるimport文を既存ファイルの先頭インポート領域へマージ
+                        import_lines = _extract_import_lines(replace_lines)
+                        if import_lines:
+                            content_lines = _merge_import_lines(content_lines, import_lines)
+
+                        if len(blocks) == 1 and len(replace_lines) <= (blocks[0][3] - blocks[0][2] + 10 + len(import_lines)):
                             b_type, b_name, _, _ = blocks[0]
+                            import_set = {l.strip() for l in import_lines}
+                            single_block_lines = [l for l in replace_lines if l.strip() not in import_set]
+                            while single_block_lines and not single_block_lines[0].strip():
+                                single_block_lines.pop(0)
+                            while single_block_lines and not single_block_lines[-1].strip():
+                                single_block_lines.pop()
+
                             t_start, t_end = _find_block_range(content_lines, b_name, b_type)
+                            type_label = "クラス" if b_type == "class" else "関数"
+                            block_replace_text = "\n".join(single_block_lines).strip()
+
                             if t_start != -1:
                                 target_block_text = "\n".join(content_lines[t_start:t_end]).strip()
-                                if not force_replace and target_block_text == replace_text:
+                                if not force_replace and target_block_text == block_replace_text:
                                     print(f"⏭ 置換スキップ (適用済み): {disp_path} ({b_name})")
                                     skipped_count += 1
                                 else:
-                                    new_lines = content_lines[:t_start] + replace_lines + content_lines[t_end:]
+                                    new_lines = content_lines[:t_start] + single_block_lines + content_lines[t_end:]
                                     new_content = "\n".join(new_lines)
                                     if not new_content.endswith("\n"):
                                         new_content += "\n"
                                     file_contents[current_file] = new_content
-                                    type_label = "クラス" if b_type == "class" else "関数"
                                     print(f"✔ {type_label}部分置換成功: {b_name} ({disp_path})")
                                     success_count += 1
                                     modified_files.add(current_file)
                             else:
-                                type_label = "クラス" if b_type == "class" else "関数"
-                                print(f"✖ 置換失敗: 対象ファイルに{type_label} '{b_name}' が見つかりません ({disp_path})")
-                                fail_count += 1
+                                # なぜ必要か: モードBで既存ファイルに存在しない関数・クラスが指定された場合に新規作成として適切な位置に追加する
+                                content_normalized = "\n".join(content_lines)
+                                if not force_replace and block_replace_text in content_normalized:
+                                    print(f"⏭ 追加スキップ (適用済み): {disp_path} ({b_name})")
+                                    skipped_count += 1
+                                else:
+                                    insert_idx = _find_new_block_insert_index(content_lines, current_file)
+                                    new_lines = _insert_block_into_lines(content_lines, single_block_lines, insert_idx)
+                                    new_content = "\n".join(new_lines)
+                                    if not new_content.endswith("\n"):
+                                        new_content += "\n"
+                                    file_contents[current_file] = new_content
+                                    print(f"✨ {type_label}新規作成成功: {b_name} ({disp_path})")
+                                    success_count += 1
+                                    modified_files.add(current_file)
                         else:
-                            s, f, new_lines = _replace_blocks_in_lines(content_lines, replace_lines, current_file, project_root)
+                            s, f, sk, new_lines = _replace_blocks_in_lines(content_lines, replace_lines, current_file, project_root, allow_create=True, force_replace=force_replace)
                             if s > 0:
                                 new_content = "\n".join(new_lines)
                                 if not new_content.endswith("\n"):
@@ -542,9 +726,11 @@ def apply_patch(
                                 file_contents[current_file] = new_content
                                 success_count += s
                                 fail_count += f
+                                skipped_count += sk
                                 modified_files.add(current_file)
                             else:
                                 fail_count += f
+                                skipped_count += sk
                     else:
                         content_normalized = content.replace("\r\n", "\n").strip()
                         if not force_replace and content_normalized == replace_text:
