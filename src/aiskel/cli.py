@@ -134,6 +134,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
 
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
+    copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
     copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
@@ -151,6 +152,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
     parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
     parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
+    parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
     parser.add_argument("--max-chars", type=int, default=100_000, help="クリップボードコピー時の最大文字数")
     return parser.parse_args(args)
 
@@ -206,12 +208,14 @@ def main(args: Optional[List[str]] = None) -> int:
         if copy_specs:
             project_root = (parsed_args.dir if is_copy_cmd else parsed_args.project_dir).resolve()
             max_chars = parsed_args.max_chars
+            with_deps = getattr(parsed_args, "deps", False)
             try:
                 formatted_text, est_tokens, item_count = extract_and_format_snippets(
-                    copy_specs, project_root, max_chars=max_chars
+                    copy_specs, project_root, max_chars=max_chars, with_deps=with_deps
                 )
                 set_clipboard_text(formatted_text)
-                print(f"📋 クリップボードに {item_count} 件のコードをコピーしました。")
+                deps_note = " (依存ノード自動解決含む)" if with_deps else ""
+                print(f"📋 クリップボードに {item_count} 件のコード{deps_note}をコピーしました。")
                 print(f"   - 総文字数   : {len(formatted_text):,} 文字")
                 print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
                 print("   AIチャットへそのままペーストしてご利用いただけます。")

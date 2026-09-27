@@ -81,10 +81,38 @@ def extract_node_code(lines: List[str], node_name: str) -> Optional[List[str]]:
                 return lines[start_idx:end_idx]
 
     return None
+
+def _resolve_dependencies_for_nodes(lines: List[str], initial_nodes: List[str]) -> List[str]:
+    blocks = _extract_blocks(lines)
+    if not blocks:
+        return initial_nodes
+
+    block_map = {b[1]: b for b in blocks}
+    resolved_nodes = list(initial_nodes)
+    visited = set(initial_nodes)
+    queue = list(initial_nodes)
+
+    while queue:
+        current_node = queue.pop(0)
+        node_lines = extract_node_code(lines, current_node)
+        if not node_lines:
+            continue
+        node_text = "".join(node_lines)
+        for name in block_map:
+            if name in visited:
+                continue
+            # なぜ必要か: 単語境界で照合し、部分一致による無関係なノードの誤抽出を防止
+            if re.search(rf"\b{re.escape(name)}\b", node_text):
+                visited.add(name)
+                resolved_nodes.append(name)
+                queue.append(name)
+    return resolved_nodes
+
 def extract_and_format_snippets(
     specs: List[str],
     project_root: Path,
-    max_chars: int = 100_000
+    max_chars: int = 100_000,
+    with_deps: bool = False
 ) -> Tuple[str, int, int]:
     if not specs:
         raise ValueError("コピー対象のファイルまたは要素が指定されていません。")
@@ -131,11 +159,14 @@ def extract_and_format_snippets(
             code_block = f"```{lang}\n{content.strip()}\n```" if content.strip() else f"```{lang}\n```"
             snippet_blocks.append(f"{header}\n{code_block}")
         else:
+            target_nodes = _resolve_dependencies_for_nodes(lines, nodes) if with_deps else nodes
             extracted_parts: List[str] = []
-            for node_name in nodes:
+            for node_name in target_nodes:
                 node_lines = extract_node_code(lines, node_name)
-                # タイポ時のサジェスト生成: 類似した関数・クラス名を提案して開発者の再入力コストを削減
                 if node_lines is None:
+                    # 自動解決された依存ノードが存在しない場合は無視し、直接指定ノードのみ厳密エラー判定
+                    if node_name not in nodes:
+                        continue
                     available_blocks = _extract_blocks(lines)
                     available_names = [b[1] for b in available_blocks]
                     close_matches = difflib.get_close_matches(node_name, available_names, n=3, cutoff=0.5)
@@ -149,7 +180,7 @@ def extract_and_format_snippets(
                 extracted_parts.append("\n".join(node_lines).rstrip())
                 total_items += 1
 
-            nodes_label = ", ".join(nodes)
+            nodes_label = ", ".join(target_nodes)
             header = f"ファイルパス: {rel_display_path} ({nodes_label})"
             merged_code = "\n\n".join(extracted_parts)
             code_block = f"```{lang}\n{merged_code}\n```"
