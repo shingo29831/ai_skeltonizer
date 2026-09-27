@@ -1,4 +1,4 @@
-﻿"""Module: @role: CLI引数の解析、実行オプションの検証、および各サブコマンドのディスパッチを担当する。"""
+"""Module: @role: CLI引数の解析、実行オプションの検証、および各サブコマンドのディスパッチを担当する。"""
 import argparse
 import sys
 import subprocess
@@ -16,6 +16,7 @@ from .core.token_counter import format_token_display, estimate_tokens
 from .core.patch_applier import apply_patch
 from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets
+from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
 
 def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
     # ソースコード内の正規表現リテラルに誤マッチしないようタグ文字列を分割定義
@@ -138,6 +139,11 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
+    docs_parser = subparsers.add_parser("docs", aliases=["d"], help="HTMLドキュメントをAI向けに解析・軽量構造化して出力します")
+    docs_parser.add_argument("targets", type=Path, nargs="*", default=[], help="解析対象のHTMLファイルまたはディレクトリのパス (省略時は標準入力またはカレントディレクトリ)")
+    docs_parser.add_argument("-c", "-cp", "--clipboard", "--copy", dest="clipboard", action="store_true", help="解析結果をクリップボードに自動保存します")
+    docs_parser.add_argument("-o", "--output", type=Path, default=None, help="解析結果を保存する出力ファイルパス (省略時は標準出力)")
+
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
     parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
@@ -222,6 +228,41 @@ def main(args: Optional[List[str]] = None) -> int:
                 return 0
             except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
                 print(f"✖ コピー失敗: {e}", file=sys.stderr)
+                return 1
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("docs", "d"):
+            targets = parsed_args.targets
+            use_clipboard = getattr(parsed_args, "clipboard", False)
+            output_file = getattr(parsed_args, "output", None)
+            project_root = Path(".").resolve()
+
+            try:
+                raw_stdin = sys.stdin.read() if (not targets and not sys.stdin.isatty()) else None
+                if raw_stdin:
+                    formatted_text = parse_html_to_markdown(raw_stdin)
+                    est_tokens = estimate_tokens(formatted_text)
+                    total_chars = len(formatted_text)
+                    processed_files = []
+                else:
+                    target_paths = targets if targets else [Path(".")]
+                    formatted_text, total_chars, est_tokens, processed_files = extract_html_docs(target_paths, project_root=project_root)
+
+                if output_file:
+                    output_file.resolve().write_text(formatted_text, encoding="utf-8")
+                    print(f"✔ 解析結果を保存しました: {output_file}", file=sys.stderr)
+
+                if use_clipboard:
+                    set_clipboard_text(formatted_text)
+                    file_info = f" ({len(processed_files)}件のHTML)" if processed_files else ""
+                    print(f"📋 クリップボードに解析結果をコピーしました。{file_info} (文字数: {total_chars:,} 文字, 推定トークン: 約 {est_tokens:,} tokens)", file=sys.stderr)
+                elif not output_file and sys.stderr.isatty() and processed_files:
+                    print(f"📑 {len(processed_files)} 件のHTMLドキュメントを解析・統合しました (約 {est_tokens:,} tokens)", file=sys.stderr)
+
+                if not output_file:
+                    print(formatted_text)
+                return 0
+            except (FileNotFoundError, ValueError, RuntimeError) as e:
+                print(f"✖ HTMLドキュメント解析失敗: {e}", file=sys.stderr)
                 return 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
