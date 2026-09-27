@@ -232,12 +232,26 @@ def _format_constant_entry(
                 return f"{target_name} = {val}{comment_suffix}"
             if isinstance(val, str) and len(repr(val)) <= 40:
                 return f"{target_name} = {repr(val)}{comment_suffix}"
-        elif isinstance(val_node, (ast.List, ast.Set, ast.Tuple, ast.Dict)):
+        elif isinstance(val_node, (ast.List, ast.Set, ast.Tuple)):
+            # なぜ必要か: UI拡張子や除外設定などの重要コレクションが型名に丸め込まれるのを防ぐため上限を16要素・100文字に緩和
             try:
                 unparsed = ast.unparse(val_node) if hasattr(ast, "unparse") else ""
-                elts_count = len(getattr(val_node, "elts", getattr(val_node, "keys", [])))
-                if unparsed and elts_count <= 8 and len(unparsed) <= 60:
+                elts_count = len(getattr(val_node, "elts", []))
+                if unparsed and elts_count <= 16 and len(unparsed) <= 100:
                     return f"{target_name} = {unparsed}{comment_suffix}"
+            except Exception:
+                pass
+        elif isinstance(val_node, ast.Dict):
+            # なぜ必要か: 言語マッピング等の辞書定数で中身が完全不可視になるのを防ぐため短小辞書またはキー一覧を展開
+            try:
+                unparsed = ast.unparse(val_node) if hasattr(ast, "unparse") else ""
+                keys_count = len(val_node.keys)
+                if unparsed and keys_count <= 8 and len(unparsed) <= 80:
+                    return f"{target_name} = {unparsed}{comment_suffix}"
+                # 辞書値が長くても対応拡張子・キー一覧を展開してAIの推測を防止
+                key_reprs = [ast.unparse(k) for k in val_node.keys if k is not None]
+                if key_reprs and len(key_reprs) <= 12:
+                    return f"{target_name}: dict(keys: {', '.join(key_reprs)}){comment_suffix}"
             except Exception:
                 pass
 
