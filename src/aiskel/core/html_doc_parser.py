@@ -333,6 +333,17 @@ class DocRenderer:
         return "\n\n" + "\n".join(lines) + "\n\n"
 
 
+def _read_file_safe(file_path: Path) -> str:
+    # なぜ必要か: UTF-8(BOM有無)やCP932など混在するHTML文字コードを安全に自動判定
+    raw = file_path.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "cp932", "euc-jp"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def parse_html_to_markdown(html_text: str) -> str:
     """HTML文字列を解析し、不要要素を除去した階層Markdownテキストに変換する"""
     parser = _DocTreeParser()
@@ -393,7 +404,7 @@ def extract_html_docs(
             rel = f.relative_to(root).as_posix()
         except ValueError:
             rel = f.name
-        content = f.read_text(encoding="utf-8", errors="replace")
+        content = _read_file_safe(f)
         md = parse_html_to_markdown(content)
         docs_output.append(f"# Document: {rel}\n\n{md}")
 
