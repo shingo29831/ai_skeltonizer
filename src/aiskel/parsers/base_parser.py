@@ -79,8 +79,8 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
                 continue
             name_parts = entry.name.split(".")
             base_func_name = name_parts[-1]
-            # なぜ必要か: __init__以外の特殊メソッドおよびプライベートメソッドを除外し公開インターフェースに絞り込む
-            if base_func_name.startswith("_") and base_func_name != "__init__" and entry.element_type in ("Method", "Function"):
+            # なぜ必要か: __init__以外の特殊メソッド、プライベート関数・内部クラスを除外して公開インターフェースに絞り込み要約トークンを最適化
+            if base_func_name.startswith("_") and base_func_name != "__init__":
                 continue
 
             if entry.element_type == "Class":

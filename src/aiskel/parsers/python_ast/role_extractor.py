@@ -280,11 +280,12 @@ def _format_constant_entry(
                 if unparsed and keys_count <= 8 and len(unparsed) <= 80:
                     return f"{target_name} = {unparsed}{comment_suffix}"
                 # なぜ必要か: 言語拡張子マッピング等の多要素辞書でも対応キー一覧を展開しAIの推測を防止
+                # なぜ必要か: 言語拡張子マッピング等の仕様定数でキーが切り捨てられてAIが対応状況を見落とすのを防止 (上限を35件に緩和)
                 key_reprs = [ast.unparse(k) for k in val_node.keys if k is not None]
                 if key_reprs:
-                    if len(key_reprs) <= 20:
+                    if len(key_reprs) <= 35:
                         return f"{target_name}: dict(keys: {', '.join(key_reprs)}){comment_suffix}"
-                    return f"{target_name}: dict(keys: {', '.join(key_reprs[:15])}, ...+{len(key_reprs)-15}){comment_suffix}"
+                    return f"{target_name}: dict(keys: {', '.join(key_reprs[:30])}, ...+{len(key_reprs)-30}){comment_suffix}"
             except Exception:
                 pass
 
@@ -345,6 +346,9 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
 
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.ClassDef):
+            # なぜ必要か: 内部プライベートクラス（_始まり）を除外して公開インターフェースに限定し要約トークンを最適化
+            if node.name.startswith("_"):
+                continue
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
             base_names = _get_base_names(node)
             is_enum = any("Enum" in b or "Flag" in b for b in base_names)
@@ -376,15 +380,27 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     )
 
             if is_enum:
+                # なぜ必要か: Enumのキーだけでなく短いリテラル値(文字列/数値)も保持しAIの状態値推測ミス・ハルシネーションを防止
                 enum_members = []
                 for sub in node.body:
+                    target_name = None
+                    val_repr = None
                     if isinstance(sub, ast.Assign):
-                        for target in sub.targets:
-                            if isinstance(target, ast.Name) and not target.id.startswith("_"):
-                                enum_members.append(target.id)
+                        for t in sub.targets:
+                            if isinstance(t, ast.Name) and not t.id.startswith("_"):
+                                target_name = t.id
+                                if isinstance(sub.value, ast.Constant) and isinstance(sub.value.value, (str, int, bool)):
+                                    val_repr = repr(sub.value.value)
+                                break
                     elif isinstance(sub, ast.AnnAssign):
                         if isinstance(sub.target, ast.Name) and not sub.target.id.startswith("_"):
-                            enum_members.append(sub.target.id)
+                            target_name = sub.target.id
+                            if sub.value and isinstance(sub.value, ast.Constant) and isinstance(sub.value.value, (str, int, bool)):
+                                val_repr = repr(sub.value.value)
+
+                    if target_name:
+                        enum_members.append(f"{target_name} = {val_repr}" if val_repr else target_name)
+
                 base_name = next((b for b in base_names if "Enum" in b or "Flag" in b), "Enum")
                 members_str = f": {', '.join(enum_members)}" if enum_members else ""
                 entries.append(
