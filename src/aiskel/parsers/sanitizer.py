@@ -1,22 +1,23 @@
-"""
-Role: コメントやdocstringから装飾線、著作権、履歴、引数定義などのノイズを除去し、
-      意味のある自然文サマリー（役割説明）を抽出・サニタイズする共通モジュール。
-"""
 import re
 from typing import List, Optional
 
-# 装飾線パターン（3個以上連続する記号、前後の装飾線など）
-DECORATION_LINE_PATTERN = re.compile(r"^(?:[=\-#*~_]{3,}|\s*[=\-]{3,}.*?[=\-]{3,}\s*)$")
+# なぜ必要か: 区切り線（===, ---）や記号行の誤検知を防止しサマリーとして抽出されるのを防ぐ
+DECORATION_LINE_PATTERN = re.compile(r"^(?:[=\-#*~_/\\]{3,}|\s*[=\-]{3,}.*?[=\-]{3,}\s*)$")
 
-# 単語1つのみのセクション見出し（例: Workers, Main, Helpers:）
 SINGLE_WORD_SECTION_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+:?$")
 
-# 著作権・ライセンス・出所表記キーワード
+# なぜ必要か: ライセンス条項や出所表記が役割説明として誤抽出されるのを防止
+COPYRIGHT_PATTERN = re.compile(
+    r"(?:copyright|\(c\)|all\s+rights?\s+reserved|licensed?\s+under|this\s+software\s+is\s+released\s+under|mit\s+license|apache\s+license|bsd\s+license)",
+    re.IGNORECASE,
+)
+
 COPYRIGHT_KEYWORDS = [
     "copyright",
     "(c)",
     "all rights reserved",
     "licensed under",
+    "this software is released under",
     "license",
     "cc by",
     "http://",
@@ -25,9 +26,14 @@ COPYRIGHT_KEYWORDS = [
     "copied from",
     "modified from",
     "taken from",
+    "mit license",
+    "apache license",
+    "bsd license",
+    "gnu",
+    "author:",
+    "authors:",
 ]
 
-# 変更履歴・作業メモパターン
 HISTORY_PATTERNS = [
     re.compile(r"^[【\[](?:修正|追加|変更|削除|更新)[】\]]"),
     re.compile(r"^---\s*ここまで追加"),
@@ -35,21 +41,21 @@ HISTORY_PATTERNS = [
     re.compile(r"^(?:TODO|FIXME|NOTE|XXX|BUG|HACK)(?:\([^)]*\))?\s*:", re.IGNORECASE),
 ]
 
-# 切り捨てセクションヘッダー（以降の行を即座に破棄）
 SECTION_TRUNCATE_PATTERN = re.compile(
     r"^(?:Args|Arguments|Parameters|Params|Keyword\s+Args|Returns?|Yields?|Raises?|Usage|Examples?|Notes?|References?)\s*:",
     re.IGNORECASE,
 )
 
-# 引数・型定義行（例: table : [H, W], int）
 ARG_TYPE_DEF_PATTERNS = [
     re.compile(r"^[A-Za-z0-9_]+\s*:\s*\[.*\]"),
     re.compile(r"^[A-Za-z0-9_]+\s*\([^)]*\)\s*:"),
 ]
 
+# なぜ必要か: ファイル先頭のパスコメント行がモジュールの役割説明に誤混入するのを防止
+FILEPATH_COMMENT_PATTERN = re.compile(r"^(?:file\s*:\s*)?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+$")
+
 
 def clean_comment_line(raw_line: str) -> str:
-    """行頭・行末のコメント構文記号（#, //, /*, *, */）を除去してトリムする"""
     line = raw_line.strip()
     if line.startswith("//"):
         line = line[2:].strip()
@@ -67,15 +73,14 @@ def clean_comment_line(raw_line: str) -> str:
 def _is_decoration_line(line: str) -> bool:
     if not line:
         return False
-    if re.match(r"^[=\-#*~_]{3,}", line):
+    if re.match(r"^[=\-#*~_/\\]{3,}$", line):
         return True
     if re.match(r"^[=\-]{3,}.*?[=\-]{3,}", line):
         return True
-    return False
+    return bool(DECORATION_LINE_PATTERN.match(line))
 
 
 def _is_single_word_section(line: str) -> bool:
-    # ASCII英数字の1単語のみ（セクション区切り見出し）を除外
     return bool(SINGLE_WORD_SECTION_PATTERN.match(line))
 
 
@@ -83,6 +88,8 @@ def _is_copyright_or_license(line: str) -> bool:
     if line.startswith("#!"):
         return True
     lower = line.lower()
+    if COPYRIGHT_PATTERN.search(lower):
+        return True
     return any(kw in lower for kw in COPYRIGHT_KEYWORDS)
 
 
@@ -100,6 +107,10 @@ def _is_section_truncate_trigger(line: str) -> bool:
 
 def _is_type_def_line(line: str) -> bool:
     return any(pattern.match(line) for pattern in ARG_TYPE_DEF_PATTERNS)
+
+
+def _is_filepath_comment(line: str) -> bool:
+    return bool(FILEPATH_COMMENT_PATTERN.match(line.strip()))
 
 
 def _is_trivial_docstring(line: str, entity_name: str) -> bool:
@@ -122,19 +133,14 @@ def _is_trivial_docstring(line: str, entity_name: str) -> bool:
 
 
 def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[str]:
-    """
-    推奨アルゴリズムに従い、行リストからノイズをスキップして最初の有効なサマリー自然文1行を抽出する。
-    """
     for raw_line in lines:
         line = clean_comment_line(raw_line)
         if not line:
             continue
 
-        # 引数・戻り値セクション以降は即座に探索終了（切り捨て）
         if _is_section_truncate_trigger(line):
             break
 
-        # 各種ノイズパターンの除外
         if _is_decoration_line(line) or _is_single_word_section(line):
             continue
         if _is_copyright_or_license(line):
@@ -143,10 +149,11 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
             continue
         if _is_type_def_line(line):
             continue
+        if _is_filepath_comment(line):
+            continue
         if _is_trivial_docstring(line, entity_name):
             continue
 
-        # Role: / AI: / Rule: のタグ表記をフォーマットして採用
         if re.match(r"^(?:Role|AI|Rule)\s*:", line, re.IGNORECASE):
             tag = line.split(":", 1)[0].strip()
             rest = line.split(":", 1)[1].strip()
@@ -164,9 +171,6 @@ def extract_clean_role_description(
     leading_comments: Optional[List[str]] = None,
     entity_name: str = "",
 ) -> str:
-    """
-    docstringおよび直前コメントからサニタイズされた役割サマリー（1文）を抽出・統合する。
-    """
     summary: Optional[str] = None
     if docstring:
         doc_lines = docstring.strip().splitlines()

@@ -1,10 +1,8 @@
-# src/py_skeletonizer/role_extractor.py
-"""
-Role: PythonのASTノードやソースコードからクラス・関数の役割説明(Docstringおよび直上#コメント)を抽出し、集約レポートを生成する。
-"""
 import ast
 from dataclasses import dataclass
 from typing import List, Optional
+
+from aiskel.parsers.sanitizer import extract_clean_role_description
 
 
 @dataclass
@@ -35,27 +33,13 @@ def _get_leading_comments(source_lines: List[str], start_lineno: int) -> List[st
     return comments
 
 
-def _build_description(docstring: Optional[str], leading_comments: List[str]) -> str:
-    combined_lines = []
-
-    for comment in leading_comments:
-        if comment.startswith("Role:") or comment.startswith("AI:") or comment.startswith("Rule:"):
-            combined_lines.append(f"**[{comment[:4].rstrip(':')}]** {comment[5:].strip()}")
-        else:
-            combined_lines.append(comment)
-
-    if docstring:
-        doc_lines = [line.strip() for line in docstring.strip().splitlines() if line.strip()]
-        for line in doc_lines:
-            if line.startswith("Role:") or line.startswith("AI:") or line.startswith("Rule:"):
-                combined_lines.append(f"**[{line[:4].rstrip(':')}]** {line[5:].strip()}")
-            else:
-                combined_lines.append(line)
-
-    if not combined_lines:
-        return ""
-
-    return " / ".join(dict.fromkeys(combined_lines))
+# なぜ必要か: 装飾線やライセンス条項を排除した単一の自然文サマリーを抽出するためにsanitizerモジュールへ統合
+def _build_description(docstring: Optional[str], leading_comments: List[str], entity_name: str = "") -> str:
+    return extract_clean_role_description(
+        docstring=docstring,
+        leading_comments=leading_comments,
+        entity_name=entity_name,
+    )
 
 
 def _get_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -81,7 +65,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                 element_type="Module",
                 name=rel_file_path,
                 signature="",
-                description=_build_description(module_doc, module_comments),
+                description=_build_description(module_doc, module_comments, rel_file_path),
             )
         )
 
@@ -93,12 +77,15 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     file_path=rel_file_path,
                     element_type="Class",
                     name=node.name,
-                    signature=f"class {node.name}",
-                    description=_build_description(ast.get_docstring(node), leading_comments),
+                    signature=f"class {node.name}:",
+                    description=_build_description(ast.get_docstring(node), leading_comments, node.name),
                 )
             )
             for sub_node in node.body:
                 if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # なぜ必要か: 特殊メソッド（__init__等）や内部メソッド（_始まり）を除外して公開APIに絞りトークンを節約
+                    if sub_node.name.startswith("_"):
+                        continue
                     sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
                     entries.append(
                         RoleEntry(
@@ -106,11 +93,14 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                             element_type="Method",
                             name=f"{node.name}.{sub_node.name}",
                             signature=_get_function_signature(sub_node),
-                            description=_build_description(ast.get_docstring(sub_node), sub_comments),
+                            description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
                         )
                     )
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # なぜ必要か: 内部ヘルパー関数（_始まり）を除外してモジュール公開インターフェースに限定
+            if node.name.startswith("_"):
+                continue
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
             entries.append(
                 RoleEntry(
@@ -118,43 +108,67 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     element_type="Function",
                     name=node.name,
                     signature=_get_function_signature(node),
-                    description=_build_description(ast.get_docstring(node), leading_comments),
+                    description=_build_description(ast.get_docstring(node), leading_comments, node.name),
                 )
             )
 
     return entries
 
 
+# なぜ必要か: 二重表記（Class Foo: class Foo）を廃止し、クラス下にメソッドをインデント配置して構造を明瞭化
 def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
-    lines = [
-        "# AI Context: Project Role & Architecture Map",
-        "",
-        "この文書は、プロジェクト内に存在する各モジュール、クラス、および関数の責務とシグネチャを一覧化した退避マニュアルです。",
-        "",
-    ]
-
+    lines = ["# Role Map"]
     grouped: dict[str, List[RoleEntry]] = {}
     for entry in all_entries:
         grouped.setdefault(entry.file_path, []).append(entry)
 
-    sorted_paths = sorted(grouped.keys())
-
-    for path in sorted_paths:
+    for path in sorted(grouped.keys()):
         file_entries = grouped[path]
-        lines.append(f"## 📁 `{path}`")
+        lines.append(f"[{path}]")
 
         module_entries = [e for e in file_entries if e.element_type == "Module"]
-        if module_entries:
-            lines.append(f"> **Module Role**: {module_entries[0].description}")
-        lines.append("")
+        if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
+            lines.append(f"Module: {module_entries[0].description}")
 
-        other_entries = [e for e in file_entries if e.element_type != "Module"]
-        for entry in other_entries:
-            icon = "🔷" if entry.element_type == "Class" else ("🔹" if entry.element_type == "Method" else "🔸")
-            lines.append(f"- {icon} **{entry.element_type} `{entry.name}`**")
-            lines.append(f"  - `Signature`: `{entry.signature}`")
-            lines.append(f"  - `Role`: {entry.description}")
+        classes: dict[str, List[RoleEntry]] = {}
+        standalone_funcs: List[RoleEntry] = []
 
-        lines.append("")
+        for entry in file_entries:
+            if entry.element_type == "Module":
+                continue
+            name_parts = entry.name.split(".")
+            base_func_name = name_parts[-1]
+            if base_func_name.startswith("_"):
+                continue
+
+            if entry.element_type == "Class":
+                classes.setdefault(entry.name, [])
+            elif entry.element_type == "Method":
+                class_name = name_parts[0] if len(name_parts) > 1 else ""
+                classes.setdefault(class_name, []).append(entry)
+            elif entry.element_type == "Function":
+                standalone_funcs.append(entry)
+
+        seen_classes = set()
+        for entry in file_entries:
+            if entry.element_type == "Class":
+                class_name = entry.name
+                seen_classes.add(class_name)
+                class_desc = f" - {entry.description}" if entry.description and entry.description != "(役割記述なし)" else ""
+                lines.append(f"class {class_name}:{class_desc}")
+                for method in classes.get(class_name, []):
+                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
+                    lines.append(f"  {method.signature}{desc}")
+
+        for class_name, methods in classes.items():
+            if class_name and class_name not in seen_classes:
+                lines.append(f"class {class_name}:")
+                for method in methods:
+                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
+                    lines.append(f"  {method.signature}{desc}")
+
+        for func in standalone_funcs:
+            desc = f"\n  {func.description}" if func.description and func.description != "(役割記述なし)" else ""
+            lines.append(f"{func.signature}{desc}")
 
     return "\n".join(lines)

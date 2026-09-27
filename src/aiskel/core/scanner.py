@@ -1,17 +1,43 @@
-# src/py_skeletonizer/scanner.py
-"""
-Role: プロジェクトフォルダを走査し、Gitの仕様に準拠して無視対象をフィルタリングしつつディレクトリ構造を取得する。
-"""
 import os
 from pathlib import Path
 from typing import List
 import pathspec
 
+# なぜ必要か: サードパーティ製ライブラリ・肥大化した中間生成物がトークン消費と解析時間を圧迫するのを防止
+EXCLUDED_DIR_NAMES = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ipynb_checkpoints",
+    "venv",
+    ".venv",
+    ".env",
+    "node_modules",
+    "vendor",
+    "third_party",
+    "submodules",
+}
+
+# なぜ必要か: アーキテクチャ解析に不要な非コードアセット・データセット・重みファイルを走査から除外
+EXCLUDED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".ico", ".pt", ".onnx", ".pth", ".bin", ".dat",
+    ".xml", ".csv", ".tsv", ".pdf",
+}
+
+EXCLUDED_FILENAMES = {
+    ".gitmodules",
+    ".DS_Store",
+    "Thumbs.db",
+}
+
 
 def _build_pathspec(project_root: Path) -> pathspec.PathSpec:
-    lines = [".git/", "__pycache__/", "venv/", ".venv/", ".env"]
-    gitignore_path = project_root / ".gitignore"
+    lines = [f"{d}/" for d in EXCLUDED_DIR_NAMES]
+    lines.extend([f"*{ext}" for ext in EXCLUDED_EXTENSIONS])
+    lines.extend(EXCLUDED_FILENAMES)
 
+    gitignore_path = project_root / ".gitignore"
     if gitignore_path.exists():
         try:
             with open(gitignore_path, "r", encoding="utf-8") as f:
@@ -23,9 +49,7 @@ def _build_pathspec(project_root: Path) -> pathspec.PathSpec:
 
 
 def get_target_files(project_root: Path) -> List[Path]:
-    """
-    pathspecを利用し、無視リストを除外した処理対象ファイルのリストを取得する
-    """
+    """pathspecを利用し、無視リストを除外した処理対象ファイルのリストを取得する"""
     if not project_root.exists() or not project_root.is_dir():
         raise FileNotFoundError(f"Target directory not found: {project_root}")
 
@@ -35,31 +59,67 @@ def get_target_files(project_root: Path) -> List[Path]:
     for root, dirs, files in os.walk(project_root):
         current_dir = Path(root)
 
-        # os.walkのdirsをインプレースで書き換えることで枝刈り(Prune)する
+        # なぜ必要か: os.walk の探索対象をインプレースで削り、不要ディレクトリの深層走査コストをゼロにする
         dirs[:] = [
             d for d in dirs
-            if not spec.match_file((current_dir / d).relative_to(project_root).as_posix() + "/")
+            if d not in EXCLUDED_DIR_NAMES
+            and not spec.match_file((current_dir / d).relative_to(project_root).as_posix() + "/")
         ]
 
         for file in files:
+            if file in EXCLUDED_FILENAMES:
+                continue
             file_path = current_dir / file
+            if file_path.suffix.lower() in EXCLUDED_EXTENSIONS:
+                continue
             rel_path = file_path.relative_to(project_root).as_posix()
-
             if not spec.match_file(rel_path):
                 target_files.append(file_path)
 
     return target_files
 
 
+class _TreeNode:
+    def __init__(self, name: str, is_dir: bool):
+        self.name = name
+        self.is_dir = is_dir
+        self.children: dict[str, "_TreeNode"] = {}
+
+
+def _render_tree_node(node: _TreeNode, prefix: str = "") -> List[str]:
+    lines = []
+    # なぜ必要か: ディレクトリを先行配置して標準的なツリー階層の視認性を向上させる
+    sorted_children = sorted(
+        node.children.values(),
+        key=lambda c: (not c.is_dir, c.name.lower())
+    )
+    total = len(sorted_children)
+    for i, child in enumerate(sorted_children):
+        is_last = (i == total - 1)
+        connector = "└── " if is_last else "├── "
+        child_label = f"{child.name}/" if child.is_dir else child.name
+        lines.append(f"{prefix}{connector}{child_label}")
+        if child.is_dir:
+            extension = "    " if is_last else "│   "
+            lines.extend(_render_tree_node(child, prefix + extension))
+    return lines
+
+
+# なぜ必要か: 中間ディレクトリ名が欠落してインデントのみ深くなる表示バグを根本解決するため木構造から生成
 def generate_tree_text(project_root: Path, target_files: List[Path]) -> str:
-    """
-    抽出されたファイルリストからツリー構造のテキストを生成する
-    """
-    tree_lines = [f"{project_root.name}/"]
+    root_node = _TreeNode(project_root.name, is_dir=True)
 
-    sorted_files = sorted([f.relative_to(project_root) for f in target_files])
-    for file_path in sorted_files:
-        indent = "    " * (len(file_path.parts) - 1)
-        tree_lines.append(f"{indent}├── {file_path.name}")
+    for file_path in target_files:
+        rel_path = file_path.relative_to(project_root)
+        current = root_node
+        parts = rel_path.parts
+        for part in parts[:-1]:
+            if part not in current.children:
+                current.children[part] = _TreeNode(part, is_dir=True)
+            current = current.children[part]
+        filename = parts[-1]
+        current.children[filename] = _TreeNode(filename, is_dir=False)
 
-    return "\n".join(tree_lines)
+    lines = [f"{project_root.name}/"]
+    lines.extend(_render_tree_node(root_node))
+    return "\n".join(lines)
