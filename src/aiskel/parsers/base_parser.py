@@ -16,6 +16,7 @@ class RoleEntry:
     fields: Optional[List[str]] = None
     enum_members: Optional[List[str]] = None
     ui_handlers: Optional[List[str]] = None
+    raises: Optional[List[str]] = None
 
 
 @dataclass
@@ -125,8 +126,6 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
 def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
     lines = ["# Dependency Graph"]
     for entry in sorted(entries, key=lambda e: e.file_path):
-        if not entry.internal_imports and not entry.external_imports:
-            continue
         lines.append(f"[{entry.file_path}]")
         if entry.internal_imports:
             lines.append(f"  internal: {', '.join(entry.internal_imports)}")

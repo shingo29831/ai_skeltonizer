@@ -45,6 +45,37 @@ QT_UI_EVENT_HANDLERS = {
 }
 
 
+# なぜ必要か: 関数内で明示的に送出される例外を抽出し、AIによる不適切なエラー握り潰しや未処理例外を抑止
+def _extract_raises_from_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> List[str]:
+    raises = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Raise) and sub.exc:
+            if isinstance(sub.exc, ast.Name):
+                raises.add(sub.exc.id)
+            elif isinstance(sub.exc, ast.Call):
+                if isinstance(sub.exc.func, ast.Name):
+                    raises.add(sub.exc.func.id)
+                elif isinstance(sub.exc.func, ast.Attribute):
+                    raises.add(sub.exc.func.attr)
+    return sorted(list(raises))
+
+
+# なぜ必要か: 先頭の空行やshebangをスキップし、ファイル冒頭のモジュール責務コメントを確実に抽出
+def _get_module_header_comments(source_lines: List[str]) -> List[str]:
+    comments = []
+    for line in source_lines:
+        s = line.strip()
+        if not s or s.startswith("#!") or s.startswith("# -*-"):
+            continue
+        if s.startswith("#"):
+            cleaned = s.lstrip("#").strip()
+            if cleaned:
+                comments.append(cleaned)
+        else:
+            break
+    return comments
+
+
 def _get_leading_comments(source_lines: List[str], start_lineno: int) -> List[str]:
     comments = []
     curr_idx = start_lineno - 2
@@ -179,7 +210,8 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
     source_lines = source_code.splitlines() if source_code else []
 
     module_doc = ast.get_docstring(tree)
-    module_comments = _get_leading_comments(source_lines, 2) if source_lines else []
+    # なぜ必要か: start_lineno=2の固定指定によるコメント見落としバグを根本解消
+    module_comments = _get_module_header_comments(source_lines) if source_lines else []
     has_explicit_module_desc = bool(module_doc or module_comments)
     if has_explicit_module_desc:
         entries.append(
@@ -192,20 +224,26 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             )
         )
 
-    # なぜ必要か: UPPER_SNAKE_CASE定数を型+役割の1行形式へ集約し省略「...」を完全廃止 (要件1-2)
+    # なぜ必要か: UPPER_SNAKE_CASE定数のうち、内部用正規表現パターンを除外し真の設定定数のみ抽出 (要件1-2)
     constants: List[str] = []
     for node in getattr(tree, "body", []):
+        target_name = None
+        ann_node = None
         if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id.isupper() and not target.id.startswith("_"):
-                    constants.append(
-                        _format_constant_entry(target.id, node, None, source_lines)
-                    )
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    target_name = t.id
+                    break
         elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id.isupper() and not node.target.id.startswith("_"):
-                constants.append(
-                    _format_constant_entry(node.target.id, node, node.annotation, source_lines)
-                )
+            if isinstance(node.target, ast.Name):
+                target_name = node.target.id
+                ann_node = node.annotation
+
+        if target_name and target_name.isupper() and not target_name.startswith("_"):
+            # 内部実装用正規表現パターンを排除してトークン浪費を防止
+            if target_name.endswith(("_PATTERN", "_PATTERNS", "_REGEX")):
+                continue
+            constants.append(_format_constant_entry(target_name, node, ann_node, source_lines))
 
     if constants:
         entries.append(
