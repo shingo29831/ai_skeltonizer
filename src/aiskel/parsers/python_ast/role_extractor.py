@@ -103,12 +103,27 @@ def _build_description(docstring: Optional[str], leading_comments: List[str], en
     )
 
 
+# なぜ必要か: メソッド呼び出し構文（obj.prop vs obj.func()）や抽象契約のAI誤認を最小トークンで防止
+CRITICAL_METHOD_DECORATORS = {"property", "classmethod", "staticmethod", "abstractmethod"}
+
+
 def _get_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     try:
         args_str = ast.unparse(node.args) if hasattr(ast, "unparse") else "..."
         returns_str = f" -> {ast.unparse(node.returns)}" if node.returns and hasattr(ast, "unparse") else ""
         prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
-        return f"{prefix}{node.name}({args_str}){returns_str}"
+        
+        decs = []
+        for d in getattr(node, "decorator_list", []):
+            d_name = ""
+            if isinstance(d, ast.Name):
+                d_name = d.id
+            elif isinstance(d, ast.Attribute):
+                d_name = d.attr
+            if d_name in CRITICAL_METHOD_DECORATORS:
+                decs.append(f"@{d_name} ")
+        dec_prefix = "".join(decs)
+        return f"{dec_prefix}{prefix}{node.name}({args_str}){returns_str}"
     except Exception:
         return f"def {node.name}(...)"
 
@@ -302,7 +317,8 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
 
                 for sub_node in node.body:
                     if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        if sub_node.name.startswith("_"):
+                        # なぜ必要か: __init__を除外するとクラスの初期化契約（必須引数）をAIが見落とすため保持
+                        if sub_node.name.startswith("_") and sub_node.name != "__init__":
                             continue
                         if sub_node.name in QT_UI_EVENT_HANDLERS:
                             ui_handlers.append(sub_node.name)
@@ -321,6 +337,14 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                             )
                         )
 
+                # なぜ必要か: @dataclassデコレータを保持しデータモデルの種別誤認を防止
+                is_dataclass = any(
+                    (isinstance(d, ast.Name) and d.id == "dataclass")
+                    or (isinstance(d, ast.Attribute) and d.attr == "dataclass")
+                    or (isinstance(d, ast.Call) and isinstance(d.func, (ast.Name, ast.Attribute)) and getattr(d.func, "id", getattr(d.func, "attr", "")) == "dataclass")
+                    for d in getattr(node, "decorator_list", [])
+                )
+                class_prefix = "@dataclass\n" if is_dataclass else ""
                 # なぜ必要か: 基底クラスをシグネチャに明示しAIによるインターフェース・多態性の見落としを抑止
                 bases_suffix = f"({', '.join(base_names)})" if base_names else ""
                 entries.append(
@@ -328,7 +352,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                         file_path=rel_file_path,
                         element_type="Class",
                         name=node.name,
-                        signature=f"class {node.name}{bases_suffix}:",
+                        signature=f"{class_prefix}class {node.name}{bases_suffix}:",
                         description=_build_description(ast.get_docstring(node), leading_comments, node.name),
                         fields=extracted_fields if extracted_fields else None,
                         ui_handlers=ui_handlers if ui_handlers else None,
