@@ -156,8 +156,9 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
         if _is_trivial_docstring(line, entity_name):
             continue
 
-        # なぜ必要か: Module: @role: や Comment: などの複合プレフィックスを完全に除去し二重ラベル化を防止
-        m = re.match(r"^(?:(?:Module|Class|Function)\s*:?\s*)?(?:@role|Role|AI|Rule|Comment)\s*:?\s*", line, re.IGNORECASE)
+        # なぜ必要か: Module: @role: Comment: など多重にネストされた複合プレフィックスを再帰的に完全除去 (要件1-3)
+        clean_prefix_pattern = r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\s*:?\s*|@role\s*:?|Role\s*:?|AI\s*:?|Rule\s*:?|Comment\s*:?)\s*)+"
+        m = re.match(clean_prefix_pattern, line, re.IGNORECASE)
         if m and m.end() > 0:
             rest = line[m.end():].strip()
             if not rest or _is_trivial_docstring(rest, entity_name):

@@ -56,9 +56,9 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
             raw_desc = module_entries[0].description.strip()
             # なぜ必要か: (Auto)自動生成ダミーを排除し、Module: @role: 書式へ統一 (要件1-3, 2-4)
             if not raw_desc.startswith("(Auto)") and raw_desc != "(役割記述なし)":
-                # なぜ必要か: 多重にネストされた Module: や @role: プレフィックスを全除去して単一の Module: @role: に統一
+                # なぜ必要か: 多重にネストされた Module: @role: Comment: プレフィックスを全除去して単一の Module: @role: に統一
                 clean_desc = re.sub(
-                    r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module\s*:?\s*)?(?:@role|Role|AI|Rule)\s*:?|Module\s*:\s*)\s*)+",
+                    r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\s*:?\s*|@role\s*:?|Role\s*:?|AI\s*:?|Rule\s*:?|Comment\s*:?)\s*)+",
                     "",
                     raw_desc,
                     flags=re.IGNORECASE,
