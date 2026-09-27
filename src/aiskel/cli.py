@@ -1,4 +1,4 @@
-# src/aiskel/cli.py
+"""Module: @role: CLI引数の解析、実行オプションの検証、および各サブコマンドのディスパッチを担当する。"""
 import argparse
 import sys
 import subprocess

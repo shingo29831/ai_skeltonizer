@@ -1,4 +1,4 @@
-# src/aiskel/parsers/language_detector.py
+"""Module: @role: ファイル拡張子に基づいて対応する言語パーサーのインスタンスを特定・供給する。"""
 from pathlib import Path
 from typing import Optional
 from .base_parser import BaseParser

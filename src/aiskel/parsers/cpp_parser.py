@@ -1,4 +1,4 @@
-# src/aiskel/parsers/cpp_parser.py
+"""Module: @role: Tree-sitterを用いたC/C++ソースコードの構文解析、スケルトン生成、役割メタデータ抽出を担当する。"""
 import tree_sitter_cpp as tscpp
 import tree_sitter_c as tsc
 from tree_sitter import Language, Parser

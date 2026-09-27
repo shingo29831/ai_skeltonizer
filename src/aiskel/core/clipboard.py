@@ -1,3 +1,4 @@
+"""Module: @role: OSネイティブのクリップボードとのテキスト送受信インターフェースを提供する。"""
 import sys
 import subprocess
 import platform

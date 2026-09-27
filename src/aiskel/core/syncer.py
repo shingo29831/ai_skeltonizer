@@ -1,4 +1,4 @@
-# src/aiskel/core/syncer.py
+"""Module: @role: プロジェクト内ファイルのスケルトン変換・差分同期・不要ファイル削除およびバンドル出力を統合管理する。"""
 import os
 import shutil
 from pathlib import Path

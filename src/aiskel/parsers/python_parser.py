@@ -1,4 +1,4 @@
-# src/aiskel/parsers/python_parser.py
+"""Module: @role: BaseParserインターフェースに準拠し、Python ASTプロセッサを呼び出してスケルトンおよびメタデータを抽出する。"""
 from typing import List, Set, Tuple
 from .base_parser import BaseParser, RoleEntry, DependencyEntry
 from .python_ast.ast_processor import process_code_all_in_one

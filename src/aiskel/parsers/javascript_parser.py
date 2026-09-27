@@ -1,4 +1,4 @@
-# src/aiskel/parsers/javascript_parser.py
+"""Module: @role: Tree-sitterを用いたJavaScript/TypeScript/TSXコードの構文解析、スケルトン生成、役割メタデータ抽出を担当する。"""
 import tree_sitter_javascript as tsjs
 import tree_sitter_typescript as tsts
 from tree_sitter import Language, Parser

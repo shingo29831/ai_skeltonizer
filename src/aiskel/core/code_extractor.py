@@ -1,4 +1,4 @@
-# src/aiskel/core/code_extractor.py
+"""Module: @role: ソースコードから特定ノード（関数・クラス）の構文単位での抽出およびMarkdownスニペット整形を担当する。"""
 import difflib
 from pathlib import Path
 from typing import List, Tuple, Optional
