@@ -1,17 +1,9 @@
 import ast
-from dataclasses import dataclass
+import re
 from typing import List, Optional
 
+from aiskel.parsers.base_parser import RoleEntry, generate_role_map_text
 from aiskel.parsers.sanitizer import extract_clean_role_description
-
-
-@dataclass
-class RoleEntry:
-    file_path: str
-    element_type: str  # "Module", "Class", "Function", "Method"
-    name: str
-    signature: str
-    description: str
 
 
 def _get_leading_comments(source_lines: List[str], start_lineno: int) -> List[str]:
@@ -52,13 +44,39 @@ def _get_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str
         return f"def {node.name}(...)"
 
 
+def _get_base_names(node: ast.ClassDef) -> List[str]:
+    bases = []
+    for b in node.bases:
+        if isinstance(b, ast.Name):
+            bases.append(b.id)
+        elif isinstance(b, ast.Attribute):
+            bases.append(b.attr)
+        else:
+            try:
+                bases.append(ast.unparse(b))
+            except Exception:
+                pass
+    return bases
+
+
+def _format_constant_value(val_node: ast.AST) -> str:
+    try:
+        val_str = ast.unparse(val_node) if hasattr(ast, "unparse") else "..."
+        if len(val_str) > 25:
+            return val_str[:22] + "..."
+        return val_str
+    except Exception:
+        return "..."
+
+
 def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str = "") -> List[RoleEntry]:
     entries: List[RoleEntry] = []
     source_lines = source_code.splitlines() if source_code else []
 
     module_doc = ast.get_docstring(tree)
     module_comments = _get_leading_comments(source_lines, 2) if source_lines else []
-    if module_doc or module_comments:
+    has_explicit_module_desc = bool(module_doc or module_comments)
+    if has_explicit_module_desc:
         entries.append(
             RoleEntry(
                 file_path=rel_file_path,
@@ -69,18 +87,90 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             )
         )
 
-    for node in tree.body:
+    # なぜ必要か: UPPER_SNAKE_CASEの主要定数を1行に圧縮し、マジックナンバーや設定値の誤認を防止
+    constants: List[str] = []
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.isupper() and not target.id.startswith("_"):
+                    constants.append(f"{target.id} = {_format_constant_value(node.value)}")
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id.isupper() and not node.target.id.startswith("_"):
+                val_str = f" = {_format_constant_value(node.value)}" if node.value else ""
+                constants.append(f"{node.target.id}{val_str}")
+
+    if constants:
+        entries.append(
+            RoleEntry(
+                file_path=rel_file_path,
+                element_type="Constant",
+                name="constants",
+                signature=f"constants: {', '.join(constants[:6])}" + (", ..." if len(constants) > 6 else ""),
+                description="",
+            )
+        )
+
+    for node in getattr(tree, "body", []):
         if isinstance(node, ast.ClassDef):
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
-            entries.append(
-                RoleEntry(
-                    file_path=rel_file_path,
-                    element_type="Class",
-                    name=node.name,
-                    signature=f"class {node.name}:",
-                    description=_build_description(ast.get_docstring(node), leading_comments, node.name),
-                )
+            base_names = _get_base_names(node)
+            is_enum = any("Enum" in b or "Flag" in b for b in base_names)
+            has_methods = any(isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) for sub in node.body)
+            is_pydantic = any("BaseModel" in b for b in base_names)
+            is_dataclass = any(
+                (isinstance(d, ast.Name) and d.id == "dataclass")
+                or (isinstance(d, ast.Attribute) and d.attr == "dataclass")
+                or (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "dataclass")
+                for d in node.decorator_list
             )
+
+            # なぜ必要か: Enumクラスの列挙メンバーを1行に集約し、AIによる文字列リテラルのハルシネーションを防止
+            if is_enum:
+                enum_members = []
+                for sub in node.body:
+                    if isinstance(sub, ast.Assign):
+                        for target in sub.targets:
+                            if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                                enum_members.append(target.id)
+                    elif isinstance(sub, ast.AnnAssign):
+                        if isinstance(sub.target, ast.Name) and not sub.target.id.startswith("_"):
+                            enum_members.append(sub.target.id)
+                base_name = next((b for b in base_names if "Enum" in b or "Flag" in b), "Enum")
+                members_str = f": {', '.join(enum_members)}" if enum_members else ""
+                entries.append(
+                    RoleEntry(
+                        file_path=rel_file_path,
+                        element_type="Class",
+                        name=node.name,
+                        signature=f"class {node.name}({base_name}){members_str}",
+                        description=_build_description(ast.get_docstring(node), leading_comments, node.name),
+                        enum_members=enum_members,
+                    )
+                )
+            else:
+                # なぜ必要か: メソッドのない型定義やPydantic/Dataclassの属性型を抽出し、プロパティ参照エラーを完全抑止
+                extracted_fields: List[str] = []
+                if (not has_methods) or is_pydantic or is_dataclass:
+                    for sub in node.body:
+                        if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                            if not sub.target.id.startswith("_"):
+                                try:
+                                    ann_str = ast.unparse(sub.annotation) if hasattr(ast, "unparse") else "Any"
+                                except Exception:
+                                    ann_str = "Any"
+                                extracted_fields.append(f"{sub.target.id}: {ann_str}")
+
+                entries.append(
+                    RoleEntry(
+                        file_path=rel_file_path,
+                        element_type="Class",
+                        name=node.name,
+                        signature=f"class {node.name}:",
+                        description=_build_description(ast.get_docstring(node), leading_comments, node.name),
+                        fields=extracted_fields if extracted_fields else None,
+                    )
+                )
+
             for sub_node in node.body:
                 if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # なぜ必要か: 特殊メソッド（__init__等）や内部メソッド（_始まり）を除外して公開APIに絞りトークンを節約
@@ -112,63 +202,41 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                 )
             )
 
+    # なぜ必要か: docstring無記載のファイルでも主要クラスまたは公開関数から責務を推測可能にするフォールバック
+    if not has_explicit_module_desc:
+        fallback_desc = ""
+        file_stem = rel_file_path.split("/")[-1].replace(".py", "")
+        clean_stem = re.sub(r"[_\-]", "", file_stem).lower()
+
+        classes = [e for e in entries if e.element_type == "Class"]
+        matched_class = next(
+            (c for c in classes if re.sub(r"[_\-]", "", c.name).lower() == clean_stem and c.description and c.description != "(役割記述なし)"),
+            None
+        )
+        if not matched_class and classes:
+            matched_class = next((c for c in classes if c.description and c.description != "(役割記述なし)"), None)
+
+        if matched_class and matched_class.description:
+            fallback_desc = f"(Auto) {matched_class.description}"
+        else:
+            public_funcs = [e.name for e in entries if e.element_type == "Function"]
+            if public_funcs:
+                funcs_summary = ", ".join(public_funcs[:4]) + (", ..." if len(public_funcs) > 4 else "")
+                fallback_desc = f"(Auto) 主要インターフェース: {funcs_summary}"
+            elif classes:
+                classes_summary = ", ".join(c.name for c in classes[:3])
+                fallback_desc = f"(Auto) 提供クラス: {classes_summary}"
+
+        if fallback_desc:
+            entries.insert(
+                0,
+                RoleEntry(
+                    file_path=rel_file_path,
+                    element_type="Module",
+                    name=rel_file_path,
+                    signature="",
+                    description=fallback_desc,
+                )
+            )
+
     return entries
-
-
-# なぜ必要か: 二重表記（Class Foo: class Foo）を廃止し、クラス下にメソッドをインデント配置して構造を明瞭化
-def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
-    lines = ["# Role Map"]
-    grouped: dict[str, List[RoleEntry]] = {}
-    for entry in all_entries:
-        grouped.setdefault(entry.file_path, []).append(entry)
-
-    for path in sorted(grouped.keys()):
-        file_entries = grouped[path]
-        lines.append(f"[{path}]")
-
-        module_entries = [e for e in file_entries if e.element_type == "Module"]
-        if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
-            lines.append(f"Module: {module_entries[0].description}")
-
-        classes: dict[str, List[RoleEntry]] = {}
-        standalone_funcs: List[RoleEntry] = []
-
-        for entry in file_entries:
-            if entry.element_type == "Module":
-                continue
-            name_parts = entry.name.split(".")
-            base_func_name = name_parts[-1]
-            if base_func_name.startswith("_"):
-                continue
-
-            if entry.element_type == "Class":
-                classes.setdefault(entry.name, [])
-            elif entry.element_type == "Method":
-                class_name = name_parts[0] if len(name_parts) > 1 else ""
-                classes.setdefault(class_name, []).append(entry)
-            elif entry.element_type == "Function":
-                standalone_funcs.append(entry)
-
-        seen_classes = set()
-        for entry in file_entries:
-            if entry.element_type == "Class":
-                class_name = entry.name
-                seen_classes.add(class_name)
-                class_desc = f" - {entry.description}" if entry.description and entry.description != "(役割記述なし)" else ""
-                lines.append(f"class {class_name}:{class_desc}")
-                for method in classes.get(class_name, []):
-                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
-                    lines.append(f"  {method.signature}{desc}")
-
-        for class_name, methods in classes.items():
-            if class_name and class_name not in seen_classes:
-                lines.append(f"class {class_name}:")
-                for method in methods:
-                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
-                    lines.append(f"  {method.signature}{desc}")
-
-        for func in standalone_funcs:
-            desc = f"\n  {func.description}" if func.description and func.description != "(役割記述なし)" else ""
-            lines.append(f"{func.signature}{desc}")
-
-    return "\n".join(lines)

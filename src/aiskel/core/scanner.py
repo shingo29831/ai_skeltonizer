@@ -1,6 +1,7 @@
+import ast
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import pathspec
 
 # なぜ必要か: サードパーティ製ライブラリ・肥大化した中間生成物がトークン消費と解析時間を圧迫するのを防止
@@ -79,10 +80,45 @@ def get_target_files(project_root: Path) -> List[Path]:
     return target_files
 
 
+# なぜ必要か: パッケージレイヤーの責務境界を把握できるよう__init__.pyのdocstring/役割コメントを抽出
+def _extract_dir_role(dir_path: Path) -> str:
+    init_file = dir_path / "__init__.py"
+    if not init_file.exists() or not init_file.is_file():
+        return ""
+    try:
+        content = init_file.read_text(encoding="utf-8", errors="ignore").strip()
+        if not content:
+            return ""
+        tree = ast.parse(content)
+        doc = ast.get_docstring(tree)
+        if doc:
+            first_line = doc.strip().splitlines()[0].strip()
+            for prefix in ["@role:", "Role:", "役割:", "Module:"]:
+                if first_line.lower().startswith(prefix.lower()):
+                    first_line = first_line[len(prefix):].strip()
+            return first_line.strip()
+
+        for line in content.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("#"):
+                comment = line_s.lstrip("#").strip()
+                if comment and not comment.startswith("-*-") and not comment.startswith("coding"):
+                    for prefix in ["@role:", "Role:", "役割:", "Module:"]:
+                        if comment.lower().startswith(prefix.lower()):
+                            comment = comment[len(prefix):].strip()
+                    return comment.strip()
+            elif line_s:
+                break
+    except Exception:
+        pass
+    return ""
+
+
 class _TreeNode:
-    def __init__(self, name: str, is_dir: bool):
+    def __init__(self, name: str, is_dir: bool, role_description: str = ""):
         self.name = name
         self.is_dir = is_dir
+        self.role_description = role_description
         self.children: dict[str, "_TreeNode"] = {}
 
 
@@ -98,7 +134,11 @@ def _render_tree_node(node: _TreeNode, prefix: str = "") -> List[str]:
         is_last = (i == total - 1)
         connector = "└── " if is_last else "├── "
         child_label = f"{child.name}/" if child.is_dir else child.name
-        lines.append(f"{prefix}{connector}{child_label}")
+
+        # なぜ必要か: レイヤー責務をツリー行末へコメント形式で注釈し、アーキテクチャ境界の暗黙化を防止
+        role_annotation = f"        # {child.role_description}" if child.is_dir and child.role_description else ""
+        lines.append(f"{prefix}{connector}{child_label}{role_annotation}")
+
         if child.is_dir:
             extension = "    " if is_last else "│   "
             lines.extend(_render_tree_node(child, prefix + extension))
@@ -113,9 +153,11 @@ def generate_tree_text(project_root: Path, target_files: List[Path]) -> str:
         rel_path = file_path.relative_to(project_root)
         current = root_node
         parts = rel_path.parts
-        for part in parts[:-1]:
+        for idx, part in enumerate(parts[:-1]):
             if part not in current.children:
-                current.children[part] = _TreeNode(part, is_dir=True)
+                dir_path = project_root / Path(*parts[:idx + 1])
+                role_desc = _extract_dir_role(dir_path)
+                current.children[part] = _TreeNode(part, is_dir=True, role_description=role_desc)
             current = current.children[part]
         filename = parts[-1]
         current.children[filename] = _TreeNode(filename, is_dir=False)

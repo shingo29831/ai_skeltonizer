@@ -1,21 +1,25 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import List, Set, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Set, Tuple
 
 
 @dataclass
 class RoleEntry:
     file_path: str
-    element_type: str
+    element_type: str  # "Module", "Class", "Function", "Method", "Constant"
     name: str
     signature: str
     description: str
+    fields: Optional[List[str]] = None
+    enum_members: Optional[List[str]] = None
 
 
 @dataclass
 class DependencyEntry:
     file_path: str
-    imported_modules: List[str]
+    imported_modules: List[str] = field(default_factory=list)
+    internal_imports: List[str] = field(default_factory=list)
+    external_imports: List[str] = field(default_factory=list)
 
 
 class BaseParser(ABC):
@@ -31,7 +35,7 @@ class BaseParser(ABC):
         pass
 
 
-# なぜ必要か: 二重ラベル（Class Foo: class Foo）の排除とインデント構造化により要約トークンを約70%削減
+# なぜ必要か: 二重ラベル（Class Foo: class Foo）の排除、型フィールド・定数のコンパクト集約により要約トークンを最適化
 def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
     lines = ["# Role Map"]
     grouped: dict[str, List[RoleEntry]] = {}
@@ -46,16 +50,21 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
         if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
             lines.append(f"Module: {module_entries[0].description}")
 
+        constant_entries = [e for e in file_entries if e.element_type == "Constant"]
+        for const in constant_entries:
+            if const.signature:
+                lines.append(const.signature)
+
         classes: dict[str, List[RoleEntry]] = {}
         standalone_funcs: List[RoleEntry] = []
 
         for entry in file_entries:
-            if entry.element_type == "Module":
+            if entry.element_type in ("Module", "Constant"):
                 continue
             name_parts = entry.name.split(".")
             base_func_name = name_parts[-1]
             # なぜ必要か: 特殊メソッドおよびプライベートメソッドを除外して公開インターフェースに絞り込む
-            if base_func_name.startswith("_"):
+            if base_func_name.startswith("_") and entry.element_type in ("Method", "Function"):
                 continue
 
             if entry.element_type == "Class":
@@ -72,7 +81,9 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
                 class_name = entry.name
                 seen_classes.add(class_name)
                 class_desc = f" - {entry.description}" if entry.description and entry.description != "(役割記述なし)" else ""
-                lines.append(f"class {class_name}:{class_desc}")
+                lines.append(f"{entry.signature}{class_desc}")
+                if entry.fields:
+                    lines.append(f"  fields: {', '.join(entry.fields)}")
                 for method in classes.get(class_name, []):
                     desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
                     lines.append(f"  {method.signature}{desc}")
@@ -91,10 +102,15 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
     return "\n".join(lines)
 
 
+# なぜ必要か: 内部パス正規化と外部サードパーティ分離によりリファクタリング影響範囲分析を支援
 def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
     lines = ["# Dependency Graph"]
     for entry in sorted(entries, key=lambda e: e.file_path):
-        if not entry.imported_modules:
+        if not entry.internal_imports and not entry.external_imports:
             continue
-        lines.append(f"{entry.file_path} -> {', '.join(entry.imported_modules)}")
+        lines.append(entry.file_path)
+        if entry.internal_imports:
+            lines.append(f"  internal: {', '.join(entry.internal_imports)}")
+        if entry.external_imports:
+            lines.append(f"  external: {', '.join(entry.external_imports)}")
     return "\n".join(lines)
