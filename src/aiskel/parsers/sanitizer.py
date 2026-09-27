@@ -156,8 +156,10 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
         if _is_trivial_docstring(line, entity_name):
             continue
 
-        if re.match(r"^(?:Role|AI|Rule)\s*:", line, re.IGNORECASE):
-            rest = line.split(":", 1)[1].strip()
+        # なぜ必要か: Module: @role: などの複合プレフィックスを完全に除去し二重ラベル化を防止
+        m = re.match(r"^(?:(?:Module|Class|Function)\s*:?\s*)?(?:@role|Role|AI|Rule)\s*:?\s*", line, re.IGNORECASE)
+        if m and m.end() > 0:
+            rest = line[m.end():].strip()
             if not rest or _is_trivial_docstring(rest, entity_name):
                 continue
             return rest
@@ -191,13 +193,25 @@ def extract_clean_role_description(
         if not summary:
             fallback_comment_summary = extract_summary_line(leading_comments, entity_name)
 
+    # なぜ必要か: 多重に付与された @role や Module: プレフィックスを再帰的にストリップして純粋な説明文のみを抽出
+    def _strip_role_prefix(text: str) -> str:
+        return re.sub(
+            r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\s*:?\s*|@role\s*:?|Role\s*:?|AI\s*:?|Rule\s*:?)\s*)+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+
     if explicit_role_comment:
-        if summary and summary != explicit_role_comment:
-            return f"{explicit_role_comment} / {summary}"
-        return explicit_role_comment
+        clean_explicit = _strip_role_prefix(explicit_role_comment)
+        if summary:
+            clean_summary = _strip_role_prefix(summary)
+            if clean_summary and clean_summary != clean_explicit:
+                return f"{clean_explicit} / {clean_summary}"
+        return clean_explicit
 
     if summary:
-        return summary
+        return _strip_role_prefix(summary)
 
     if fallback_comment_summary:
         return fallback_comment_summary

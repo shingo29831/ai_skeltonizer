@@ -12,19 +12,5 @@ class PythonParser(BaseParser):
             source_code, rel_file_path, keep_functions, only_nodes
         )
         
-        roles = [
-            RoleEntry(
-                file_path=r.file_path,
-                element_type=r.element_type,
-                name=r.name,
-                signature=r.signature,
-                description=r.description
-            ) for r in ast_roles
-        ]
-        
-        dependency = DependencyEntry(
-            file_path=ast_dep.file_path,
-            imported_modules=ast_dep.imported_modules
-        )
-        
-        return skeleton_code, roles, dependency
+        # なぜ必要か: 手動の再インスタンス化による fields / ui_handlers / internal_imports / external_imports の欠落を根本防止
+        return skeleton_code, ast_roles, ast_dep

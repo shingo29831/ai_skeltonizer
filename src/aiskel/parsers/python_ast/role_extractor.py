@@ -138,16 +138,21 @@ def _infer_type_str(val_node: Optional[ast.AST]) -> str:
 # なぜ必要か: 中途半端な「...」省略を廃止し、完全値または型+役割で1行定義してハルシネーションを防止 (要件1-2)
 def _format_constant_entry(
     target_name: str,
-    val_node: Optional[ast.AST],
+    node: ast.Assign | ast.AnnAssign,
     ann_node: Optional[ast.AST] = None,
     source_lines: Optional[List[str]] = None,
-    lineno: int = 0,
 ) -> str:
+    val_node = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+    lineno = getattr(node, "lineno", 0)
     role_comment = ""
+    # なぜ必要か: 正規表現や文字列リテラル内部の「#」をコメントと誤認して壊れた断片を出力するバグを防止
     if source_lines and 1 <= lineno <= len(source_lines):
         line = source_lines[lineno - 1]
-        if "#" in line:
-            role_comment = line.split("#", 1)[1].strip()
+        end_col = getattr(node, "end_col_offset", None)
+        if end_col is not None and end_col <= len(line):
+            tail = line[end_col:]
+            if "#" in tail:
+                role_comment = tail.split("#", 1)[1].strip()
 
     if ann_node:
         try:
@@ -191,17 +196,15 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
     constants: List[str] = []
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.Assign):
-            lineno = getattr(node, "lineno", 0)
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id.isupper() and not target.id.startswith("_"):
                     constants.append(
-                        _format_constant_entry(target.id, node.value, None, source_lines, lineno)
+                        _format_constant_entry(target.id, node, None, source_lines)
                     )
         elif isinstance(node, ast.AnnAssign):
-            lineno = getattr(node, "lineno", 0)
             if isinstance(node.target, ast.Name) and node.target.id.isupper() and not node.target.id.startswith("_"):
                 constants.append(
-                    _format_constant_entry(node.target.id, node.value, node.annotation, source_lines, lineno)
+                    _format_constant_entry(node.target.id, node, node.annotation, source_lines)
                 )
 
     if constants:
