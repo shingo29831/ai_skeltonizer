@@ -307,8 +307,13 @@ def main(args: Optional[List[str]] = None) -> int:
                 try:
                     for f in modified_files:
                         subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
-                    subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
-                    print("✔ 自動コミットが完了しました。")
+                    # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
+                    staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
+                    if staged_diff:
+                        subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
+                        print("✔ 自動コミットが完了しました。")
+                    else:
+                        print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
                 except (subprocess.CalledProcessError, FileNotFoundError) as e:
                     print(f"⚠ 自動コミットに失敗しました: {e}")
 
