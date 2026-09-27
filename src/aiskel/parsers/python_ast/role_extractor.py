@@ -7,6 +7,20 @@ from typing import List, Optional
 from aiskel.parsers.base_parser import RoleEntry
 from aiskel.parsers.sanitizer import extract_clean_role_description
 
+# なぜ必要か: コンテキストマネージャーやCallable等のインターフェース契約に関わる特殊メソッドを保持しAIの見落としを防止
+CRITICAL_DUNDER_METHODS = {
+    "__init__",
+    "__call__",
+    "__enter__",
+    "__exit__",
+    "__getitem__",
+    "__iter__",
+    "__len__",
+    "__contains__",
+    "__aenter__",
+    "__aexit__",
+}
+
 # なぜ必要か: Qtの基底イベントハンドラを一般メソッドから分離・集約しAIの見落とし防止とトークン節約を両立 (要件1-1 方針A)
 QT_UI_EVENT_HANDLERS = {
     # マウス系
@@ -210,12 +224,22 @@ def _format_constant_entry(
 
     comment_suffix = f"  # {role_comment}" if role_comment else ""
 
-    if val_node and isinstance(val_node, ast.Constant):
-        val = val_node.value
-        if isinstance(val, (bool, int, float)) or val is None:
-            return f"{target_name} = {val}{comment_suffix}"
-        if isinstance(val, str) and len(repr(val)) <= 35:
-            return f"{target_name} = {repr(val)}{comment_suffix}"
+    # なぜ必要か: 設定・ガード条件となる短小コレクションをリテラル展開しAIのハルシネーションを抑止
+    if val_node:
+        if isinstance(val_node, ast.Constant):
+            val = val_node.value
+            if isinstance(val, (bool, int, float)) or val is None:
+                return f"{target_name} = {val}{comment_suffix}"
+            if isinstance(val, str) and len(repr(val)) <= 40:
+                return f"{target_name} = {repr(val)}{comment_suffix}"
+        elif isinstance(val_node, (ast.List, ast.Set, ast.Tuple, ast.Dict)):
+            try:
+                unparsed = ast.unparse(val_node) if hasattr(ast, "unparse") else ""
+                elts_count = len(getattr(val_node, "elts", getattr(val_node, "keys", [])))
+                if unparsed and elts_count <= 8 and len(unparsed) <= 60:
+                    return f"{target_name} = {unparsed}{comment_suffix}"
+            except Exception:
+                pass
 
     return f"{target_name}: {type_str}{comment_suffix}"
 
@@ -261,12 +285,13 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             constants.append(_format_constant_entry(target_name, node, ann_node, source_lines))
 
     if constants:
+        # なぜ必要か: 重要定数の切り捨てを緩和しつつトークン上限を保護するため最大10件まで展開
         entries.append(
             RoleEntry(
                 file_path=rel_file_path,
                 element_type="Constant",
                 name="constants",
-                signature=f"constants: {', '.join(constants[:6])}" + (", ..." if len(constants) > 6 else ""),
+                signature=f"constants: {', '.join(constants[:10])}" + (", ..." if len(constants) > 10 else ""),
                 description="",
             )
         )
@@ -276,6 +301,32 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
             base_names = _get_base_names(node)
             is_enum = any("Enum" in b or "Flag" in b for b in base_names)
+
+            # なぜ必要か: Enum・通常クラス双方に定義されたメソッドやプロパティの完全性を維持
+            ui_handlers: List[str] = []
+            method_entries: List[RoleEntry] = []
+
+            for sub_node in node.body:
+                if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # なぜ必要か: __init__および重要インターフェース契約メソッドを保持
+                    if sub_node.name.startswith("_") and sub_node.name not in CRITICAL_DUNDER_METHODS:
+                        continue
+                    if sub_node.name in QT_UI_EVENT_HANDLERS:
+                        ui_handlers.append(sub_node.name)
+                        continue
+
+                    sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
+                    method_raises = _extract_raises_from_node(sub_node)
+                    method_entries.append(
+                        RoleEntry(
+                            file_path=rel_file_path,
+                            element_type="Method",
+                            name=f"{node.name}.{sub_node.name}",
+                            signature=_get_function_signature(sub_node),
+                            description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
+                            raises=method_raises if method_raises else None,
+                        )
+                    )
 
             if is_enum:
                 enum_members = []
@@ -299,6 +350,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                         enum_members=enum_members,
                     )
                 )
+                entries.extend(method_entries)
             else:
                 # なぜ必要か: 型注釈付きフィールドを抽出しプロパティ参照エラーを完全抑止 (要件2-1)
                 extracted_fields: List[str] = []
@@ -310,32 +362,6 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                             except Exception:
                                 ann_str = "Any"
                             extracted_fields.append(f"{sub.target.id}: {ann_str}")
-
-                # なぜ必要か: UIイベントハンドラを分離検出し、通常メソッド一覧から除外 (要件1-1 方針A)
-                ui_handlers: List[str] = []
-                method_entries: List[RoleEntry] = []
-
-                for sub_node in node.body:
-                    if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        # なぜ必要か: __init__を除外するとクラスの初期化契約（必須引数）をAIが見落とすため保持
-                        if sub_node.name.startswith("_") and sub_node.name != "__init__":
-                            continue
-                        if sub_node.name in QT_UI_EVENT_HANDLERS:
-                            ui_handlers.append(sub_node.name)
-                            continue
-
-                        sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
-                        method_raises = _extract_raises_from_node(sub_node)
-                        method_entries.append(
-                            RoleEntry(
-                                file_path=rel_file_path,
-                                element_type="Method",
-                                name=f"{node.name}.{sub_node.name}",
-                                signature=_get_function_signature(sub_node),
-                                description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
-                                raises=method_raises if method_raises else None,
-                            )
-                        )
 
                 # なぜ必要か: @dataclassデコレータを保持しデータモデルの種別誤認を防止
                 is_dataclass = any(
