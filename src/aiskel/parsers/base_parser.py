@@ -105,19 +105,24 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
                 if entry.ui_handlers:
                     lines.append(f"  ui_handlers: {', '.join(entry.ui_handlers)}")
                 for method in classes.get(class_name, []):
+                    # なぜ必要か: 例外仕様を末尾コメントとして最小トークンで明示しAIのエラー処理設計漏れを防止
+                    raises_str = f"  # raises: {', '.join(method.raises)}" if method.raises else ""
                     desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" and not method.description.startswith("(Auto)") else ""
-                    lines.append(f"  {method.signature}{desc}")
+                    lines.append(f"  {method.signature}{raises_str}{desc}")
 
         for class_name, methods in classes.items():
             if class_name and class_name not in seen_classes:
                 lines.append(f"class {class_name}:")
                 for method in methods:
+                    raises_str = f"  # raises: {', '.join(method.raises)}" if method.raises else ""
                     desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" and not method.description.startswith("(Auto)") else ""
-                    lines.append(f"  {method.signature}{desc}")
+                    lines.append(f"  {method.signature}{raises_str}{desc}")
 
         for func in standalone_funcs:
+            # なぜ必要か: 例外仕様を末尾コメントとして最小トークンで明示しAIのエラー処理設計漏れを防止
+            raises_str = f"  # raises: {', '.join(func.raises)}" if func.raises else ""
             desc = f"\n  {func.description}" if func.description and func.description != "(役割記述なし)" and not func.description.startswith("(Auto)") else ""
-            lines.append(f"{func.signature}{desc}")
+            lines.append(f"{func.signature}{raises_str}{desc}")
 
     return "\n".join(lines)
 

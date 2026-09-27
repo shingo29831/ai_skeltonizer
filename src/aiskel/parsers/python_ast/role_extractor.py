@@ -309,6 +309,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                             continue
 
                         sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
+                        method_raises = _extract_raises_from_node(sub_node)
                         method_entries.append(
                             RoleEntry(
                                 file_path=rel_file_path,
@@ -316,15 +317,18 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                                 name=f"{node.name}.{sub_node.name}",
                                 signature=_get_function_signature(sub_node),
                                 description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
+                                raises=method_raises if method_raises else None,
                             )
                         )
 
+                # なぜ必要か: 基底クラスをシグネチャに明示しAIによるインターフェース・多態性の見落としを抑止
+                bases_suffix = f"({', '.join(base_names)})" if base_names else ""
                 entries.append(
                     RoleEntry(
                         file_path=rel_file_path,
                         element_type="Class",
                         name=node.name,
-                        signature=f"class {node.name}:",
+                        signature=f"class {node.name}{bases_suffix}:",
                         description=_build_description(ast.get_docstring(node), leading_comments, node.name),
                         fields=extracted_fields if extracted_fields else None,
                         ui_handlers=ui_handlers if ui_handlers else None,
@@ -337,6 +341,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             if node.name.startswith("_"):
                 continue
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
+            func_raises = _extract_raises_from_node(node)
             entries.append(
                 RoleEntry(
                     file_path=rel_file_path,
@@ -344,6 +349,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     name=node.name,
                     signature=_get_function_signature(node),
                     description=_build_description(ast.get_docstring(node), leading_comments, node.name),
+                    raises=func_raises if func_raises else None,
                 )
             )
 
