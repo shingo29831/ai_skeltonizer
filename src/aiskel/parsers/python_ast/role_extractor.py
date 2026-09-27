@@ -1,9 +1,48 @@
+"""Module: @role: Python ASTからモジュール・クラス・関数・定数およびUIハンドラの役割メタデータを抽出する。"""
+
 import ast
 import re
 from typing import List, Optional
 
-from aiskel.parsers.base_parser import RoleEntry, generate_role_map_text
+from aiskel.parsers.base_parser import RoleEntry
 from aiskel.parsers.sanitizer import extract_clean_role_description
+
+# なぜ必要か: Qtの基底イベントハンドラを一般メソッドから分離・集約しAIの見落とし防止とトークン節約を両立 (要件1-1 方針A)
+QT_UI_EVENT_HANDLERS = {
+    # マウス系
+    "mousePressEvent",
+    "mouseReleaseEvent",
+    "mouseDoubleClickEvent",
+    "mouseMoveEvent",
+    "wheelEvent",
+    # キーボード系
+    "keyPressEvent",
+    "keyReleaseEvent",
+    # 描画・ジオメトリ・ライフサイクル
+    "paintEvent",
+    "resizeEvent",
+    "moveEvent",
+    "showEvent",
+    "hideEvent",
+    "closeEvent",
+    "changeEvent",
+    # フォーカス・カーソル系
+    "focusInEvent",
+    "focusOutEvent",
+    "enterEvent",
+    "leaveEvent",
+    "inputMethodEvent",
+    # ドラッグ＆ドロップ系
+    "dragEnterEvent",
+    "dragMoveEvent",
+    "dragLeaveEvent",
+    "dropEvent",
+    # その他UIイベント
+    "contextMenuEvent",
+    "timerEvent",
+    "actionEvent",
+    "tabletEvent",
+}
 
 
 def _get_leading_comments(source_lines: List[str], start_lineno: int) -> List[str]:
@@ -25,7 +64,6 @@ def _get_leading_comments(source_lines: List[str], start_lineno: int) -> List[st
     return comments
 
 
-# なぜ必要か: 装飾線やライセンス条項を排除した単一の自然文サマリーを抽出するためにsanitizerモジュールへ統合
 def _build_description(docstring: Optional[str], leading_comments: List[str], entity_name: str = "") -> str:
     return extract_clean_role_description(
         docstring=docstring,
@@ -59,14 +97,76 @@ def _get_base_names(node: ast.ClassDef) -> List[str]:
     return bases
 
 
-def _format_constant_value(val_node: ast.AST) -> str:
-    try:
-        val_str = ast.unparse(val_node) if hasattr(ast, "unparse") else "..."
-        if len(val_str) > 25:
-            return val_str[:22] + "..."
-        return val_str
-    except Exception:
-        return "..."
+def _infer_type_str(val_node: Optional[ast.AST]) -> str:
+    if val_node is None:
+        return "Any"
+    if isinstance(val_node, ast.List):
+        if val_node.elts and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in val_node.elts):
+            return "list[str]"
+        return "list"
+    if isinstance(val_node, ast.Set):
+        if val_node.elts and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in val_node.elts):
+            return "set[str]"
+        return "set"
+    if isinstance(val_node, ast.Dict):
+        return "dict"
+    if isinstance(val_node, ast.Tuple):
+        return "tuple"
+    if isinstance(val_node, ast.Constant):
+        if isinstance(val_node.value, str):
+            return "str"
+        if isinstance(val_node.value, bool):
+            return "bool"
+        if isinstance(val_node.value, int):
+            return "int"
+        if isinstance(val_node.value, float):
+            return "float"
+        return type(val_node.value).__name__
+    if isinstance(val_node, ast.Call):
+        func_name = ""
+        if isinstance(val_node.func, ast.Name):
+            func_name = val_node.func.id
+        elif isinstance(val_node.func, ast.Attribute):
+            func_name = val_node.func.attr
+        if func_name == "compile":
+            return "re.Pattern"
+        if func_name in ("Path", "set", "list", "dict"):
+            return func_name
+    return "Any"
+
+
+# なぜ必要か: 中途半端な「...」省略を廃止し、完全値または型+役割で1行定義してハルシネーションを防止 (要件1-2)
+def _format_constant_entry(
+    target_name: str,
+    val_node: Optional[ast.AST],
+    ann_node: Optional[ast.AST] = None,
+    source_lines: Optional[List[str]] = None,
+    lineno: int = 0,
+) -> str:
+    role_comment = ""
+    if source_lines and 1 <= lineno <= len(source_lines):
+        line = source_lines[lineno - 1]
+        if "#" in line:
+            role_comment = line.split("#", 1)[1].strip()
+
+    if ann_node:
+        try:
+            type_str = ast.unparse(ann_node) if hasattr(ast, "unparse") else "Any"
+        except Exception:
+            type_str = _infer_type_str(val_node)
+    else:
+        type_str = _infer_type_str(val_node)
+
+    comment_suffix = f"  # {role_comment}" if role_comment else ""
+
+    if val_node and isinstance(val_node, ast.Constant):
+        val = val_node.value
+        if isinstance(val, (bool, int, float)) or val is None:
+            return f"{target_name} = {val}{comment_suffix}"
+        if isinstance(val, str) and len(repr(val)) <= 35:
+            return f"{target_name} = {repr(val)}{comment_suffix}"
+
+    return f"{target_name}: {type_str}{comment_suffix}"
 
 
 def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str = "") -> List[RoleEntry]:
@@ -87,17 +187,22 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             )
         )
 
-    # なぜ必要か: UPPER_SNAKE_CASEの主要定数を1行に圧縮し、マジックナンバーや設定値の誤認を防止
+    # なぜ必要か: UPPER_SNAKE_CASE定数を型+役割の1行形式へ集約し省略「...」を完全廃止 (要件1-2)
     constants: List[str] = []
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.Assign):
+            lineno = getattr(node, "lineno", 0)
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id.isupper() and not target.id.startswith("_"):
-                    constants.append(f"{target.id} = {_format_constant_value(node.value)}")
+                    constants.append(
+                        _format_constant_entry(target.id, node.value, None, source_lines, lineno)
+                    )
         elif isinstance(node, ast.AnnAssign):
+            lineno = getattr(node, "lineno", 0)
             if isinstance(node.target, ast.Name) and node.target.id.isupper() and not node.target.id.startswith("_"):
-                val_str = f" = {_format_constant_value(node.value)}" if node.value else ""
-                constants.append(f"{node.target.id}{val_str}")
+                constants.append(
+                    _format_constant_entry(node.target.id, node.value, node.annotation, source_lines, lineno)
+                )
 
     if constants:
         entries.append(
@@ -115,16 +220,7 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
             base_names = _get_base_names(node)
             is_enum = any("Enum" in b or "Flag" in b for b in base_names)
-            has_methods = any(isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) for sub in node.body)
-            is_pydantic = any("BaseModel" in b for b in base_names)
-            is_dataclass = any(
-                (isinstance(d, ast.Name) and d.id == "dataclass")
-                or (isinstance(d, ast.Attribute) and d.attr == "dataclass")
-                or (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "dataclass")
-                for d in node.decorator_list
-            )
 
-            # なぜ必要か: Enumクラスの列挙メンバーを1行に集約し、AIによる文字列リテラルのハルシネーションを防止
             if is_enum:
                 enum_members = []
                 for sub in node.body:
@@ -148,17 +244,39 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     )
                 )
             else:
-                # なぜ必要か: メソッドのない型定義やPydantic/Dataclassの属性型を抽出し、プロパティ参照エラーを完全抑止
+                # なぜ必要か: 型注釈付きフィールドを抽出しプロパティ参照エラーを完全抑止 (要件2-1)
                 extracted_fields: List[str] = []
-                if (not has_methods) or is_pydantic or is_dataclass:
-                    for sub in node.body:
-                        if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
-                            if not sub.target.id.startswith("_"):
-                                try:
-                                    ann_str = ast.unparse(sub.annotation) if hasattr(ast, "unparse") else "Any"
-                                except Exception:
-                                    ann_str = "Any"
-                                extracted_fields.append(f"{sub.target.id}: {ann_str}")
+                for sub in node.body:
+                    if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                        if not sub.target.id.startswith("_"):
+                            try:
+                                ann_str = ast.unparse(sub.annotation) if hasattr(ast, "unparse") else "Any"
+                            except Exception:
+                                ann_str = "Any"
+                            extracted_fields.append(f"{sub.target.id}: {ann_str}")
+
+                # なぜ必要か: UIイベントハンドラを分離検出し、通常メソッド一覧から除外 (要件1-1 方針A)
+                ui_handlers: List[str] = []
+                method_entries: List[RoleEntry] = []
+
+                for sub_node in node.body:
+                    if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if sub_node.name.startswith("_"):
+                            continue
+                        if sub_node.name in QT_UI_EVENT_HANDLERS:
+                            ui_handlers.append(sub_node.name)
+                            continue
+
+                        sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
+                        method_entries.append(
+                            RoleEntry(
+                                file_path=rel_file_path,
+                                element_type="Method",
+                                name=f"{node.name}.{sub_node.name}",
+                                signature=_get_function_signature(sub_node),
+                                description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
+                            )
+                        )
 
                 entries.append(
                     RoleEntry(
@@ -168,27 +286,13 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                         signature=f"class {node.name}:",
                         description=_build_description(ast.get_docstring(node), leading_comments, node.name),
                         fields=extracted_fields if extracted_fields else None,
+                        ui_handlers=ui_handlers if ui_handlers else None,
                     )
                 )
-
-            for sub_node in node.body:
-                if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # なぜ必要か: 特殊メソッド（__init__等）や内部メソッド（_始まり）を除外して公開APIに絞りトークンを節約
-                    if sub_node.name.startswith("_"):
-                        continue
-                    sub_comments = _get_leading_comments(source_lines, getattr(sub_node, "lineno", 0))
-                    entries.append(
-                        RoleEntry(
-                            file_path=rel_file_path,
-                            element_type="Method",
-                            name=f"{node.name}.{sub_node.name}",
-                            signature=_get_function_signature(sub_node),
-                            description=_build_description(ast.get_docstring(sub_node), sub_comments, sub_node.name),
-                        )
-                    )
+                entries.extend(method_entries)
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # なぜ必要か: 内部ヘルパー関数（_始まり）を除外してモジュール公開インターフェースに限定
+            # なぜ必要か: 内部ヘルパー関数（_始まり）を除外して公開インターフェースに限定 (要件1-4)
             if node.name.startswith("_"):
                 continue
             leading_comments = _get_leading_comments(source_lines, getattr(node, "lineno", 0))
@@ -199,43 +303,6 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                     name=node.name,
                     signature=_get_function_signature(node),
                     description=_build_description(ast.get_docstring(node), leading_comments, node.name),
-                )
-            )
-
-    # なぜ必要か: docstring無記載のファイルでも主要クラスまたは公開関数から責務を推測可能にするフォールバック
-    if not has_explicit_module_desc:
-        fallback_desc = ""
-        file_stem = rel_file_path.split("/")[-1].replace(".py", "")
-        clean_stem = re.sub(r"[_\-]", "", file_stem).lower()
-
-        classes = [e for e in entries if e.element_type == "Class"]
-        matched_class = next(
-            (c for c in classes if re.sub(r"[_\-]", "", c.name).lower() == clean_stem and c.description and c.description != "(役割記述なし)"),
-            None
-        )
-        if not matched_class and classes:
-            matched_class = next((c for c in classes if c.description and c.description != "(役割記述なし)"), None)
-
-        if matched_class and matched_class.description:
-            fallback_desc = f"(Auto) {matched_class.description}"
-        else:
-            public_funcs = [e.name for e in entries if e.element_type == "Function"]
-            if public_funcs:
-                funcs_summary = ", ".join(public_funcs[:4]) + (", ..." if len(public_funcs) > 4 else "")
-                fallback_desc = f"(Auto) 主要インターフェース: {funcs_summary}"
-            elif classes:
-                classes_summary = ", ".join(c.name for c in classes[:3])
-                fallback_desc = f"(Auto) 提供クラス: {classes_summary}"
-
-        if fallback_desc:
-            entries.insert(
-                0,
-                RoleEntry(
-                    file_path=rel_file_path,
-                    element_type="Module",
-                    name=rel_file_path,
-                    signature="",
-                    description=fallback_desc,
                 )
             )
 

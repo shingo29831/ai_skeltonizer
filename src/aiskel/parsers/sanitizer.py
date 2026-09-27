@@ -1,3 +1,5 @@
+"""Module: @role: コメントやdocstringから装飾記号・履歴・ライセンス条項を排除し、責務説明文を正規化する。"""
+
 import re
 from typing import List, Optional
 
@@ -155,11 +157,10 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
             continue
 
         if re.match(r"^(?:Role|AI|Rule)\s*:", line, re.IGNORECASE):
-            tag = line.split(":", 1)[0].strip()
             rest = line.split(":", 1)[1].strip()
             if not rest or _is_trivial_docstring(rest, entity_name):
                 continue
-            return f"**[{tag}]** {rest}"
+            return rest
 
         return line
 
@@ -183,10 +184,9 @@ def extract_clean_role_description(
         for c in leading_comments:
             cleaned = clean_comment_line(c)
             if re.match(r"^(?:Role|AI|Rule)\s*:", cleaned, re.IGNORECASE):
-                tag = cleaned.split(":", 1)[0].strip()
                 rest = cleaned.split(":", 1)[1].strip()
                 if rest and not _is_trivial_docstring(rest, entity_name):
-                    explicit_role_comment = f"**[{tag}]** {rest}"
+                    explicit_role_comment = rest
                     break
         if not summary:
             fallback_comment_summary = extract_summary_line(leading_comments, entity_name)

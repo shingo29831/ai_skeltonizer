@@ -1,6 +1,9 @@
+"""Module: @role: 無視リストを考慮したファイル走査およびレイヤー責務注釈付きディレクトリツリーの生成を担当する。"""
+
 import ast
 import os
 from pathlib import Path
+import re
 from typing import List, Optional
 import pathspec
 
@@ -80,7 +83,7 @@ def get_target_files(project_root: Path) -> List[Path]:
     return target_files
 
 
-# なぜ必要か: パッケージレイヤーの責務境界を把握できるよう__init__.pyのdocstring/役割コメントを抽出
+# なぜ必要か: パッケージレイヤーの責務境界を把握できるよう__init__.pyのdocstring/役割コメントを抽出 (要件2-2)
 def _extract_dir_role(dir_path: Path) -> str:
     init_file = dir_path / "__init__.py"
     if not init_file.exists() or not init_file.is_file():
@@ -93,20 +96,26 @@ def _extract_dir_role(dir_path: Path) -> str:
         doc = ast.get_docstring(tree)
         if doc:
             first_line = doc.strip().splitlines()[0].strip()
-            for prefix in ["@role:", "Role:", "役割:", "Module:"]:
-                if first_line.lower().startswith(prefix.lower()):
-                    first_line = first_line[len(prefix):].strip()
-            return first_line.strip()
+            first_line = re.sub(
+                r"^(?:Module\s*:\s*)?(?:@role\s*:?|Role\s*:?|役割\s*:?|\*\*\[(?:Role|AI|Rule)\]\*\*)\s*",
+                "",
+                first_line,
+                flags=re.IGNORECASE,
+            ).strip()
+            return first_line
 
         for line in content.splitlines():
             line_s = line.strip()
             if line_s.startswith("#"):
                 comment = line_s.lstrip("#").strip()
                 if comment and not comment.startswith("-*-") and not comment.startswith("coding"):
-                    for prefix in ["@role:", "Role:", "役割:", "Module:"]:
-                        if comment.lower().startswith(prefix.lower()):
-                            comment = comment[len(prefix):].strip()
-                    return comment.strip()
+                    comment = re.sub(
+                        r"^(?:Module\s*:\s*)?(?:@role\s*:?|Role\s*:?|役割\s*:?|\*\*\[(?:Role|AI|Rule)\]\*\*)\s*",
+                        "",
+                        comment,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    return comment
             elif line_s:
                 break
     except Exception:
@@ -134,10 +143,15 @@ def _render_tree_node(node: _TreeNode, prefix: str = "") -> List[str]:
         is_last = (i == total - 1)
         connector = "└── " if is_last else "├── "
         child_label = f"{child.name}/" if child.is_dir else child.name
+        line_main = f"{prefix}{connector}{child_label}"
 
-        # なぜ必要か: レイヤー責務をツリー行末へコメント形式で注釈し、アーキテクチャ境界の暗黙化を防止
-        role_annotation = f"        # {child.role_description}" if child.is_dir and child.role_description else ""
-        lines.append(f"{prefix}{connector}{child_label}{role_annotation}")
+        # なぜ必要か: レイヤー責務を行末へコメント注釈し、アーキテクチャ境界の暗黙化を防止 (要件2-2)
+        if child.is_dir and child.role_description:
+            padding = max(1, 24 - len(line_main))
+            line_str = f"{line_main}{' ' * padding}# {child.role_description}"
+        else:
+            line_str = line_main
+        lines.append(line_str)
 
         if child.is_dir:
             extension = "    " if is_last else "│   "

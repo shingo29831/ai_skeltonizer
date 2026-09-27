@@ -1,5 +1,8 @@
+"""Module: @role: スケルトンパーサーの抽象基底インターフェースおよび要約テキスト生成フォーマッタを提供する。"""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import re
 from typing import List, Optional, Set, Tuple
 
 
@@ -12,6 +15,7 @@ class RoleEntry:
     description: str
     fields: Optional[List[str]] = None
     enum_members: Optional[List[str]] = None
+    ui_handlers: Optional[List[str]] = None
 
 
 @dataclass
@@ -35,7 +39,7 @@ class BaseParser(ABC):
         pass
 
 
-# なぜ必要か: 二重ラベル（Class Foo: class Foo）の排除、型フィールド・定数のコンパクト集約により要約トークンを最適化
+# なぜ必要か: 二重ラベルの排除、型フィールド・UIハンドラ・定数のコンパクト集約により要約トークンを最適化
 def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
     lines = ["# Role Map"]
     grouped: dict[str, List[RoleEntry]] = {}
@@ -47,8 +51,18 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
         lines.append(f"[{path}]")
 
         module_entries = [e for e in file_entries if e.element_type == "Module"]
-        if module_entries and module_entries[0].description and module_entries[0].description != "(役割記述なし)":
-            lines.append(f"Module: {module_entries[0].description}")
+        if module_entries and module_entries[0].description:
+            raw_desc = module_entries[0].description.strip()
+            # なぜ必要か: (Auto)自動生成ダミーを排除し、Module: @role: 書式へ統一 (要件1-3, 2-4)
+            if not raw_desc.startswith("(Auto)") and raw_desc != "(役割記述なし)":
+                clean_desc = re.sub(
+                    r"^(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:@role|Role|AI|Rule)\s*:?)\s*",
+                    "",
+                    raw_desc,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if clean_desc:
+                    lines.append(f"Module: @role: {clean_desc}")
 
         constant_entries = [e for e in file_entries if e.element_type == "Constant"]
         for const in constant_entries:
@@ -63,7 +77,7 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
                 continue
             name_parts = entry.name.split(".")
             base_func_name = name_parts[-1]
-            # なぜ必要か: 特殊メソッドおよびプライベートメソッドを除外して公開インターフェースに絞り込む
+            # なぜ必要か: 特殊メソッドおよびプライベートメソッドを除外して公開インターフェースに絞り込む (要件1-4)
             if base_func_name.startswith("_") and entry.element_type in ("Method", "Function"):
                 continue
 
@@ -80,35 +94,39 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
             if entry.element_type == "Class":
                 class_name = entry.name
                 seen_classes.add(class_name)
-                class_desc = f" - {entry.description}" if entry.description and entry.description != "(役割記述なし)" else ""
+                class_desc = f" - {entry.description}" if entry.description and entry.description != "(役割記述なし)" and not entry.description.startswith("(Auto)") else ""
                 lines.append(f"{entry.signature}{class_desc}")
+                # なぜ必要か: フィールド属性・型を明記しプロパティ参照エラーを抑止 (要件2-1)
                 if entry.fields:
                     lines.append(f"  fields: {', '.join(entry.fields)}")
+                # なぜ必要か: UI定型ハンドラを1行に集約しAIの見落とし防止とトークン削減を両立 (要件1-1 方針A)
+                if entry.ui_handlers:
+                    lines.append(f"  ui_handlers: {', '.join(entry.ui_handlers)}")
                 for method in classes.get(class_name, []):
-                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
+                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" and not method.description.startswith("(Auto)") else ""
                     lines.append(f"  {method.signature}{desc}")
 
         for class_name, methods in classes.items():
             if class_name and class_name not in seen_classes:
                 lines.append(f"class {class_name}:")
                 for method in methods:
-                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" else ""
+                    desc = f"\n    {method.description}" if method.description and method.description != "(役割記述なし)" and not method.description.startswith("(Auto)") else ""
                     lines.append(f"  {method.signature}{desc}")
 
         for func in standalone_funcs:
-            desc = f"\n  {func.description}" if func.description and func.description != "(役割記述なし)" else ""
+            desc = f"\n  {func.description}" if func.description and func.description != "(役割記述なし)" and not func.description.startswith("(Auto)") else ""
             lines.append(f"{func.signature}{desc}")
 
     return "\n".join(lines)
 
 
-# なぜ必要か: 内部パス正規化と外部サードパーティ分離によりリファクタリング影響範囲分析を支援
+# なぜ必要か: 内部パス正規化と外部サードパーティ分離によりリファクタリング影響範囲分析を支援 (要件2-3)
 def generate_dependency_map_text(entries: List[DependencyEntry]) -> str:
     lines = ["# Dependency Graph"]
     for entry in sorted(entries, key=lambda e: e.file_path):
         if not entry.internal_imports and not entry.external_imports:
             continue
-        lines.append(entry.file_path)
+        lines.append(f"[{entry.file_path}]")
         if entry.internal_imports:
             lines.append(f"  internal: {', '.join(entry.internal_imports)}")
         if entry.external_imports:

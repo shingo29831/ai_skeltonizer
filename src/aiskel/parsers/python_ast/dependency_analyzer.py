@@ -1,9 +1,11 @@
+"""Module: @role: Python ASTからインポート文を解析し、内部モジュール依存と外部ライブラリ依存を分類・抽出する。"""
+
 import ast
 from pathlib import Path
 import sys
 from typing import List, Optional, Set
 
-from aiskel.parsers.base_parser import DependencyEntry, generate_dependency_map_text
+from aiskel.parsers.base_parser import DependencyEntry
 
 # なぜ必要か: Python標準ライブラリ（sys, os, typing等）を除外し、プロジェクト間依存と主要外部ライブラリのみに絞る
 _STDLIB_MODULES = getattr(
@@ -21,7 +23,17 @@ _STDLIB_MODULES = getattr(
 )
 
 
-# なぜ必要か: 相対インポートおよびプロジェクトルートからの絶対指定インポートを実体ファイルパスへ解決する
+def _to_module_notation(path_str: str) -> str:
+    """ファイルパスをドット区切りのPythonモジュール表記へ変換する"""
+    p = path_str.replace("\\", "/")
+    if p.endswith(".py"):
+        p = p[:-3]
+    if p.endswith("/__init__"):
+        p = p[:-9]
+    return p.replace("/", ".")
+
+
+# なぜ必要か: 相対インポートおよびプロジェクトルートからの絶対指定インポートを内部モジュールへ解決する (要件2-3)
 def _resolve_internal_path(
     current_file_path: Path,
     module: Optional[str],
@@ -30,7 +42,7 @@ def _resolve_internal_path(
 ) -> Optional[str]:
     current_dir = current_file_path.parent
 
-    # 相対インポート (例: from .base_inspector import ...)
+    # 相対インポート (例: from .base_inspector import ...) -> 確実に内部依存
     if level > 0:
         target_dir = current_dir
         for _ in range(level - 1):
@@ -38,10 +50,10 @@ def _resolve_internal_path(
         if module:
             candidate = (target_dir / (module.replace(".", "/") + ".py")).as_posix()
         else:
-            candidate = target_dir.as_posix() + ".py"
-        return candidate
+            candidate = (target_dir / "__init__.py").as_posix()
+        return _to_module_notation(candidate)
 
-    # プロジェクト内モジュールの推測解決 (例: from core.executor.runner import ...)
+    # プロジェクト内モジュールの推測解決 (例: from aiskel.parsers import ...)
     if module:
         mod_as_path = module.replace(".", "/") + ".py"
         candidates = [
@@ -53,20 +65,24 @@ def _resolve_internal_path(
 
         if known_project_files:
             for cand in candidates:
-                if cand in known_project_files:
-                    return cand
+                if cand in known_project_files or cand.replace(".py", "/__init__.py") in known_project_files:
+                    return _to_module_notation(cand)
 
-        # ファイル存在チェックまたは構造照合
         for cand in candidates:
             if Path(cand).exists():
-                return cand
+                return _to_module_notation(cand)
 
-        # 同一ディレクトリ直下のインポート推測 (例: base_inspector)
         sibling = (current_dir / (module.split(".")[0] + ".py")).as_posix()
-        if known_project_files and sibling in known_project_files:
-            return sibling
-        if Path(sibling).exists():
-            return sibling
+        if (known_project_files and sibling in known_project_files) or Path(sibling).exists():
+            return _to_module_notation(sibling)
+
+        # カレントパスが src/ 始まりで同一トップパッケージの場合
+        first_pkg = module.split(".")[0]
+        if current_file_path.parts:
+            if current_file_path.parts[0] == "src" and len(current_file_path.parts) > 1 and current_file_path.parts[1] == first_pkg:
+                return f"src.{module}"
+            if current_file_path.parts[0] == first_pkg:
+                return module
 
     return None
 
@@ -81,6 +97,12 @@ def extract_dependencies_from_ast(
     all_imported: Set[str] = set()
     current_file_path = Path(rel_file_path)
 
+    # プロジェクト自身のパッケージ名を検出し外部依存との誤認を防止
+    own_packages: Set[str] = set()
+    for part in current_file_path.parts[:-1]:
+        if part not in (".", "..", "src"):
+            own_packages.add(part)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -92,6 +114,8 @@ def extract_dependencies_from_ast(
                 resolved = _resolve_internal_path(current_file_path, alias.name, 0, known_project_files)
                 if resolved:
                     internal_deps.add(resolved)
+                elif root_pkg in own_packages or (current_file_path.parts and root_pkg == current_file_path.parts[0]):
+                    internal_deps.add(alias.name)
                 else:
                     external_deps.add(root_pkg)
 
@@ -114,6 +138,8 @@ def extract_dependencies_from_ast(
                 resolved = _resolve_internal_path(current_file_path, module, 0, known_project_files)
                 if resolved:
                     internal_deps.add(resolved)
+                elif root_pkg in own_packages or (current_file_path.parts and root_pkg == current_file_path.parts[0]):
+                    internal_deps.add(module)
                 else:
                     external_deps.add(root_pkg)
             else:
@@ -121,7 +147,10 @@ def extract_dependencies_from_ast(
                     all_imported.add(alias.name)
                     root_pkg = alias.name.split(".")[0]
                     if root_pkg not in _STDLIB_MODULES:
-                        external_deps.add(root_pkg)
+                        if root_pkg in own_packages:
+                            internal_deps.add(alias.name)
+                        else:
+                            external_deps.add(root_pkg)
 
     return DependencyEntry(
         file_path=rel_file_path,
