@@ -318,6 +318,7 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
 def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tuple[int, int]:
     """
     行リストから指定された関数またはクラスの定義範囲（開始行、終了行）を返す。
+    なぜ必要か: f-stringや辞書リテラル内の波括弧をブロック終了と誤認する致命的欠落バグを言語仕様レベルで根本解決
     """
     if block_type in ('def', 'function'):
         pattern = re.compile(
@@ -330,57 +331,75 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
         pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:default\s+)?class\s+' + re.escape(block_name) + r'(?:[\s\(\{]|$)')
     else:
         return -1, -1
-    
-    start_idx = -1
+
+    header_idx = -1
     base_indent = 0
     for i, line in enumerate(lines):
         match = pattern.match(line)
         if match:
-            start_idx = i
+            header_idx = i
             base_indent = len(match.group(1))
             break
-            
-    if start_idx == -1:
+
+    if header_idx == -1:
         return -1, -1
-        
-    actual_start_idx = start_idx
-    while actual_start_idx > 0:
-        prev_line = lines[actual_start_idx - 1]
+
+    # なぜ必要か: デコレータ行(@...)を含めたブロック先頭を特定
+    start_idx = header_idx
+    while start_idx > 0:
+        prev_line = lines[start_idx - 1]
         prev_stripped = prev_line.strip()
         if not prev_stripped:
             break
         prev_indent = len(prev_line) - len(prev_line.lstrip())
         if prev_indent == base_indent and prev_stripped.startswith('@'):
-            actual_start_idx -= 1
+            start_idx -= 1
         else:
             break
-    start_idx = actual_start_idx
 
-    has_brace = False
-    brace_depth = 0
-    for idx in range(start_idx, len(lines)):
-        line = lines[idx]
-        open_c = line.count('{')
-        close_c = line.count('}')
-        if open_c > 0:
-            has_brace = True
-        brace_depth += (open_c - close_c)
-        if has_brace and brace_depth <= 0:
-            return start_idx, idx + 1
+    # なぜ必要か: 複数行シグネチャの末尾を検出し、デコレータやシグネチャ行自体をインデント判定で誤終了させない
+    sig_end_idx = header_idx
+    paren_depth = 0
+    for idx in range(header_idx, len(lines)):
+        l = lines[idx]
+        paren_depth += (l.count('(') - l.count(')'))
+        paren_depth += (l.count('[') - l.count(']'))
+        if paren_depth <= 0:
+            sig_end_idx = idx
+            break
 
-    end_idx = start_idx + 1
+    # なぜ必要か: Python（末尾:）とブレース言語（JS/TS/C/C++）でブロック終端判定を厳密に分岐
+    sig_line = lines[sig_end_idx].split('#')[0].rstrip()
+    is_python_syntax = sig_line.endswith(':')
+
+    if not is_python_syntax:
+        # ブレース言語（JS/TS/C/C++/Rust等）: シグネチャ直後の開始ブレースから対応する閉じブレースまでを追跡
+        has_brace = False
+        brace_depth = 0
+        for idx in range(header_idx, len(lines)):
+            line = lines[idx]
+            open_c = line.count('{')
+            close_c = line.count('}')
+            if open_c > 0:
+                has_brace = True
+            brace_depth += (open_c - close_c)
+            if has_brace and brace_depth <= 0:
+                return start_idx, idx + 1
+
+    # インデント構文（Python）およびブレース未検出時の終端判定
+    # なぜ必要か: シグネチャ完了行の次から走査を開始し、f-stringや辞書リテラル内の{}による誤終了を完全防止
+    end_idx = sig_end_idx + 1
     while end_idx < len(lines):
         line = lines[end_idx]
         if line.strip():
             current_indent = len(line) - len(line.lstrip())
             if current_indent <= base_indent:
-                if line.strip().startswith('}'):
+                if not is_python_syntax and line.strip().startswith('}'):
                     end_idx += 1
                 break
         end_idx += 1
-        
-    return start_idx, end_idx
 
+    return start_idx, end_idx
 def _replace_blocks_in_lines(
     target_lines: List[str],
     source_lines: List[str],
