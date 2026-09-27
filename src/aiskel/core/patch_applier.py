@@ -1,5 +1,5 @@
 # src/aiskel/core/patch_applier.py
-"""Module: @role: パッチテキストの解析およびインメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入を実行する。"""
+"""Module: @role: パッチテキストの解析およびインメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入・コードおよびファイル削除を実行する。"""
 import difflib
 import re
 from pathlib import Path
@@ -11,6 +11,38 @@ BLOCK_PATTERN = re.compile(
     r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
     r')'
 )
+
+FILE_HEADER_PATTERN = re.compile(
+    r'^[ \t]*(?:ファイルパス|File|ファイル|削除|Delete|Remove):\s*`?([a-zA-Z0-9_/\.\-:\\]+)(?:\s*[:\(]([a-zA-Z0-9_]+)\)?)?`?(?:\s*[\(\[]?(delete|remove|削除)[\)\]]?)?',
+    re.IGNORECASE
+)
+
+DELETE_DIRECTIVE_PATTERN = re.compile(
+    r'^[ \t]*(?:#|//|/\*|<!--)?\s*(?:delete|remove|削除)\s*[:\s]+'
+    r'(?:def\s+|function\s+|class\s+)?([a-zA-Z0-9_]+)',
+    re.IGNORECASE
+)
+
+DELETE_FILE_DIRECTIVE_PATTERN = re.compile(
+    r'^[ \t]*(?:#|//|/\*|<!--)?\s*(?:delete|remove|削除)\s*(?:file|ファイル)?\s*(?:-->|\*/)?$',
+    re.IGNORECASE
+)
+
+def _clean_excessive_blank_lines(lines: List[str], change_idx: int = 0) -> List[str]:
+    # なぜ必要か: コード削除によって生じる3行以上の過剰な空行をPEP 8等の規約に合わせて最大2行に圧縮するため
+    result: List[str] = []
+    blank_count = 0
+    for line in lines:
+        if not line.strip():
+            blank_count += 1
+            if blank_count <= 2:
+                result.append(line)
+        else:
+            blank_count = 0
+            result.append(line)
+    while result and not result[0].strip():
+        result.pop(0)
+    return result
 
 def _has_import_statements(lines: List[str]) -> bool:
     import_patterns = [
@@ -130,7 +162,7 @@ def _find_new_block_insert_index(lines: List[str], file_path: Path) -> int:
     return len(lines)
 
 def _insert_block_into_lines(target_lines: List[str], block_lines: List[str], insert_idx: int) -> List[str]:
-    # なぜ必要か: 挿入時に前後コードとの空行(2行)を整え、PEP 8等のスタイル規約を維持するため
+    # なぜ必要か: 挿入時に前後コードとの空行（2行）を整え、PEP 8等のスタイル規約を維持するため
     before = target_lines[:insert_idx]
     after = target_lines[insert_idx:]
 
@@ -147,173 +179,6 @@ def _insert_block_into_lines(target_lines: List[str], block_lines: List[str], in
         result.extend(["", ""])
         result.extend(after)
     return result
-
-def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
-    blocks = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        match = BLOCK_PATTERN.match(line)
-        if match:
-            b_type = match.group(1) or 'function'
-            b_name = match.group(2) or match.group(3)
-            # なぜ必要か: デコレータ行(@...)がBLOCK_PATTERNの直前にある場合にブロック範囲に含めるため
-            actual_start = i
-            while actual_start > 0:
-                prev_line = lines[actual_start - 1]
-                prev_stripped = prev_line.strip()
-                if not prev_stripped:
-                    break
-                if prev_stripped.startswith('@'):
-                    actual_start -= 1
-                else:
-                    break
-            _, s_end = _find_block_range(lines[i:], b_name, b_type)
-            if s_end != -1:
-                s_end += i
-                blocks.append((b_type, b_name, actual_start, s_end))
-                i = max(s_end - 1, i)
-        i += 1
-    return blocks
-
-def _find_and_replace(content: str, search_lines: List[str], replace_lines: List[str], force_replace: bool = False) -> Tuple[Optional[str], str, bool]:
-    """
-    完全一致、または柔軟なマッチングで置換を行う
-    戻り値: (置換後の文字列, エラーメッセージ, 置換済みフラグ)
-    """
-    if not search_lines:
-        return None, "検索ブロックが空です。", False
-
-    s_start = 0
-    while s_start < len(search_lines) and not search_lines[s_start].strip():
-        s_start += 1
-    s_end = len(search_lines)
-    while s_end > s_start and not search_lines[s_end-1].strip():
-        s_end -= 1
-        
-    if s_start >= s_end:
-        return None, "検索ブロックに有効なテキストが含まれていません。", False
-        
-    core_search = search_lines[s_start:s_end]
-    
-    # 1. 改行コードを統一して完全一致検索
-    content_normalized = content.replace("\r\n", "\n")
-    search_text = "\n".join(core_search)
-    replace_text = "\n".join(replace_lines)
-    
-    if not force_replace and replace_text.strip() and replace_text in content_normalized:
-        return content_normalized, "", True
-
-    if search_text in content_normalized:
-        return content_normalized.replace(search_text, replace_text), "", False
-
-    # 2. 行単位の柔軟なマッチング (インデント無視)
-    content_lines = content_normalized.splitlines()
-    stripped_search = [s.strip() for s in core_search]
-    search_len = len(stripped_search)
-    
-    for i in range(len(content_lines) - search_len + 1):
-        match = True
-        for j in range(search_len):
-            if content_lines[i+j].strip() != stripped_search[j]:
-                match = False
-                break
-        if match:
-            new_lines = content_lines[:i] + replace_lines + content_lines[i+search_len:]
-            result = "\n".join(new_lines)
-            if content.endswith("\n") and not result.endswith("\n"):
-                result += "\n"
-            return result, "", False
-
-    # 3. 途中の空行も完全に無視したマッチング
-    non_empty_content = [(idx, line.strip()) for idx, line in enumerate(content_lines) if line.strip()]
-    non_empty_search = [s.strip() for s in core_search if s.strip()]
-    ne_search_len = len(non_empty_search)
-    
-    if ne_search_len > 0 and len(non_empty_content) >= ne_search_len:
-        for i in range(len(non_empty_content) - ne_search_len + 1):
-            match = True
-            for j in range(ne_search_len):
-                if non_empty_content[i+j][1] != non_empty_search[j]:
-                    match = False
-                    break
-            if match:
-                start_idx = non_empty_content[i][0]
-                end_idx = non_empty_content[i + ne_search_len - 1][0]
-                new_lines = content_lines[:start_idx] + replace_lines + content_lines[end_idx+1:]
-                result = "\n".join(new_lines)
-                if content.endswith("\n") and not result.endswith("\n"):
-                    result += "\n"
-                return result, "", False
-
-    # 4. 最初と最後の行によるブロックマッチング
-    if ne_search_len >= 2:
-        first_line = non_empty_search[0]
-        last_line = non_empty_search[-1]
-        
-        first_matches = [idx for idx, line in non_empty_content if line == first_line]
-        last_matches = [idx for idx, line in non_empty_content if line == last_line]
-        
-        if len(first_matches) == 1 and len(last_matches) == 1:
-            start_idx = first_matches[0]
-            end_idx = last_matches[0]
-            if start_idx < end_idx:
-                new_lines = content_lines[:start_idx] + replace_lines + content_lines[end_idx+1:]
-                result = "\n".join(new_lines)
-                if content.endswith("\n") and not result.endswith("\n"):
-                    result += "\n"
-                return result, "", False
-
-    # 5. 行類似度マッチング (Fuzzy Matching): AIの微小なコメント差分や末尾カンマ表記揺れによる置換失敗を防止
-    if ne_search_len >= 2 and len(non_empty_content) >= ne_search_len:
-        search_block_text = "\n".join(non_empty_search)
-        best_ratio = 0.0
-        best_start_idx = -1
-        best_end_idx = -1
-        candidates_count = 0
-        
-        for window_size in (ne_search_len, ne_search_len - 1, ne_search_len + 1):
-            if window_size <= 0 or len(non_empty_content) < window_size:
-                continue
-            for i in range(len(non_empty_content) - window_size + 1):
-                window_lines = [non_empty_content[i + k][1] for k in range(window_size)]
-                window_text = "\n".join(window_lines)
-                ratio = difflib.SequenceMatcher(None, window_text, search_block_text).ratio()
-                if ratio >= 0.85:
-                    if ratio > best_ratio + 1e-4:
-                        best_ratio = ratio
-                        best_start_idx = non_empty_content[i][0]
-                        best_end_idx = non_empty_content[i + window_size - 1][0]
-                        candidates_count = 1
-                    elif abs(ratio - best_ratio) <= 1e-4:
-                        candidates_count += 1
-                        
-        if best_ratio >= 0.85 and candidates_count == 1:
-            new_lines = content_lines[:best_start_idx] + replace_lines + content_lines[best_end_idx + 1:]
-            result = "\n".join(new_lines)
-            if content.endswith("\n") and not result.endswith("\n"):
-                result += "\n"
-            return result, "", False
-
-    # 一致箇所の詳細診断 (エラー表示用)
-    best_match_count = 0
-    best_match_line = ""
-    for i in range(len(non_empty_content)):
-        match_count = 0
-        while i + match_count < len(non_empty_content) and match_count < ne_search_len:
-            if non_empty_content[i + match_count][1] == non_empty_search[match_count]:
-                match_count += 1
-            else:
-                break
-        if match_count > best_match_count:
-            best_match_count = match_count
-            if match_count < ne_search_len:
-                best_match_line = non_empty_search[match_count]
-
-    if best_match_count > 0:
-        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります:\n    '{best_match_line}'", False
-
-    return None, "検索テキストがファイル内に見つかりませんでした。", False
 
 def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tuple[int, int]:
     """
@@ -344,7 +209,7 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
     if header_idx == -1:
         return -1, -1
 
-    # なぜ必要か: デコレータ行(@...)を含めたブロック先頭を特定
+    # なぜ必要か: デコレータ行(@...)を含めたブロック先頭を特定するため
     start_idx = header_idx
     while start_idx > 0:
         prev_line = lines[start_idx - 1]
@@ -373,7 +238,6 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
     is_python_syntax = sig_line.endswith(':')
 
     if not is_python_syntax:
-        # ブレース言語（JS/TS/C/C++/Rust等）: シグネチャ直後の開始ブレースから対応する閉じブレースまでを追跡
         has_brace = False
         brace_depth = 0
         for idx in range(header_idx, len(lines)):
@@ -386,7 +250,6 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
             if has_brace and brace_depth <= 0:
                 return start_idx, idx + 1
 
-    # インデント構文（Python）およびブレース未検出時の終端判定
     # なぜ必要か: シグネチャ完了行の次から走査を開始し、f-stringや辞書リテラル内の{}による誤終了を完全防止
     end_idx = sig_end_idx + 1
     while end_idx < len(lines):
@@ -400,6 +263,214 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
         end_idx += 1
 
     return start_idx, end_idx
+
+def _delete_block_from_lines(target_lines: List[str], block_name: str, block_type: str = 'function') -> Tuple[bool, List[str]]:
+    # なぜ必要か: 指定された関数やクラスの全構文範囲（デコレータ含む）を検出し、安全かつ過剰空行を残さず消去するため
+    t_start, t_end = _find_block_range(target_lines, block_name, block_type)
+    if t_start == -1 and block_type == 'function':
+        t_start, t_end = _find_block_range(target_lines, block_name, 'class')
+    if t_start == -1:
+        return False, target_lines
+    
+    new_lines = target_lines[:t_start] + target_lines[t_end:]
+    cleaned_lines = _clean_excessive_blank_lines(new_lines, t_start)
+    return True, cleaned_lines
+
+def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
+    blocks = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = BLOCK_PATTERN.match(line)
+        if match:
+            b_type = match.group(1) or 'function'
+            b_name = match.group(2) or match.group(3)
+            actual_start = i
+            while actual_start > 0:
+                prev_line = lines[actual_start - 1]
+                prev_stripped = prev_line.strip()
+                if not prev_stripped:
+                    break
+                if prev_stripped.startswith('@'):
+                    actual_start -= 1
+                else:
+                    break
+            _, s_end = _find_block_range(lines[i:], b_name, b_type)
+            if s_end != -1:
+                s_end += i
+                blocks.append((b_type, b_name, actual_start, s_end))
+                i = max(s_end - 1, i)
+        i += 1
+    return blocks
+
+def _find_and_replace(content: str, search_lines: List[str], replace_lines: List[str], force_replace: bool = False) -> Tuple[Optional[str], str, bool]:
+    """
+    完全一致、または柔軟なマッチングで置換・削除を行う
+    戻り値: (置換後の文字列, エラーメッセージ, 置換済みフラグ)
+    """
+    if not search_lines:
+        return None, "検索ブロックが空です。", False
+
+    s_start = 0
+    while s_start < len(search_lines) and not search_lines[s_start].strip():
+        s_start += 1
+    s_end = len(search_lines)
+    while s_end > s_start and not search_lines[s_end-1].strip():
+        s_end -= 1
+        
+    if s_start >= s_end:
+        return None, "検索ブロックに有効なテキストが含まれていません。", False
+        
+    core_search = search_lines[s_start:s_end]
+    is_delete = not any(line.strip() for line in replace_lines)
+    
+    content_normalized = content.replace("\r\n", "\n")
+    search_text = "\n".join(core_search)
+    replace_text = "\n".join(replace_lines)
+    
+    if not force_replace and not is_delete and replace_text.strip() and replace_text in content_normalized:
+        return content_normalized, "", True
+
+    content_lines = content_normalized.splitlines()
+
+    # 1. 行単位での完全一致（コード削除時、改行が残ってゴミ空行になるのを根本防止）
+    # なぜ必要か: コード削除時に単純文字列置換を行うと行末改行が残留して空行が生成されるため、行単位で安全に消去する
+    search_len = len(core_search)
+    for i in range(len(content_lines) - search_len + 1):
+        if content_lines[i : i + search_len] == core_search:
+            new_lines = content_lines[:i] + (replace_lines if not is_delete else []) + content_lines[i + search_len:]
+            if is_delete:
+                new_lines = _clean_excessive_blank_lines(new_lines, i)
+            result = "\n".join(new_lines)
+            if content.endswith("\n") and not result.endswith("\n"):
+                result += "\n"
+            return result, "", False
+
+    # 2. 文字列としての完全一致（インライン置換、または改行コード込みの完全一致）
+    if search_text in content_normalized:
+        if is_delete:
+            result = content_normalized.replace(search_text, replace_text)
+            cleaned_lines = _clean_excessive_blank_lines(result.splitlines())
+            result = "\n".join(cleaned_lines)
+        else:
+            result = content_normalized.replace(search_text, replace_text)
+        if content.endswith("\n") and not result.endswith("\n"):
+            result += "\n"
+        return result, "", False
+
+    # 3. 行単位の柔軟なマッチング (インデント無視)
+    stripped_search = [s.strip() for s in core_search]
+    for i in range(len(content_lines) - search_len + 1):
+        match = True
+        for j in range(search_len):
+            if content_lines[i+j].strip() != stripped_search[j]:
+                match = False
+                break
+        if match:
+            new_lines = content_lines[:i] + (replace_lines if not is_delete else []) + content_lines[i+search_len:]
+            if is_delete:
+                new_lines = _clean_excessive_blank_lines(new_lines, i)
+            result = "\n".join(new_lines)
+            if content.endswith("\n") and not result.endswith("\n"):
+                result += "\n"
+            return result, "", False
+
+    # 4. 途中の空行も完全に無視したマッチング
+    non_empty_content = [(idx, line.strip()) for idx, line in enumerate(content_lines) if line.strip()]
+    non_empty_search = [s.strip() for s in core_search if s.strip()]
+    ne_search_len = len(non_empty_search)
+    
+    if ne_search_len > 0 and len(non_empty_content) >= ne_search_len:
+        for i in range(len(non_empty_content) - ne_search_len + 1):
+            match = True
+            for j in range(ne_search_len):
+                if non_empty_content[i+j][1] != non_empty_search[j]:
+                    match = False
+                    break
+            if match:
+                start_idx = non_empty_content[i][0]
+                end_idx = non_empty_content[i + ne_search_len - 1][0]
+                new_lines = content_lines[:start_idx] + (replace_lines if not is_delete else []) + content_lines[end_idx+1:]
+                if is_delete:
+                    new_lines = _clean_excessive_blank_lines(new_lines, start_idx)
+                result = "\n".join(new_lines)
+                if content.endswith("\n") and not result.endswith("\n"):
+                    result += "\n"
+                return result, "", False
+
+    # 5. 最初と最後の行によるブロックマッチング
+    if ne_search_len >= 2:
+        first_line = non_empty_search[0]
+        last_line = non_empty_search[-1]
+        
+        first_matches = [idx for idx, line in non_empty_content if line == first_line]
+        last_matches = [idx for idx, line in non_empty_content if line == last_line]
+        
+        if len(first_matches) == 1 and len(last_matches) == 1:
+            start_idx = first_matches[0]
+            end_idx = last_matches[0]
+            if start_idx < end_idx:
+                new_lines = content_lines[:start_idx] + (replace_lines if not is_delete else []) + content_lines[end_idx+1:]
+                if is_delete:
+                    new_lines = _clean_excessive_blank_lines(new_lines, start_idx)
+                result = "\n".join(new_lines)
+                if content.endswith("\n") and not result.endswith("\n"):
+                    result += "\n"
+                return result, "", False
+
+    # 6. 行類似度マッチング (Fuzzy Matching): AIの微小なコメント差異や末尾カンマ表記揺れによる置換失敗を防止
+    if ne_search_len >= 2 and len(non_empty_content) >= ne_search_len:
+        search_block_text = "\n".join(non_empty_search)
+        best_ratio = 0.0
+        best_start_idx = -1
+        best_end_idx = -1
+        candidates_count = 0
+        
+        for window_size in (ne_search_len, ne_search_len - 1, ne_search_len + 1):
+            if window_size <= 0 or len(non_empty_content) < window_size:
+                continue
+            for i in range(len(non_empty_content) - window_size + 1):
+                window_lines = [non_empty_content[i + k][1] for k in range(window_size)]
+                window_text = "\n".join(window_lines)
+                ratio = difflib.SequenceMatcher(None, window_text, search_block_text).ratio()
+                if ratio >= 0.85:
+                    if ratio > best_ratio + 1e-4:
+                        best_ratio = ratio
+                        best_start_idx = non_empty_content[i][0]
+                        best_end_idx = non_empty_content[i + window_size - 1][0]
+                        candidates_count = 1
+                    elif abs(ratio - best_ratio) <= 1e-4:
+                        candidates_count += 1
+                        
+        if best_ratio >= 0.85 and candidates_count == 1:
+            new_lines = content_lines[:best_start_idx] + (replace_lines if not is_delete else []) + content_lines[best_end_idx + 1:]
+            if is_delete:
+                new_lines = _clean_excessive_blank_lines(new_lines, best_start_idx)
+            result = "\n".join(new_lines)
+            if content.endswith("\n") and not result.endswith("\n"):
+                result += "\n"
+            return result, "", False
+
+    # 一致箇所の詳細診断 (エラー表示用)
+    best_match_count = 0
+    best_match_line = ""
+    for i in range(len(non_empty_content)):
+        match_count = 0
+        while i + match_count < len(non_empty_content) and match_count < ne_search_len:
+            if non_empty_content[i + match_count][1] == non_empty_search[match_count]:
+                match_count += 1
+            else:
+                break
+        if match_count > best_match_count:
+            best_match_count = match_count
+            if match_count < ne_search_len:
+                best_match_line = non_empty_search[match_count]
+
+    if best_match_count > 0:
+        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります:\n    '{best_match_line}'", False
+
+    return None, "検索テキストがファイル内に見つかりませんでした。", False
+
 def _replace_blocks_in_lines(
     target_lines: List[str],
     source_lines: List[str],
@@ -460,7 +531,8 @@ def generate_diff_display(file_path: Path, original: str, updated: str, project_
     
     orig_lines = original.splitlines(keepends=True)
     upd_lines = updated.splitlines(keepends=True)
-    diff = list(difflib.unified_diff(orig_lines, upd_lines, fromfile=f"a/{rel_path}", tofile=f"b/{rel_path}"))
+    to_file = f"b/{rel_path}" if updated else "/dev/null"
+    diff = list(difflib.unified_diff(orig_lines, upd_lines, fromfile=f"a/{rel_path}", tofile=to_file))
     if not diff:
         return ""
     
@@ -485,7 +557,6 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     skipped_count = 0
     modified_files: Set[Path] = set()
     
-    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-:\\]+)`?', re.IGNORECASE)
     current_file = target_file
     lines = patch_text.splitlines()
     i = 0
@@ -495,7 +566,7 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     
     while i < len(lines):
         line = lines[i]
-        file_match = file_pattern.search(line)
+        file_match = FILE_HEADER_PATTERN.search(line)
         if file_match:
             raw_path = Path(file_match.group(1))
             current_file = raw_path.resolve() if raw_path.is_absolute() else (project_root / raw_path).resolve()
@@ -539,7 +610,6 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
                     file_contents[current_file] = new_lines
         i += 1
 
-    # トランザクション・Dry-run判定: 失敗時はディスク書き込みを破棄
     if fail_count > 0:
         return success_count, fail_count, skipped_count, set()
 
@@ -572,35 +642,45 @@ def apply_patch(
 ) -> Tuple[int, int, int, Set[Path]]:
     """
     パッチテキストを解析し、トランザクション保証(All-or-Nothing)の下でファイルを書き換える。
-    dry_run が True の場合はディスクへの書き込みを行わず Unified Diff を表示する。
+    コード削除およびファイル自体の削除操作にも対応する。
     """
     if "<<<<" not in patch_text or "====" not in patch_text or ">>>>" not in patch_text:
-        if revert:
-            print("✖ エラー: リバート処理には置換ブロック(<<<< ==== >>>>)が必須です。")
-            return 0, 1, 0, set()
-        print("ℹ 置換ブロック(<<<<)が見つからないため、関数・クラス単位の自動置換を試みます...")
-        return _apply_block_replacement(patch_text, project_root, target_file, dry_run=dry_run)
+        # 明示的なファイル削除ディレクティブのみのパッチ判定
+        file_header_matches = list(FILE_HEADER_PATTERN.finditer(patch_text))
+        if file_header_matches and any(bool(m.group(3)) or any(line.strip().lower().startswith(kw) for kw in ("削除:", "delete:", "remove:")) for m in file_header_matches for line in patch_text.splitlines() if m.group(0) in line):
+            pass
+        else:
+            if revert:
+                print("✖ エラー: リバート処理には置換ブロック(<<<< ==== >>>>)が必要です。")
+                return 0, 1, 0, set()
+            print("ℹ 置換ブロック(<<<<)が見つからないため、関数・クラス単位の自動置換を試みます...")
+            return _apply_block_replacement(patch_text, project_root, target_file, dry_run=dry_run)
 
     success_count = 0
     fail_count = 0
     skipped_count = 0
     modified_files: Set[Path] = set()
+    files_to_delete: Set[Path] = set()
 
-    # 部分置換エラー時のプロジェクト破損防止のため、全変更をインメモリ仮想バッファでシミュレーションする
     file_contents: Dict[Path, str] = {}
     original_contents: Dict[Path, str] = {}
 
-    file_pattern = re.compile(r'(?:ファイルパス|File|ファイル):\s*`?([a-zA-Z0-9_/\.\-:\\]+)`?', re.IGNORECASE)
     current_file: Path | None = target_file
+    target_node: Optional[str] = None
+    file_delete_flag: bool = False
+
     lines = patch_text.splitlines()
     i = 0
     
     while i < len(lines):
         line = lines[i]
-        file_match = file_pattern.search(line)
+        file_match = FILE_HEADER_PATTERN.search(line)
         if file_match:
             raw_path = Path(file_match.group(1))
             current_file = raw_path.resolve() if raw_path.is_absolute() else (project_root / raw_path).resolve()
+            target_node = file_match.group(2)
+            file_delete_flag = bool(file_match.group(3)) or any(line.strip().lower().startswith(kw) for kw in ("削除:", "delete:", "remove:"))
+            
             if current_file not in file_contents:
                 if current_file.exists():
                     orig_text = current_file.read_text(encoding="utf-8")
@@ -609,6 +689,25 @@ def apply_patch(
                 else:
                     file_contents[current_file] = ""
                     original_contents[current_file] = ""
+            
+            # ブロックを伴わない単体ファイル削除ディレクティブの処理
+            if file_delete_flag and (i + 1 >= len(lines) or "<<<<" not in lines[i+1]):
+                try:
+                    disp_path = current_file.relative_to(project_root)
+                except ValueError:
+                    disp_path = current_file
+                if not current_file.exists():
+                    print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
+                    skipped_count += 1
+                else:
+                    files_to_delete.add(current_file)
+                    modified_files.add(current_file)
+                    file_contents[current_file] = ""
+                    print(f"🗑 ファイル削除成功: {disp_path}")
+                    success_count += 1
+                i += 1
+                continue
+
             i += 1
             continue
 
@@ -652,8 +751,59 @@ def apply_patch(
                 disp_path = current_file
 
             is_empty_search = not any(line.strip() for line in search_lines)
+            is_empty_replace = not any(line.strip() for line in replace_lines)
             content = file_contents[current_file]
 
+            # 1. ファイル丸ごと削除判定
+            is_file_deletion = file_delete_flag or any(DELETE_FILE_DIRECTIVE_PATTERN.match(l) for l in (replace_lines if not is_empty_replace else search_lines))
+            if is_file_deletion:
+                if not current_file.exists() and not content:
+                    print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
+                    skipped_count += 1
+                else:
+                    files_to_delete.add(current_file)
+                    modified_files.add(current_file)
+                    file_contents[current_file] = ""
+                    print(f"🗑 ファイル削除成功: {disp_path}")
+                    success_count += 1
+                i += 1
+                continue
+
+            # 2. 関数・クラス等の構文ブロック削除ディレクティブ判定
+            del_node_name = target_node
+            if not del_node_name:
+                for r_line in (replace_lines if not is_empty_replace else search_lines):
+                    del_match = DELETE_DIRECTIVE_PATTERN.match(r_line)
+                    if del_match:
+                        del_node_name = del_match.group(1)
+                        break
+
+            if del_node_name and is_empty_replace:
+                content_lines = content.splitlines()
+                ok, new_lines = _delete_block_from_lines(content_lines, del_node_name)
+                if ok:
+                    new_content = "\n".join(new_lines)
+                    if new_content and not new_content.endswith("\n"):
+                        new_content += "\n"
+                    file_contents[current_file] = new_content
+                    print(f"🗑 関数/クラス削除成功: {del_node_name} ({disp_path})")
+                    success_count += 1
+                    modified_files.add(current_file)
+                else:
+                    # 既に削除済みかチェック
+                    target_b_start, _ = _find_block_range(content_lines, del_node_name, "function")
+                    if target_b_start == -1:
+                        target_b_start, _ = _find_block_range(content_lines, del_node_name, "class")
+                    if target_b_start == -1:
+                        print(f"⏭ 関数/クラス削除スキップ (既に削除済み): {del_node_name} ({disp_path})")
+                        skipped_count += 1
+                    else:
+                        print(f"✖ 関数/クラス削除失敗: {del_node_name} ({disp_path})")
+                        fail_count += 1
+                i += 1
+                continue
+
+            # 3. 既存ファイルが存在する場合の処理
             if current_file.exists() or content:
                 if is_empty_search:
                     if revert:
@@ -688,7 +838,6 @@ def apply_patch(
                                 is_partial = True
 
                     if is_partial:
-                        # 新規関数ブロックに含まれるimport文を既存ファイルの先頭インポート領域へマージ
                         import_lines = _extract_import_lines(replace_lines)
                         if import_lines:
                             content_lines = _merge_import_lines(content_lines, import_lines)
@@ -764,19 +913,39 @@ def apply_patch(
                             success_count += 1
                             modified_files.add(current_file)
                 else:
+                    # モードAでの関数シグネチャ単位での関数丸ごと削除チェック
+                    if is_empty_replace:
+                        first_non_empty = next((l for l in search_lines if l.strip()), "")
+                        b_match = BLOCK_PATTERN.match(first_non_empty)
+                        if b_match:
+                            b_type = b_match.group(1) or 'function'
+                            b_name = b_match.group(2) or b_match.group(3)
+                            content_lines = content.splitlines()
+                            ok, new_lines = _delete_block_from_lines(content_lines, b_name, b_type)
+                            if ok:
+                                new_content = "\n".join(new_lines)
+                                if new_content and not new_content.endswith("\n"):
+                                    new_content += "\n"
+                                file_contents[current_file] = new_content
+                                print(f"🗑 関数/クラス削除成功: {b_name} ({disp_path})")
+                                success_count += 1
+                                modified_files.add(current_file)
+                                i += 1
+                                continue
+
                     new_content, error_msg, is_skipped = _find_and_replace(content, search_lines, replace_lines, force_replace)
                     if is_skipped:
-                        action_label = "リバート" if revert else "置換"
+                        action_label = "リバート" if revert else ("削除" if is_empty_replace else "置換")
                         print(f"⏭ {action_label}スキップ (適用済み): {disp_path}")
                         skipped_count += 1
                     elif new_content is not None:
                         file_contents[current_file] = new_content
-                        action_label = "リバート" if revert else "適用"
+                        action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
                         print(f"✔ {action_label}成功: {disp_path}")
                         success_count += 1
                         modified_files.add(current_file)
                     else:
-                        action_label = "リバート" if revert else "適用"
+                        action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
                         print(f"✖ {action_label}失敗: {disp_path}\n  -> {error_msg}")
                         fail_count += 1
             else:
@@ -794,24 +963,35 @@ def apply_patch(
                 
         i += 1
 
-    # トランザクション判定: 1箇所でも失敗した場合はディスクへの書き込みを一切行わず中止
+    # トランザクション判定: 1箇所でも失敗した場合はディスクへの書き込み・削除を行わず中止
     if fail_count > 0:
-        print(f"\n❌ 置換エラーが発生したため、トランザクションを中断しました。ディスクへの書き込みは一切行われていません（All-or-Nothing）。")
+        print(f"\n⛔ 置換エラーが発生したため、トランザクションを中断しました。ディスクへの書き込み・削除は一切行われていません (All-or-Nothing)。")
         return success_count, fail_count, skipped_count, set()
 
     # Dry-runプレビュー出力
     if dry_run:
-        print("\n🔍 [DRY-RUN] 差分プレビュー（ディスクは変更されません）:")
+        print("\n🔍 [DRY-RUN] 差分プレビュー (ディスクは変更されません):")
         for path in modified_files:
             orig = original_contents.get(path, "")
-            diff_text = generate_diff_display(path, orig, file_contents[path], project_root)
+            diff_text = generate_diff_display(path, orig, file_contents.get(path, ""), project_root)
             if diff_text:
                 print(diff_text)
         return success_count, fail_count, skipped_count, modified_files
 
-    # トランザクション確定: 全ての変更をディスクに一括反映
+    # トランザクション確定: 全ての変更・削除をディスクに一括反映
+    for path in files_to_delete:
+        if path.exists():
+            path.unlink()
+            try:
+                parent = path.parent
+                if parent != project_root and not any(parent.iterdir()):
+                    parent.rmdir()
+            except OSError:
+                pass
+
     for path in modified_files:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(file_contents[path], encoding="utf-8")
+        if path not in files_to_delete and path in file_contents:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(file_contents[path], encoding="utf-8")
 
     return success_count, fail_count, skipped_count, modified_files
