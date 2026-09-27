@@ -104,6 +104,9 @@ def generate_role_map_text(all_entries: List[RoleEntry]) -> str:
                 # なぜ必要か: UI定型ハンドラを1行に集約しAIの見落とし防止とトークン削減を両立 (要件1-1 方針A)
                 if entry.ui_handlers:
                     lines.append(f"  ui_handlers: {', '.join(entry.ui_handlers)}")
+                # なぜ必要か: 他言語パーサーや長大Enumでもメンバー一覧が脱落せずハルシネーションを防ぐ
+                if entry.enum_members and ":" not in entry.signature:
+                    lines.append(f"  members: {', '.join(entry.enum_members)}")
                 for method in classes.get(class_name, []):
                     # なぜ必要か: 例外仕様を末尾コメントとして最小トークンで明示しAIのエラー処理設計漏れを防止
                     raises_str = f"  # raises: {', '.join(method.raises)}" if method.raises else ""

@@ -156,8 +156,8 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
         if _is_trivial_docstring(line, entity_name):
             continue
 
-        # なぜ必要か: 単語境界(\b)を保証し、aiskelやAirflow等の英単語の「ai」をプレフィックスと誤認して削るバグを防止
-        clean_prefix_pattern = r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Comment\b\s*:?)\s*)+"
+        # なぜ必要か: なぜ必要か(Why)/Notice/注意コメントも認識し単語境界(\b)を保証して誤切除を防止
+        clean_prefix_pattern = r"^(?:(?:\*\*\[(?:Role|AI|Rule|Why|Notice)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Why\b\s*:?|Notice\b\s*:?|Comment\b\s*:?|なぜ必要か\s*[:：]|注意\s*[:：])\s*)+"
         m = re.match(clean_prefix_pattern, line, re.IGNORECASE)
         if m and m.end() > 0:
             rest = line[m.end():].strip()
@@ -186,8 +186,9 @@ def extract_clean_role_description(
     if leading_comments:
         for c in leading_comments:
             cleaned = clean_comment_line(c)
-            if re.match(r"^(?:Role|AI|Rule)\s*:", cleaned, re.IGNORECASE):
-                rest = cleaned.split(":", 1)[1].strip()
+            # なぜ必要か: なぜ必要か(Why)/Noticeコメントを最優先抽出しリグレッション防止制約を保護
+            if re.match(r"^(?:Role|AI|Rule|Why|Notice|注意|なぜ必要か)\s*[:：]", cleaned, re.IGNORECASE):
+                rest = re.split(r"[:：]", cleaned, maxsplit=1)[1].strip()
                 if rest and not _is_trivial_docstring(rest, entity_name):
                     explicit_role_comment = rest
                     break
@@ -197,7 +198,7 @@ def extract_clean_role_description(
     # なぜ必要か: 単語境界(\b)を保証し、aiskel等の先頭文字「ai」がプレフィックス判定で削られるのを防止
     def _strip_role_prefix(text: str) -> str:
         return re.sub(
-            r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Comment\b\s*:?)\s*)+",
+            r"^(?:(?:\*\*\[(?:Role|AI|Rule|Why|Notice)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Why\b\s*:?|Notice\b\s*:?|Comment\b\s*:?|なぜ必要か\s*[:：]|注意\s*[:：])\s*)+",
             "",
             text,
             flags=re.IGNORECASE,

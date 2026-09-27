@@ -72,12 +72,24 @@ def _extract_raises_from_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> L
                 elif isinstance(sub.exc.func, ast.Attribute):
                     raises.add(sub.exc.func.attr)
 
-    # なぜ必要か: DocstringのRaises記述からも抽出して下位層送出例外の把握漏れを防止
+    # なぜ必要か: Google style/Sphinx style双方のDocstringから複数例外を漏れなく抽出しエラー設計漏れを防止
     doc = ast.get_docstring(node)
     if doc:
-        doc_raises = re.findall(r"(?:Raises|raises)\s*:\s*\n?\s*([A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception)", doc)
-        for exc in doc_raises:
-            raises.add(exc)
+        for m in re.finditer(r":raises\s+([A-Za-z0-9_]+)\s*:", doc):
+            raises.add(m.group(1))
+        in_raises = False
+        for line in doc.splitlines():
+            stripped = line.strip()
+            if re.match(r"^Raises\s*:", stripped, re.IGNORECASE):
+                in_raises = True
+                continue
+            if in_raises:
+                if stripped and not line.startswith((" ", "\t")):
+                    in_raises = False
+                    continue
+                m = re.match(r"^\s*([A-Za-z0-9_]+)\s*(?:\([^)]*\))?\s*:", line)
+                if m:
+                    raises.add(m.group(1))
 
     return sorted(list(raises))
 
@@ -326,7 +338,20 @@ def extract_roles_from_ast(tree: ast.AST, rel_file_path: str, source_code: str =
                 target_name = node.target.id
                 ann_node = node.annotation
 
-        if target_name and target_name.isupper() and not target_name.startswith("_"):
+        is_upper_const = bool(target_name and target_name.isupper() and not target_name.startswith("_"))
+        # なぜ必要か: PascalCaseの型エイリアス(TargetSpec = Tuple[...])を抽出し型のハルシネーションを防止
+        is_type_alias = False
+        if target_name and not target_name.startswith("_") and not is_upper_const:
+            val_node = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+            if val_node:
+                try:
+                    val_str = ast.unparse(val_node) if hasattr(ast, "unparse") else ""
+                    if any(t in val_str for t in ("Union[", "Tuple[", "Callable[", "Optional[", "TypeAlias", "NewType", "Dict[", "List[", "|")):
+                        is_type_alias = True
+                except Exception:
+                    pass
+
+        if is_upper_const or is_type_alias:
             # 内部実装用正規表現パターンを排除してトークン浪費を防止
             if target_name.endswith(("_PATTERN", "_PATTERNS", "_REGEX")):
                 continue
