@@ -24,6 +24,14 @@ BLOCK_TAGS: Set[str] = {
     "td", "tfoot", "th", "thead", "tr", "ul", "details", "summary"
 }
 
+HTML_EXTENSIONS: Set[str] = {".html", ".htm", ".xhtml"}
+
+EXCLUDED_DIR_NAMES: Set[str] = {
+    ".git", ".venv", "venv", "env", ".tox", "node_modules",
+    "dist", "build", "__pycache__", "ai_meta", ".idea", ".vscode",
+    ".coverage", ".mypy_cache", ".pytest_cache"
+}
+
 
 class DocNode:
     def __init__(self, tag: str = "", attrs: Optional[Dict[str, str]] = None, parent: Optional['DocNode'] = None) -> None:
@@ -336,8 +344,8 @@ def parse_html_to_markdown(html_text: str) -> str:
 def extract_html_docs(
     targets: List[Path],
     project_root: Optional[Path] = None,
-) -> Tuple[str, int, int]:
-    """対象パス群からHTMLドキュメントを探索・抽出し、軽量Markdownと統計量を返す"""
+) -> Tuple[str, int, int, List[Path]]:
+    """対象パス群からHTMLドキュメントを探索・抽出し、軽量Markdownと統計量および対象ファイル一覧を返す"""
     root = (project_root or Path(".")).resolve()
     resolved_files: List[Path] = []
 
@@ -345,11 +353,17 @@ def extract_html_docs(
         path = (root / t).resolve() if not t.is_absolute() else t.resolve()
         if not path.exists():
             continue
+        # CSSやJS等の非ドキュメントファイルを確実に排除
         if path.is_file():
-            resolved_files.append(path)
+            if path.suffix.lower() in HTML_EXTENSIONS:
+                resolved_files.append(path)
         elif path.is_dir():
-            for ext in ("*.html", "*.htm", "*.xhtml"):
-                resolved_files.extend(sorted(path.rglob(ext)))
+            for p in path.rglob("*"):
+                if p.is_file() and p.suffix.lower() in HTML_EXTENSIONS:
+                    # 依存ライブラリやビルド出力ディレクトリを除外
+                    if any(part in EXCLUDED_DIR_NAMES for part in p.parts):
+                        continue
+                    resolved_files.append(p)
 
     seen: Set[Path] = set()
     unique_files: List[Path] = []
@@ -359,7 +373,19 @@ def extract_html_docs(
             unique_files.append(f)
 
     if not unique_files:
-        raise FileNotFoundError(f"解析対象のHTMLファイルが見つかりません: {[str(t) for t in targets]}")
+        raise FileNotFoundError(f"解析対象のHTMLファイルが見つかりません (CSS/JS等を除く): {[str(t) for t in targets]}")
+
+    # 目次・概要ファイル(index/readme)を先頭にして論理的順序でソート
+    def _doc_sort_key(p: Path) -> Tuple[int, str]:
+        name_lower = p.name.lower()
+        is_index = 0 if name_lower in ("index.html", "index.htm", "readme.html") else 1
+        try:
+            rel_str = str(p.relative_to(root)).lower()
+        except ValueError:
+            rel_str = str(p).lower()
+        return (is_index, rel_str)
+
+    unique_files.sort(key=_doc_sort_key)
 
     docs_output: List[str] = []
     for f in unique_files:
@@ -373,4 +399,4 @@ def extract_html_docs(
 
     combined = "\n\n---\n\n".join(docs_output)
     est_tokens = estimate_tokens(combined)
-    return combined, len(combined), est_tokens
+    return combined, len(combined), est_tokens, unique_files
