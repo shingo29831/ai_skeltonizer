@@ -62,11 +62,20 @@ def _get_clipboard_text() -> str:
         print(f"⚠ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
         return ""
 
-def _run_validation_test(project_root: Path, test_command: Optional[str]) -> Tuple[bool, str]:
+def _run_validation_test(project_root: Path, test_command: Optional[str], timeout_sec: int = 60) -> Tuple[bool, str]:
     cmd = test_command
     if not cmd or cmd == "auto":
+        # なぜ必要か: 仮想環境(.venv)のpytestやsys.executableを優先し、PATH未設定や依存不足による誤失敗を完全防止
+        venv_pytest = None
+        for venv_name in (".venv", "venv", "env"):
+            scripts_dir = project_root / venv_name / ("Scripts" if sys.platform == "win32" else "bin")
+            pt = scripts_dir / ("pytest.exe" if sys.platform == "win32" else "pytest")
+            if pt.exists():
+                venv_pytest = f'"{pt}"'
+                break
+
         if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
-            cmd = "pytest"
+            cmd = venv_pytest or f'"{sys.executable}" -m pytest'
         elif (project_root / "package.json").exists():
             cmd = "npm test"
         elif (project_root / "Cargo.toml").exists():
@@ -74,8 +83,8 @@ def _run_validation_test(project_root: Path, test_command: Optional[str]) -> Tup
         elif (project_root / "go.mod").exists():
             cmd = "go test ./..."
         else:
-            cmd = "pytest"
-    
+            cmd = venv_pytest or f'"{sys.executable}" -m pytest'
+
     print(f"\n🧪 検証テストを実行中: {cmd}")
     try:
         proc = subprocess.run(
@@ -86,9 +95,12 @@ def _run_validation_test(project_root: Path, test_command: Optional[str]) -> Tup
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
+            timeout=timeout_sec,
         )
         return (proc.returncode == 0), proc.stdout
+    except subprocess.TimeoutExpired:
+        return False, f"テスト実行がタイムアウトしました ({timeout_sec}秒)"
     except Exception as e:
         return False, f"テスト実行コマンドの起動に失敗しました: {e}"
 
@@ -292,11 +304,18 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("\n--- テスト失敗ログ ---", file=sys.stderr)
                         print(test_output, file=sys.stderr)
                         print("----------------------\n", file=sys.stderr)
+                    # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git内外を問わず完全ロールバックを保証
+                    rolled_back = False
                     try:
                         for f in modified_files:
-                            subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, check=True, stderr=subprocess.DEVNULL)
-                        print("🔄 git checkout により変更ファイルを元の状態に復元しました。", file=sys.stderr)
+                            res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
+                            if res.returncode != 0:
+                                subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
+                        rolled_back = True
+                        print("🔄 git checkout / clean により変更ファイルを元の状態に復元しました。", file=sys.stderr)
                     except Exception:
+                        pass
+                    if not rolled_back:
                         apply_patch(patch_text, project_root, target_file, force_replace=True, revert=True)
                         print("🔄 逆パッチ適用により変更箇所を元に戻しました。", file=sys.stderr)
                     return 1
