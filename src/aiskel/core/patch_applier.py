@@ -193,7 +193,8 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
             r')'
         )
     elif block_type == 'class':
-        pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:default\s+)?class\s+' + re.escape(block_name) + r'(?:[\s\(\{]|$)')
+        # なぜ必要か: Pythonのコロン(:)や型引数([, <)を含めクラス定義シグネチャを言語横断で確実に捕捉
+        pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:default\s+)?class\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)')
     else:
         return -1, -1
 
@@ -277,11 +278,18 @@ def _delete_block_from_lines(target_lines: List[str], block_name: str, block_typ
     return True, cleaned_lines
 
 def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
+    # なぜ必要か: クラス定義(コロンや型引数)及び関数定義を確実に捕捉する汎用ブロック正規表現
+    block_regex = re.compile(
+        r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
+        r'(def|class|function)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)|'
+        r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
+        r')'
+    )
     blocks = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        match = BLOCK_PATTERN.match(line)
+        match = block_regex.match(line) or BLOCK_PATTERN.match(line)
         if match:
             b_type = match.group(1) or 'function'
             b_name = match.group(2) or match.group(3)
