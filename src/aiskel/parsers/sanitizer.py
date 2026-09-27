@@ -156,8 +156,8 @@ def extract_summary_line(lines: List[str], entity_name: str = "") -> Optional[st
         if _is_trivial_docstring(line, entity_name):
             continue
 
-        # なぜ必要か: Module: @role: Comment: など多重にネストされた複合プレフィックスを再帰的に完全除去 (要件1-3)
-        clean_prefix_pattern = r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\s*:?\s*|@role\s*:?|Role\s*:?|AI\s*:?|Rule\s*:?|Comment\s*:?)\s*)+"
+        # なぜ必要か: 単語境界(\b)を保証し、aiskelやAirflow等の英単語の「ai」をプレフィックスと誤認して削るバグを防止
+        clean_prefix_pattern = r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Comment\b\s*:?)\s*)+"
         m = re.match(clean_prefix_pattern, line, re.IGNORECASE)
         if m and m.end() > 0:
             rest = line[m.end():].strip()
@@ -194,10 +194,10 @@ def extract_clean_role_description(
         if not summary:
             fallback_comment_summary = extract_summary_line(leading_comments, entity_name)
 
-    # なぜ必要か: 多重に付与された @role や Module:、Comment: プレフィックスを再帰的にストリップして純粋な説明文のみを抽出
+    # なぜ必要か: 単語境界(\b)を保証し、aiskel等の先頭文字「ai」がプレフィックス判定で削られるのを防止
     def _strip_role_prefix(text: str) -> str:
         return re.sub(
-            r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\s*:?\s*|@role\s*:?|Role\s*:?|AI\s*:?|Rule\s*:?|Comment\s*:?)\s*)+",
+            r"^(?:(?:\*\*\[(?:Role|AI|Rule)\]\*\*|(?:Module|Class|Function)\b\s*:?\s*|@role\b\s*:?|Role\b\s*:?|AI\b\s*:?|Rule\b\s*:?|Comment\b\s*:?)\s*)+",
             "",
             text,
             flags=re.IGNORECASE,
