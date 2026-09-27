@@ -15,7 +15,7 @@ from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_d
 from .core.token_counter import format_token_display, estimate_tokens
 from .core.patch_applier import apply_patch
 from .core.clipboard import set_clipboard_text
-from .core.code_extractor import extract_and_format_snippets
+from .core.code_extractor import extract_and_format_snippets, DEFAULT_MAX_CHARS
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
 
 def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
@@ -136,7 +136,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
     copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
-    copy_parser.add_argument("--max-chars", type=int, default=100_000, help="コピーを許可する最大文字数 (デフォルト: 100000)")
+    copy_parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"コピーを許可する最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
     docs_parser = subparsers.add_parser("docs", aliases=["d"], help="HTMLドキュメントをAI向けに解析・軽量構造化して出力します")
@@ -159,7 +159,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
     parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
-    parser.add_argument("--max-chars", type=int, default=100_000, help="クリップボードコピー時の最大文字数")
+    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     return parser.parse_args(args)
 
 def _process_comma_separated_args(arg_list: List[str]) -> Set[str]:

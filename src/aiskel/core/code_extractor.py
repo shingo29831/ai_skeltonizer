@@ -7,6 +7,8 @@ from typing import List, Tuple, Optional
 from .patch_applier import _find_block_range, _extract_blocks
 from .token_counter import estimate_tokens
 
+DEFAULT_MAX_CHARS = 1_000_000
+
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
     ".ts": "typescript",
@@ -112,7 +114,7 @@ def _resolve_dependencies_for_nodes(lines: List[str], initial_nodes: List[str]) 
 def extract_and_format_snippets(
     specs: List[str],
     project_root: Path,
-    max_chars: int = 100_000,
+    max_chars: int = DEFAULT_MAX_CHARS,
     with_deps: bool = False
 ) -> Tuple[str, int, int]:
     if not specs:
