@@ -180,6 +180,72 @@ def _insert_block_into_lines(target_lines: List[str], block_lines: List[str], in
         result.extend(after)
     return result
 
+def _find_assignment_end(lines: List[str], header_idx: int) -> int:
+    """代入文の開始行から、括弧のネスト・複数行文字列・行継続を考慮して文の終了行を返す"""
+    paren_depth = 0
+    in_single_quote = False
+    in_double_quote = False
+    in_triple_single = False
+    in_triple_double = False
+    in_backtick = False
+
+    end_idx = header_idx
+    for idx in range(header_idx, len(lines)):
+        line = lines[idx]
+        i = 0
+        n = len(line)
+        has_line_continuation = line.rstrip().endswith('\\')
+
+        while i < n:
+            if not in_single_quote and not in_double_quote and not in_backtick:
+                if not in_triple_single and line[i:i+3] == '"""':
+                    in_triple_double = not in_triple_double
+                    i += 3
+                    continue
+                elif not in_triple_double and line[i:i+3] == "'''":
+                    in_triple_single = not in_triple_single
+                    i += 3
+                    continue
+
+            if in_triple_double or in_triple_single:
+                i += 1
+                continue
+
+            char = line[i]
+            if char == '\\' and i + 1 < n:
+                i += 2
+                continue
+
+            if char == '"' and not in_single_quote and not in_backtick:
+                in_double_quote = not in_double_quote
+            elif char == "'" and not in_double_quote and not in_backtick:
+                in_single_quote = not in_single_quote
+            elif char == '`' and not in_single_quote and not in_double_quote:
+                in_backtick = not in_backtick
+            elif not in_single_quote and not in_double_quote and not in_backtick:
+                if char == '#' or line[i:i+2] == '//':
+                    break
+                if char in '([{':
+                    paren_depth += 1
+                elif char in ')]}':
+                    paren_depth -= 1
+            i += 1
+
+        end_idx = idx + 1
+        if (
+            paren_depth <= 0
+            and not in_single_quote
+            and not in_double_quote
+            and not in_triple_single
+            and not in_triple_double
+            and not in_backtick
+            and not has_line_continuation
+        ):
+            break
+
+    return end_idx
+
+
 def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tuple[int, int]:
     """
     行リストから指定された関数またはクラスの定義範囲（開始行、終了行）を返す。
@@ -195,6 +261,13 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
     elif block_type == 'class':
         # なぜ必要か: Pythonのコロン(:)や型引数([, <)を含めクラス定義シグネチャを言語横断で確実に捕捉
         pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:default\s+)?class\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)')
+    elif block_type in ('constant', 'const', 'var', 'variable'):
+        # なぜ必要か: モジュール定数・変数代入(型注釈やJSのexport/const/let/var対応)を確実に捕捉
+        pattern = re.compile(
+            r'^([ \t]*)(?:export\s+)?(?:(?:const|let|var|readonly)\s+)?'
+            + re.escape(block_name)
+            + r'(?:\s*:[^=]+)?\s*=(?!\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>)'
+        )
     else:
         return -1, -1
 
@@ -209,6 +282,9 @@ def _find_block_range(lines: List[str], block_name: str, block_type: str) -> Tup
 
     if header_idx == -1:
         return -1, -1
+
+    if block_type in ('constant', 'const', 'var', 'variable'):
+        return header_idx, _find_assignment_end(lines, header_idx)
 
     # なぜ必要か: デコレータ行(@...)を含めたブロック先頭を特定するため
     start_idx = header_idx
@@ -285,6 +361,10 @@ def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
         r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
         r')'
     )
+    const_regex = re.compile(
+        r'^([ \t]*)(?:export\s+)?(?:(?:const|let|var|readonly)\s+)?'
+        r'([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:[^=]+)?\s*=(?!\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>)'
+    )
     blocks = []
     i = 0
     while i < len(lines):
@@ -308,6 +388,20 @@ def _extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
                 s_end += i
                 blocks.append((b_type, b_name, actual_start, s_end))
                 i = max(s_end - 1, i)
+                i += 1
+                continue
+
+        # なぜ必要か: トップレベル定数・設定値代入をノード一覧やサジェストに反映しAI要求不整合を根本解決
+        const_match = const_regex.match(line)
+        if const_match:
+            indent = len(const_match.group(1))
+            b_name = const_match.group(2)
+            if (indent == 0 or (b_name.isupper() and len(b_name) > 1)) and b_name not in ('if', 'for', 'while', 'return'):
+                s_start, s_end = _find_block_range(lines[i:], b_name, 'constant')
+                if s_end != -1:
+                    s_end += i
+                    blocks.append(('constant', b_name, i, s_end))
+                    i = max(s_end - 1, i)
         i += 1
     return blocks
 

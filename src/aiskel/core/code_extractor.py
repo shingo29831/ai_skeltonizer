@@ -1,4 +1,4 @@
-"""Module: @role: ソースコードから特定ノード（関数・クラス）の構文単位での抽出およびMarkdownスニペット整形を担当する。"""
+"""Module: @role: ソースコードから特定ノード（関数・クラス・定数）の構文単位での抽出およびMarkdownスニペット整形を担当する。"""
 import difflib
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -59,7 +59,7 @@ def parse_target_spec(spec: str) -> Tuple[str, List[str]]:
     return path_part, nodes
 
 def extract_node_code(lines: List[str], node_name: str) -> Optional[List[str]]:
-    for block_type in ("class", "def", "function"):
+    for block_type in ("class", "def", "function", "constant"):
         start_idx, end_idx = _find_block_range(lines, node_name, block_type)
         if start_idx != -1 and end_idx != -1:
             return lines[start_idx:end_idx]
@@ -70,12 +70,12 @@ def extract_node_code(lines: List[str], node_name: str) -> Optional[List[str]]:
         c_start, c_end = _find_block_range(lines, class_name, "class")
         if c_start != -1 and c_end != -1:
             class_lines = lines[c_start:c_end]
-            for block_type in ("def", "function"):
+            for block_type in ("def", "function", "constant"):
                 m_start, m_end = _find_block_range(class_lines, method_name, block_type)
                 if m_start != -1 and m_end != -1:
                     return class_lines[m_start:m_end]
         # なぜ必要か: クラス名が不一致でも同名メソッドが存在すればフォールバック取得して作業中断を防止
-        for block_type in ("def", "function"):
+        for block_type in ("def", "function", "constant"):
             start_idx, end_idx = _find_block_range(lines, method_name, block_type)
             if start_idx != -1 and end_idx != -1:
                 return lines[start_idx:end_idx]
@@ -109,15 +109,15 @@ def extract_and_format_snippets(
         content = target_path.read_text(encoding="utf-8")
         lines = content.splitlines()
 
-        # ワイルドカード指定 (*): 定義されている関数・クラスの一覧リストを出力
+        # ワイルドカード指定 (*): 定義されている関数・クラス・定数の一覧リストを出力
         if nodes == ["*"]:
             blocks = _extract_blocks(lines)
             if not blocks:
-                snippet_blocks.append(f"ファイルパス: {rel_display_path} (関数・クラス一覧: 0件)\n(定義されている関数・クラスはありません)")
+                snippet_blocks.append(f"ファイルパス: {rel_display_path} (定義ノード一覧: 0件)\n(定義されている関数・クラス・定数はありません)")
             else:
                 items_text = []
                 for b_type, b_name, s_start, s_end in blocks:
-                    type_name = "class" if b_type == "class" else "function"
+                    type_name = "class" if b_type == "class" else ("constant" if b_type == "constant" else "function")
                     items_text.append(f"  - [{type_name}] {b_name} (L{s_start + 1}-L{s_end})")
                 summary_list = "\n".join(items_text)
                 header = f"ファイルパス: {rel_display_path} (定義ノード一覧: {len(blocks)}件)"
@@ -144,8 +144,8 @@ def extract_and_format_snippets(
                     elif available_names:
                         suggestion = f"(利用可能なノード: {', '.join(available_names)})"
                     else:
-                        suggestion = "(定義されている関数・クラスはありません)"
-                    raise KeyError(f"ファイル '{rel_display_path}' 内に関数またはクラス '{node_name}' が見つかりませんでした。{suggestion}")
+                        suggestion = "(定義されている関数・クラス・定数はありません)"
+                    raise KeyError(f"ファイル '{rel_display_path}' 内に関数、クラス、または定数 '{node_name}' が見つかりませんでした。{suggestion}")
                 extracted_parts.append("\n".join(node_lines).rstrip())
                 total_items += 1
 
