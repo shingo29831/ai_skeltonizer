@@ -11,6 +11,12 @@ _DELIMITER_START = re.compile(r'^[ \t]*<{4,}\s*$', re.MULTILINE)
 _DELIMITER_MID = re.compile(r'^[ \t]*={4,}\s*$', re.MULTILINE)
 _DELIMITER_END = re.compile(r'^[ \t]*>{4,}\s*$', re.MULTILINE)
 
+def _check_and_warn_delimiter(line: str, line_no: int) -> None:
+    # なぜ必要か: AIが標準仕様(4文字)と異なる文字数の区切りを出力した際にユーザーに注意喚起するため
+    stripped = line.strip()
+    if len(stripped) != 4:
+        print(f"⚠ 警告: 区切り記号の長さが標準(4文字)と異なります (行 {line_no}: '{stripped}' -> 補正して継続)")
+
 BLOCK_PATTERN = re.compile(
     r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
     r'(def|function|class)\s+([a-zA-Z0-9_]+)|'
@@ -859,6 +865,7 @@ def apply_patch(
             continue
 
         if _DELIMITER_START.match(line):
+            _check_and_warn_delimiter(line, i + 1)
             if not current_file:
                 print(f"⚠ 警告: ファイルパスが指定されていないため、ブロックをスキップします (行: {i+1})")
                 fail_count += 1
@@ -884,22 +891,32 @@ def apply_patch(
             i += 1
             # なぜ必要か: AIが<<<<を重複出力した場合に余分な区切り行をスキップするため
             while i < len(lines) and _DELIMITER_START.match(lines[i]):
+                print(f"⚠ 警告: 重複した開始区切り行を検出しました (行 {i + 1}: '{lines[i].strip()}' -> スキップ)")
                 i += 1
 
             while i < len(lines) and not _DELIMITER_MID.match(lines[i]):
                 search_lines.append(lines[i])
                 i += 1
                 
+            if i < len(lines) and _DELIMITER_MID.match(lines[i]):
+                _check_and_warn_delimiter(lines[i], i + 1)
+                i += 1
+
             # なぜ必要か: AIが====の数や行を多く重複出力した場合に余分な区切りをスキップするため
             while i < len(lines) and _DELIMITER_MID.match(lines[i]):
+                print(f"⚠ 警告: 重複した中央区切り行を検出しました (行 {i + 1}: '{lines[i].strip()}' -> スキップ)")
                 i += 1
                 
             while i < len(lines) and not _DELIMITER_END.match(lines[i]):
                 replace_lines.append(lines[i])
                 i += 1
 
+            if i < len(lines) and _DELIMITER_END.match(lines[i]):
+                _check_and_warn_delimiter(lines[i], i + 1)
+
             # なぜ必要か: AIが>>>>の数や行を多く重複出力した場合に余分な区切りをスキップするため
             while i + 1 < len(lines) and _DELIMITER_END.match(lines[i+1]):
+                print(f"⚠ 警告: 重複した終了区切り行を検出しました (行 {i + 2}: '{lines[i+1].strip()}' -> スキップ)")
                 i += 1
 
             if revert:
