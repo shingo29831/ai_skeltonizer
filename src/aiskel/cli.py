@@ -380,7 +380,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 patch_text = sys.stdin.read()
             else:
                 patch_text = _get_clipboard_text()
-                if not patch_text or "<<<<" not in patch_text:
+                if not patch_text or not re.search(r'<{4,}', patch_text):
                     if not patch_text:
                         print("⚠ クリップボードが空です。")
                     else:

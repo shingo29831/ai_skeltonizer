@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Set
 
+_DELIMITER_START = re.compile(r'^[ \t]*<{4,}\s*$', re.MULTILINE)
+_DELIMITER_MID = re.compile(r'^[ \t]*={4,}\s*$', re.MULTILINE)
+_DELIMITER_END = re.compile(r'^[ \t]*>{4,}\s*$', re.MULTILINE)
+
 BLOCK_PATTERN = re.compile(
     r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
     r'(def|function|class)\s+([a-zA-Z0-9_]+)|'
@@ -787,7 +791,7 @@ def apply_patch(
     パッチテキストを解析し、トランザクション保証(All-or-Nothing)の下でファイルを書き換える。
     コード削除およびファイル自体の削除操作にも対応する。
     """
-    if "<<<<" not in patch_text or "====" not in patch_text or ">>>>" not in patch_text:
+    if not _DELIMITER_START.search(patch_text) or not _DELIMITER_MID.search(patch_text) or not _DELIMITER_END.search(patch_text):
         # 明示的なファイル削除ディレクティブのみのパッチ判定
         file_header_matches = list(FILE_HEADER_PATTERN.finditer(patch_text))
         if file_header_matches and any(bool(m.group(3)) or any(line.strip().lower().startswith(kw) for kw in ("削除:", "delete:", "remove:")) for m in file_header_matches for line in patch_text.splitlines() if m.group(0) in line):
@@ -834,7 +838,7 @@ def apply_patch(
                     original_contents[current_file] = ""
             
             # ブロックを伴わない単体ファイル削除ディレクティブの処理
-            if file_delete_flag and (i + 1 >= len(lines) or "<<<<" not in lines[i+1]):
+            if file_delete_flag and (i + 1 >= len(lines) or not _DELIMITER_START.match(lines[i+1])):
                 try:
                     disp_path = current_file.relative_to(project_root)
                 except ValueError:
@@ -854,11 +858,13 @@ def apply_patch(
             i += 1
             continue
 
-        if line.strip() == "<<<<":
+        if _DELIMITER_START.match(line):
             if not current_file:
                 print(f"⚠ 警告: ファイルパスが指定されていないため、ブロックをスキップします (行: {i+1})")
                 fail_count += 1
-                while i < len(lines) and lines[i].strip() != ">>>>":
+                while i < len(lines) and not _DELIMITER_END.match(lines[i]):
+                    i += 1
+                while i + 1 < len(lines) and _DELIMITER_END.match(lines[i+1]):
                     i += 1
                 i += 1
                 continue
@@ -876,13 +882,24 @@ def apply_patch(
             replace_lines = []
             
             i += 1
-            while i < len(lines) and lines[i].strip() != "====":
+            # なぜ必要か: AIが<<<<を重複出力した場合に余分な区切り行をスキップするため
+            while i < len(lines) and _DELIMITER_START.match(lines[i]):
+                i += 1
+
+            while i < len(lines) and not _DELIMITER_MID.match(lines[i]):
                 search_lines.append(lines[i])
                 i += 1
                 
-            i += 1
-            while i < len(lines) and lines[i].strip() != ">>>>":
+            # なぜ必要か: AIが====の数や行を多く重複出力した場合に余分な区切りをスキップするため
+            while i < len(lines) and _DELIMITER_MID.match(lines[i]):
+                i += 1
+                
+            while i < len(lines) and not _DELIMITER_END.match(lines[i]):
                 replace_lines.append(lines[i])
+                i += 1
+
+            # なぜ必要か: AIが>>>>の数や行を多く重複出力した場合に余分な区切りをスキップするため
+            while i + 1 < len(lines) and _DELIMITER_END.match(lines[i+1]):
                 i += 1
 
             if revert:
