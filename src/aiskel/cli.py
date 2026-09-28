@@ -17,6 +17,7 @@ from .core.patch_applier import apply_patch
 from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets, DEFAULT_MAX_CHARS
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
+from .core.watcher import watch_project
 
 def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
     # ソースコード内の正規表現リテラルに誤マッチしないようタグ文字列を分割定義
@@ -123,6 +124,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻すリバート処理を行います")
     apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
     apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時は自動検出)")
+    apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
     revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス")
@@ -143,6 +145,18 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     docs_parser.add_argument("targets", type=Path, nargs="*", default=[], help="解析対象のHTMLファイルまたはディレクトリのパス (省略時は標準入力またはカレントディレクトリ)")
     docs_parser.add_argument("-c", "-cp", "--clipboard", "--copy", dest="clipboard", action="store_true", help="解析結果をクリップボードに自動保存します")
     docs_parser.add_argument("-o", "--output", type=Path, default=None, help="解析結果を保存する出力ファイルパス (省略時は標準出力)")
+
+    watch_parser = subparsers.add_parser("watch", aliases=["w"], help="ファイル変更を常時監視し、変更があるたびに自動でスケルトン同期を実行します")
+    watch_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="監視対象のプロジェクトルートディレクトリ")
+    watch_parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
+    watch_parser.add_argument("-i", "--interval", type=float, default=1.0, help="ポーリング間隔 (秒, デフォルト: 1.0)")
+    watch_parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
+    watch_parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装を削除せず保持する関数やメソッド名")
+    watch_parser.add_argument("--only-nodes", action="append", default=[], help="指定したクラスや関数のみを抽出し、それ以外を完全に削除する")
+    watch_parser.add_argument("--no-bundle", action="store_true", help="単一ファイル・バンドルの出力を行わない")
+    watch_parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", help="単一バンドルファイルの出力フォーマット")
+    watch_parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
+    watch_parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
 
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
@@ -204,6 +218,68 @@ def _ensure_gitignore_updated(project_root: Path, output_dir: Path) -> None:
             
     except Exception as e:
         print(f"⚠ .gitignore の更新に失敗しました: {e}", file=sys.stderr)
+
+def _run_sync(
+    project_root: Path,
+    output_dir: Path,
+    config: SkeletonConfig,
+    force: bool = False,
+    focus_paths: Optional[Set[str]] = None,
+    focus_deps: bool = False,
+    git_diff: bool = False,
+    no_ui: bool = False,
+    quiet: bool = False,
+) -> Tuple[int, int, int, Optional[Path]]:
+    _ensure_gitignore_updated(project_root, output_dir)
+    target_files = get_target_files(project_root)
+
+    if focus_paths:
+        resolved_focus_files = set()
+        for p_str in focus_paths:
+            p = (project_root / Path(p_str)).resolve() if not Path(p_str).is_absolute() else Path(p_str).resolve()
+            if p.is_dir():
+                resolved_focus_files.update({tf for tf in target_files if p in tf.parents or p == tf.parent})
+            elif p in target_files:
+                resolved_focus_files.add(p)
+        if focus_deps:
+            resolved_focus_files = parse_direct_dependencies(resolved_focus_files, set(target_files))
+        target_files = list(resolved_focus_files)
+
+    if git_diff:
+        modified_files = get_staged_or_modified_files(project_root)
+        if modified_files:
+            target_files = list(parse_direct_dependencies(modified_files, set(target_files)))
+
+    if no_ui:
+        target_files = filter_logic_files(target_files)
+
+    tree_text = generate_tree_text(project_root, target_files)
+    syncer = ProjectSyncer(project_root, output_dir, config)
+    deleted_count = syncer.clean_deleted_files(target_files)
+    updated_count, skipped_count, bundle_path = syncer.sync_files(target_files, tree_text=tree_text, force_rebuild=force)
+
+    if not quiet:
+        stats = syncer.token_stats
+        print("\n=== 同期およびコンテキスト最適化完了 ===")
+        print(f"出力先ディレクトリ: {output_dir}")
+        print(f"  - 更新/処理ファイル数 : {updated_count} 件")
+        print(f"  - 変更なし(スキップ)   : {skipped_count} 件")
+        if deleted_count > 0:
+            print(f"  - 削除した古いファイル: {deleted_count} 件")
+        print("\n--- 辞書・マニュアル出力 ---")
+        if bundle_path and bundle_path.exists():
+            print(f"  - アーキテクチャ要素: {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
+
+        print("\n--- トークン・予算削減アナライザー ---")
+        print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
+        if bundle_path and bundle_path.exists():
+            arch_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
+            arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
+            print(f"  - アーキテクチャ要素: 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
+        else:
+            print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
+
+    return updated_count, skipped_count, deleted_count, bundle_path
 
 def main(args: Optional[List[str]] = None) -> int:
     try:
@@ -381,7 +457,43 @@ def main(args: Optional[List[str]] = None) -> int:
                 except (subprocess.CalledProcessError, FileNotFoundError) as e:
                     print(f"⚠ 自動コミットに失敗しました: {e}")
 
+            if not is_revert and success > 0 and fail == 0 and not getattr(parsed_args, "no_sync", False):
+                output_dir = _resolve_output_dir(project_root, None)
+                sync_config = SkeletonConfig(
+                    full_code_paths=set(),
+                    keep_functions=set(),
+                    only_nodes=set(),
+                    create_bundle=True,
+                    bundle_format="txt",
+                    policy_path=None,
+                )
+                print("\n🔄 置換完了に伴い、スケルトンとバンドルを自動同期します...")
+                _run_sync(project_root, output_dir, sync_config, quiet=False)
+
             return 0 if fail == 0 else 1
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
+            project_root: Path = parsed_args.project_dir.resolve()
+            output_dir: Path = _resolve_output_dir(project_root, parsed_args.output_dir)
+            resolved_full_paths = {
+                (project_root / Path(p)).resolve() if not Path(p).is_absolute() else Path(p).resolve()
+                for p in _process_comma_separated_args(parsed_args.full_path)
+            }
+            config = SkeletonConfig(
+                full_code_paths=resolved_full_paths,
+                keep_functions=_process_comma_separated_args(parsed_args.keep_func),
+                only_nodes=_process_comma_separated_args(parsed_args.only_nodes),
+                create_bundle=not parsed_args.no_bundle,
+                bundle_format=parsed_args.format,
+                policy_path=parsed_args.policy.resolve() if parsed_args.policy else None,
+            )
+            _run_sync(project_root, output_dir, config, no_ui=parsed_args.no_ui, quiet=False)
+            watch_project(
+                project_root,
+                lambda: _run_sync(project_root, output_dir, config, no_ui=parsed_args.no_ui, quiet=True),
+                interval_sec=parsed_args.interval,
+            )
+            return 0
 
         project_root: Path = parsed_args.project_dir.resolve()
         if not project_root.exists() or not project_root.is_dir():
@@ -392,8 +504,6 @@ def main(args: Optional[List[str]] = None) -> int:
         if project_root == output_dir:
             print("エラー: ソースディレクトリと出力先ディレクトリに同じパスは指定できません。", file=sys.stderr)
             return 1
-
-        _ensure_gitignore_updated(project_root, output_dir)
 
         resolved_full_paths = {
             (project_root / Path(p)).resolve() if not Path(p).is_absolute() else Path(p).resolve()
@@ -410,53 +520,17 @@ def main(args: Optional[List[str]] = None) -> int:
         )
 
         print(f"解析を開始します: {project_root}")
-        target_files = get_target_files(project_root)
-        
-        focus_paths = _process_comma_separated_args(parsed_args.focus)
-        if focus_paths:
-            resolved_focus_files = set()
-            for p_str in focus_paths:
-                p = (project_root / Path(p_str)).resolve() if not Path(p_str).is_absolute() else Path(p_str).resolve()
-                if p.is_dir():
-                    resolved_focus_files.update({tf for tf in target_files if p in tf.parents or p == tf.parent})
-                elif p in target_files:
-                    resolved_focus_files.add(p)
-            if parsed_args.focus_deps:
-                resolved_focus_files = parse_direct_dependencies(resolved_focus_files, set(target_files))
-            target_files = list(resolved_focus_files)
-
-        if parsed_args.git_diff:
-            modified_files = get_staged_or_modified_files(project_root)
-            if modified_files:
-                target_files = list(parse_direct_dependencies(modified_files, set(target_files)))
-        
-        if parsed_args.no_ui:
-            target_files = filter_logic_files(target_files)
-
-        tree_text = generate_tree_text(project_root, target_files)
-        syncer = ProjectSyncer(project_root, output_dir, config)
-        deleted_count = syncer.clean_deleted_files(target_files)
-        updated_count, skipped_count, bundle_path = syncer.sync_files(target_files, tree_text=tree_text, force_rebuild=parsed_args.force)
-
-        stats = syncer.token_stats
-        print("\n=== 同期およびコンテキスト最適化完了 ===")
-        print(f"出力先ディレクトリ: {output_dir}")
-        print(f"  - 更新/処理ファイル数 : {updated_count} 件")
-        print(f"  - 変更なし(スキップ)   : {skipped_count} 件")
-        if deleted_count > 0:
-            print(f"  - 削除した古いファイル: {deleted_count} 件")
-        print("\n--- 辞書・マニュアル出力 ---")
-        if bundle_path and bundle_path.exists():
-            print(f"  - アーキテクチャ要素: {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
-            
-        print("\n--- トークン・予算削減アナライザー ---")
-        print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
-        if bundle_path and bundle_path.exists():
-            arch_tokens = estimate_tokens(bundle_path.read_text(encoding="utf-8"))
-            arch_red = (1.0 - (arch_tokens / max(stats.raw_tokens, 1))) * 100
-            print(f"  - アーキテクチャ要素: 約 {arch_tokens:,} tokens ({arch_red:.1f}% 削減)")
-        else:
-            print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
+        _run_sync(
+            project_root,
+            output_dir,
+            config,
+            force=parsed_args.force,
+            focus_paths=_process_comma_separated_args(parsed_args.focus),
+            focus_deps=parsed_args.focus_deps,
+            git_diff=parsed_args.git_diff,
+            no_ui=parsed_args.no_ui,
+            quiet=False,
+        )
         return 0
 
     except Exception as e:
