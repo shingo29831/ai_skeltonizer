@@ -1,7 +1,9 @@
 # src/aiskel/core/patch_applier.py
 """Module: @role: パッチテキストの解析およびインメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入・コードおよびファイル削除を実行する。"""
+import ast
 import difflib
 import re
+import sys
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Set
 
@@ -65,21 +67,24 @@ def _has_import_statements(lines: List[str]) -> bool:
     return False
 
 def _extract_import_lines(lines: List[str]) -> List[str]:
-    # なぜ必要か: 新規関数ブロックに含まれるimport文を抽出し、既存ファイル上部にマージするため
+    # なぜ必要か: 関数内ローカルimportの誤抽出を防ぎ、トップレベルimportのみを抽出するため
     import_patterns = [
-        re.compile(r'^\s*(?:from\s+[a-zA-Z0-9_\.]+\s+import|import\s+[a-zA-Z0-9_\.]+)'),
-        re.compile(r'^\s*(?:export\s+)?import\s+'),
-        re.compile(r'^\s*(?:const|let|var)\s+.*=\s*require\('),
-        re.compile(r'^\s*#\s*include\s+[<"]'),
-        re.compile(r'^\s*(?:package|import)\s+'),
-        re.compile(r'^\s*(?:use\s+[a-zA-Z0-9_:]+|extern\s+crate)'),
-        re.compile(r'^\s*using\s+[a-zA-Z0-9_\.]+;'),
-        re.compile(r'^\s*(?:namespace|use)\s+[a-zA-Z0-9_\\]+;'),
+        re.compile(r'^(?:from\s+[a-zA-Z0-9_\.]+\s+import|import\s+[a-zA-Z0-9_\.]+)'),
+        re.compile(r'^(?:export\s+)?import\s+'),
+        re.compile(r'^(?:const|let|var)\s+.*=\s*require\('),
+        re.compile(r'^#\s*include\s+[<"]'),
+        re.compile(r'^(?:package|import)\s+'),
+        re.compile(r'^(?:use\s+[a-zA-Z0-9_:]+|extern\s+crate)'),
+        re.compile(r'^using\s+[a-zA-Z0-9_\.]+;'),
+        re.compile(r'^(?:namespace|use)\s+[a-zA-Z0-9_\\]+;'),
     ]
     extracted = []
     i = 0
     while i < len(lines):
         line = lines[i]
+        if line.startswith((' ', '\t')):
+            i += 1
+            continue
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "//", "/*", "*")):
             i += 1
@@ -95,13 +100,29 @@ def _extract_import_lines(lines: List[str]) -> List[str]:
         i += 1
     return extracted
 
+def _find_import_end_index(lines: List[str], start_idx: int) -> int:
+    # なぜ必要か: 複数行インポート文(括弧ネストや行継続バックスラッシュ)の真の終端行を正確に特定するため
+    paren_depth = 0
+    i = start_idx
+    while i < len(lines):
+        line = lines[i]
+        code_part = line.split('#')[0]
+        paren_depth += (code_part.count('(') - code_part.count(')'))
+        paren_depth += (code_part.count('[') - code_part.count(']'))
+        paren_depth += (code_part.count('{') - code_part.count('}'))
+        has_continuation = code_part.rstrip().endswith('\\')
+        i += 1
+        if paren_depth <= 0 and not has_continuation:
+            break
+    return i
+
 def _merge_import_lines(target_lines: List[str], import_lines: List[str]) -> List[str]:
     # なぜ必要か: 新規関数が依存するimport文を重複なくファイルの適切な位置（importブロック末尾）に挿入するため
     if not import_lines:
         return target_lines
 
     existing_stripped = {l.strip() for l in target_lines}
-    new_imports = [l for l in import_lines if l.strip() and l.strip() not in existing_stripped]
+    new_imports = [l.strip() for l in import_lines if l.strip() and l.strip() not in existing_stripped]
     if not new_imports:
         return target_lines
 
@@ -115,13 +136,19 @@ def _merge_import_lines(target_lines: List[str], import_lines: List[str]) -> Lis
         re.compile(r'^\s*using\s+[a-zA-Z0-9_\.]+;'),
         re.compile(r'^\s*(?:namespace|use)\s+[a-zA-Z0-9_\\]+;'),
     ]
-    last_import_idx = -1
-    for idx, line in enumerate(target_lines):
+    last_import_end_idx = -1
+    idx = 0
+    while idx < len(target_lines):
+        line = target_lines[idx]
         if any(p.search(line) for p in import_patterns):
-            last_import_idx = idx
+            end_idx = _find_import_end_index(target_lines, idx)
+            last_import_end_idx = end_idx
+            idx = end_idx
+        else:
+            idx += 1
 
-    if last_import_idx != -1:
-        insert_idx = last_import_idx + 1
+    if last_import_end_idx != -1:
+        insert_idx = last_import_end_idx
         return target_lines[:insert_idx] + new_imports + target_lines[insert_idx:]
 
     insert_idx = 0
@@ -715,6 +742,20 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
     if fail_count > 0:
         return success_count, fail_count, skipped_count, set()
 
+    syntax_errors = []
+    for path, lines_list in file_contents.items():
+        if path.suffix.lower() == ".py":
+            try:
+                ast.parse("\n".join(lines_list), filename=str(path))
+            except SyntaxError as se:
+                syntax_errors.append(f"  - {path.name}:{se.lineno}: {se.msg}")
+
+    if syntax_errors:
+        print(f"\n⛔ パッチ適用後のコードに構文エラーを検知したため、処理を中断しました:", file=sys.stderr)
+        for err in syntax_errors:
+            print(err, file=sys.stderr)
+        return success_count, fail_count + len(syntax_errors), skipped_count, set()
+
     if dry_run:
         for path in modified_files:
             orig = original_contents.get(path, "")
@@ -1069,6 +1110,26 @@ def apply_patch(
     if fail_count > 0:
         print(f"\n⛔ 置換エラーが発生したため、トランザクションを中断しました。ディスクへの書き込み・削除は一切行われていません (All-or-Nothing)。")
         return success_count, fail_count, skipped_count, set()
+
+    # なぜ必要か: 不正な置換によるPython構文エラーファイルのディスク反映および誤コミットを未然に完全遮断
+    syntax_errors = []
+    for path, content in file_contents.items():
+        if path.suffix.lower() == ".py" and path not in files_to_delete:
+            try:
+                ast.parse(content, filename=str(path))
+            except SyntaxError as se:
+                try:
+                    rel_p = path.relative_to(project_root)
+                except ValueError:
+                    rel_p = path
+                syntax_errors.append(f"  - {rel_p}:{se.lineno}: {se.msg} (行: '{se.text.strip() if se.text else ''}')")
+
+    if syntax_errors:
+        print(f"\n⛔ パッチ適用後のコードに構文エラー(SyntaxError)を検知したため、トランザクションを中断しました:", file=sys.stderr)
+        for err in syntax_errors:
+            print(err, file=sys.stderr)
+        print("ディスクへの変更およびGitコミットは行われていません (All-or-Nothing)。", file=sys.stderr)
+        return success_count, fail_count + len(syntax_errors), skipped_count, set()
 
     # Dry-runプレビュー出力
     if dry_run:
