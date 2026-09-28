@@ -134,6 +134,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     # CLI入力コスト削減のためサブコマンド専用の短縮フラグ -f を提供
     revert_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     revert_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビューを表示します")
+    revert_parser.add_argument("--no-sync", action="store_true", help="リバート成功後のスケルトン・バンドル自動同期をスキップします")
 
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
@@ -281,6 +282,20 @@ def _run_sync(
 
     return updated_count, skipped_count, deleted_count, bundle_path
 
+def _trigger_auto_sync(project_root: Path, action_label: str) -> None:
+    # なぜ必要か: コード変更コマンド実行後に最新のスケルトンとバンドル状態を完全同期・担保するため
+    output_dir = _resolve_output_dir(project_root, None)
+    sync_config = SkeletonConfig(
+        full_code_paths=set(),
+        keep_functions=set(),
+        only_nodes=set(),
+        create_bundle=True,
+        bundle_format="txt",
+        policy_path=None,
+    )
+    print(f"\n🔄 {action_label}完了に伴い、スケルトンとバンドルを自動同期します...")
+    _run_sync(project_root, output_dir, sync_config, quiet=False)
+
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
@@ -389,6 +404,8 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("コミットを破棄(git reset --hard HEAD~1)して元に戻します...")
                         subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=project_root, check=True)
                         print("✔ コミットの破棄が完了しました。")
+                        if not getattr(parsed_args, "no_sync", False):
+                            _trigger_auto_sync(project_root, "コミット破棄")
                         return 0
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
@@ -457,18 +474,9 @@ def main(args: Optional[List[str]] = None) -> int:
                 except (subprocess.CalledProcessError, FileNotFoundError) as e:
                     print(f"⚠ 自動コミットに失敗しました: {e}")
 
-            if not is_revert and success > 0 and fail == 0 and not getattr(parsed_args, "no_sync", False):
-                output_dir = _resolve_output_dir(project_root, None)
-                sync_config = SkeletonConfig(
-                    full_code_paths=set(),
-                    keep_functions=set(),
-                    only_nodes=set(),
-                    create_bundle=True,
-                    bundle_format="txt",
-                    policy_path=None,
-                )
-                print("\n🔄 置換完了に伴い、スケルトンとバンドルを自動同期します...")
-                _run_sync(project_root, output_dir, sync_config, quiet=False)
+            if success > 0 and fail == 0 and not getattr(parsed_args, "no_sync", False):
+                action_name = "リバート" if is_revert else "置換"
+                _trigger_auto_sync(project_root, action_name)
 
             return 0 if fail == 0 else 1
 
