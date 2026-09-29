@@ -106,6 +106,74 @@ def _run_validation_test(project_root: Path, test_command: Optional[str], timeou
     except Exception as e:
         return False, f"テスト実行コマンドの起動に失敗しました: {e}"
 
+def _normalize_cli_args(args: List[str]) -> List[str]:
+    # 可変長位置引数の途中にオプションが混在した場合でも順序を再構成して解析エラーを防止
+    if not args:
+        return args
+
+    cmd_idx = -1
+    for i, a in enumerate(args):
+        if a in ("copy", "c", "cp"):
+            cmd_idx = i
+            break
+
+    if cmd_idx != -1:
+        prefix, rest = args[: cmd_idx + 1], args[cmd_idx + 1 :]
+        options, positionals = [], []
+        i = 0
+        while i < len(rest):
+            token = rest[i]
+            if token in ("-d", "--deps", "--dependencies", "-h", "--help"):
+                options.append(token)
+                i += 1
+            elif token in ("--max-chars", "--dir"):
+                options.append(token)
+                if i + 1 < len(rest):
+                    options.append(rest[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            elif token.startswith("--max-chars=") or token.startswith("--dir="):
+                options.append(token)
+                i += 1
+            else:
+                positionals.append(token)
+                i += 1
+        return prefix + options + positionals
+
+    c_idx = -1
+    for i, a in enumerate(args):
+        if a in ("-c", "--copy"):
+            c_idx = i
+            break
+
+    if c_idx != -1:
+        prefix, rest = args[:c_idx], args[c_idx:]
+        options, specs, c_flag = [], [], rest[0]
+        i = 1
+        while i < len(rest):
+            token = rest[i]
+            if token in ("-d", "--deps", "--dependencies", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
+                options.append(token)
+                i += 1
+            elif token in ("--max-chars", "-f", "--full-path", "-k", "--keep-func", "--focus", "--only-nodes", "--format", "--policy"):
+                options.append(token)
+                if i + 1 < len(rest):
+                    options.append(rest[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            elif any(token.startswith(f"{opt}=") for opt in ("--max-chars", "--full-path", "--keep-func", "--focus", "--only-nodes", "--format", "--policy")):
+                options.append(token)
+                i += 1
+            else:
+                specs.append(token)
+                i += 1
+        return prefix + options + [c_flag] + specs
+
+    return args
+
+
 def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="aiskel",
@@ -175,7 +243,8 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
-    return parser.parse_args(args)
+    raw_args = list(args) if args is not None else sys.argv[1:]
+    return parser.parse_args(_normalize_cli_args(raw_args))
 
 def _process_comma_separated_args(arg_list: List[str]) -> Set[str]:
     result = set()
