@@ -20,5 +20,9 @@ def get_parser_for_file(file_path: Path) -> Optional[BaseParser]:
     elif ext in {'.cpp', '.hpp', '.cc', '.cxx', '.hxx'}:
         return CppParser(is_c=False)
     elif ext == '.cs':
-        return CSharpParser()
+        try:
+            return CSharpParser()
+        except ImportError:
+            # なぜ必要か: 未導入環境での全体クラッシュを防止しフルコード保持へ安全にフォールバック
+            return None
     return None

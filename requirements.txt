@@ -10,6 +10,7 @@ tree-sitter-javascript
 tree-sitter-typescript
 tree-sitter-c
 tree-sitter-cpp
+tree-sitter-c-sharp
 
 # --- 開発・テスト用ライブラリ (品質保証・静的解析用) ---
 # 振る舞いテストの実行
