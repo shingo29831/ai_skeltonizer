@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-from .config import SkeletonConfig
+from .config import SkeletonConfig, load_test_command_from_meta
 from .core.scanner import get_target_files, generate_tree_text
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
@@ -67,25 +67,30 @@ def _get_clipboard_text() -> str:
 def _run_validation_test(project_root: Path, test_command: Optional[str], timeout_sec: int = 60) -> Tuple[bool, str]:
     cmd = test_command
     if not cmd or cmd == "auto":
-        # なぜ必要か: 仮想環境(.venv)のpytestやsys.executableを優先し、PATH未設定や依存不足による誤失敗を完全防止
-        venv_pytest = None
-        for venv_name in (".venv", "venv", "env"):
-            scripts_dir = project_root / venv_name / ("Scripts" if sys.platform == "win32" else "bin")
-            pt = scripts_dir / ("pytest.exe" if sys.platform == "win32" else "pytest")
-            if pt.exists():
-                venv_pytest = f'"{pt}"'
-                break
-
-        if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
-            cmd = venv_pytest or f'"{sys.executable}" -m pytest'
-        elif (project_root / "package.json").exists():
-            cmd = "npm test"
-        elif (project_root / "Cargo.toml").exists():
-            cmd = "cargo test"
-        elif (project_root / "go.mod").exists():
-            cmd = "go test ./..."
+        # なぜ必要か: ai_metaの設定ファイルに指定されたコマンドを最優先し、未指定時のみ自動検出へ倒すため
+        meta_cmd = load_test_command_from_meta(project_root)
+        if meta_cmd:
+            cmd = meta_cmd
+            print(f"⚙ ai_meta の設定ファイルからコマンドを読み込みました: {cmd}")
         else:
-            cmd = venv_pytest or f'"{sys.executable}" -m pytest'
+            venv_pytest = None
+            for venv_name in (".venv", "venv", "env"):
+                scripts_dir = project_root / venv_name / ("Scripts" if sys.platform == "win32" else "bin")
+                pt = scripts_dir / ("pytest.exe" if sys.platform == "win32" else "pytest")
+                if pt.exists():
+                    venv_pytest = f'"{pt}"'
+                    break
+
+            if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
+                cmd = venv_pytest or f'"{sys.executable}" -m pytest'
+            elif (project_root / "package.json").exists():
+                cmd = "npm test"
+            elif (project_root / "Cargo.toml").exists():
+                cmd = "cargo test"
+            elif (project_root / "go.mod").exists():
+                cmd = "go test ./..."
+            else:
+                cmd = venv_pytest or f'"{sys.executable}" -m pytest'
 
     print(f"\n🧪 検証テストを実行中: {cmd}")
     try:
@@ -191,7 +196,8 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻すリバート処理を行います")
     apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
-    apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時は自動検出)")
+    apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時はai_metaの設定または自動検出)")
+    apply_parser.add_argument("-e", "-r", "--exec", "--run", dest="exec_cmd", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にai_meta内の設定ファイルまたは指定されたコマンドを実行します (省略時は設定ファイルから取得)")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
@@ -428,7 +434,7 @@ def main(args: Optional[List[str]] = None) -> int:
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
             is_revert = getattr(parsed_args, "revert", False) or parsed_args.command in ("revert", "r")
             is_dry_run = getattr(parsed_args, "dry_run", False)
-            test_option = getattr(parsed_args, "test", None)
+            test_option = getattr(parsed_args, "test", None) or getattr(parsed_args, "exec_cmd", None)
             project_root: Path = parsed_args.dir.resolve()
             
             if parsed_args.patch_file:

@@ -148,6 +148,11 @@ aiskel apply patch.txt
 
 # パイプからの入力を適用
 cat patch.txt | aiskel apply
+
+# パッチ適用後に ai_meta 内の設定ファイル (config.json 等) に書かれたコマンドを実行・検証
+aiskel apply -e
+# または
+aiskel a -T
 ```
 
 ---
