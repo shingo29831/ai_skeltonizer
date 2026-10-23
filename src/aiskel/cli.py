@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-from .config import SkeletonConfig, load_test_command_from_meta
+from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file
 from .core.scanner import get_target_files, generate_tree_text
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
@@ -307,6 +307,13 @@ def _run_sync(
     quiet: bool = False,
 ) -> Tuple[int, int, int, Optional[Path]]:
     _ensure_gitignore_updated(project_root, output_dir)
+    created_cfg = ensure_default_config_file(output_dir, project_root)
+    if created_cfg and not quiet:
+        try:
+            rel_cfg = created_cfg.relative_to(project_root)
+        except ValueError:
+            rel_cfg = created_cfg
+        print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
     target_files = get_target_files(project_root)
 
     if focus_paths:

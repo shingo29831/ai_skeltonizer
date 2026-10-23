@@ -164,6 +164,7 @@ aiskel a -T
 ```text
 ai_ready_context/
 ├── ai_meta/
+│   ├── config.json                    # テスト・検証コマンド設定ファイル ⚙️
 │   ├── phase1_architecture_bundle.txt # 変更対象の特定に特化した超軽量アーキテクチャ要約 🗺️
 │   ├── phase2_context_bundle.txt      # AIへのコピペに最適な全コード統合単一バンドル 📦
 │   └── phase2_static_skeleton.txt     # 型定義などの固定配置用静的スケルトン 🦴

@@ -78,6 +78,47 @@ def _parse_command_file(file_path: Path) -> Optional[str]:
     return None
 
 
+def detect_default_test_command(project_root: Path) -> str:
+    """プロジェクトの構成から適切なデフォルトテストコマンドを推測する"""
+    if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
+        # なぜ必要か: 仮想環境の存在を確認し実行可能なコマンドを優先するため
+        for venv_name in (".venv", "venv", "env"):
+            scripts_dir = project_root / venv_name / ("Scripts" if sys.platform == "win32" else "bin")
+            pt = scripts_dir / ("pytest.exe" if sys.platform == "win32" else "pytest")
+            if pt.exists():
+                return f'"{pt}"' if " " in str(pt) else str(pt)
+        return "pytest"
+    if (project_root / "package.json").exists():
+        return "npm test"
+    if (project_root / "Cargo.toml").exists():
+        return "cargo test"
+    if (project_root / "go.mod").exists():
+        return "go test ./..."
+    return "pytest"
+
+
+def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional[Path]:
+    """ai_meta内に設定ファイルが存在しない場合、デフォルトのconfig.jsonを安全に自動生成する"""
+    # なぜ必要か: 既に何らかの設定ファイルが存在する場合は上書き破壊を防止するため
+    existing_cmd = load_test_command_from_meta(project_root, output_dir)
+    config_path = output_dir / "config.json"
+    if existing_cmd is not None or config_path.exists():
+        return None
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        default_cmd = detect_default_test_command(project_root)
+        config_data = {
+            "test_command": default_cmd,
+            "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンド",
+        }
+        config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return config_path
+    except Exception as e:
+        print(f"⚠ 設定ファイルの自動生成に失敗しました: {e}", file=sys.stderr)
+        return None
+
+
 def load_test_command_from_meta(project_root: Path, output_dir: Optional[Path] = None) -> Optional[str]:
     """ai_metaディレクトリ等の設定ファイルから実行コマンドを取得する"""
     meta_dirs = []
