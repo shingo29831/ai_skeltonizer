@@ -29,21 +29,51 @@ class ProjectSyncer:
         if not self.output_dir.exists():
             return 0
 
-        # 個別ファイルは出力しないため、バンドルファイルのみを保持対象とする
-        valid_dest_files = {
-            self.meta_dir / "phase1_architecture_bundle.txt"
+        # なぜ必要か: バンドル群および自動生成・ユーザー設定ファイル(config.json等)の誤削除を防止
+        protected_filenames = {
+            "phase1_architecture_bundle.txt",
+            "phase1_architecture_bundle.xml",
+            "phase1_architecture_bundle.markdown",
+            "phase2_context_bundle.txt",
+            "phase2_context_bundle.xml",
+            "phase2_context_bundle.markdown",
+            "phase2_static_skeleton.txt",
+            "config.json",
+            "settings.json",
+            "aiskel.json",
+            "aiskel_config.json",
+            ".aiskelrc.json",
+            ".aiskelrc",
+            "test_command.txt",
+            "test_cmd.txt",
+            "command.txt",
+            "test.txt",
+            "run.txt",
+            "config.toml",
+            "settings.toml",
+            "config.yaml",
+            "config.yml",
+            "settings.yaml",
+            "settings.yml",
+            "config.ini",
+            "settings.ini",
+            "test.sh",
+            "test.bat",
+            "test.cmd",
+            "run.sh",
         }
 
         deleted_count = 0
         for root, _, files in os.walk(self.output_dir):
             for file in files:
                 dest_path = Path(root) / file
-                if dest_path not in valid_dest_files:
-                    try:
-                        dest_path.unlink()
-                        deleted_count += 1
-                    except OSError:
-                        pass
+                if dest_path.name in protected_filenames or dest_path.name.startswith("phase"):
+                    continue
+                try:
+                    dest_path.unlink()
+                    deleted_count += 1
+                except OSError:
+                    pass
 
         for root, dirs, _ in os.walk(self.output_dir, topdown=False):
             for d in dirs:

@@ -352,6 +352,13 @@ def _run_sync(
         print("\n--- 辞書・マニュアル出力 ---")
         if bundle_path and bundle_path.exists():
             print(f"  - アーキテクチャ要素: {bundle_path.relative_to(project_root)} (変更対象ファイルの特定用)")
+        cfg_file = output_dir / "config.json"
+        if cfg_file.exists():
+            try:
+                rel_cfg = cfg_file.relative_to(project_root)
+            except ValueError:
+                rel_cfg = cfg_file
+            print(f"  - 検証設定ファイル  : {rel_cfg} (適用後テスト実行用)")
 
         print("\n--- トークン・予算削減アナライザー ---")
         print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")
