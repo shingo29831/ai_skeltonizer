@@ -64,6 +64,28 @@ def _get_clipboard_text() -> str:
         print(f"⚠ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
         return ""
 
+def _prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
+    # なぜ必要か: パイプ入力時でもTTYから対話入力を安全に取得するため
+    try:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        if not sys.stdin.isatty():
+            tty_path = "CON" if sys.platform == "win32" else "/dev/tty"
+            try:
+                with open(tty_path, "r", encoding="utf-8") as tty:
+                    ans = tty.readline().strip().lower()
+            except OSError:
+                return default
+        else:
+            ans = sys.stdin.readline().strip().lower()
+
+        if not ans:
+            return default
+        return ans in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def _run_validation_test(project_root: Path, test_command: Optional[str], timeout_sec: int = 60) -> Tuple[bool, str]:
     cmd = test_command
     if not cmd or cmd == "auto":
@@ -198,6 +220,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
     apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時はai_metaの設定または自動検出)")
     apply_parser.add_argument("-e", "-r", "--exec", "--run", dest="exec_cmd", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にai_meta内の設定ファイルまたは指定されたコマンドを実行します (省略時は設定ファイルから取得)")
+    apply_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
@@ -549,19 +572,27 @@ def main(args: Optional[List[str]] = None) -> int:
 
             if not is_revert and commit_msg and success > 0 and fail == 0:
                 print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
-                print("自動コミットを実行します...")
-                try:
-                    for f in modified_files:
-                        subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
-                    # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
-                    staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
-                    if staged_diff:
-                        subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
-                        print("✔ 自動コミットが完了しました。")
-                    else:
-                        print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    print(f"⚠ 自動コミットに失敗しました: {e}")
+                should_commit = getattr(parsed_args, "yes", False)
+                if not should_commit:
+                    should_commit = _prompt_user_confirmation("このメッセージでコミットを実行しますか？ [y/N]: ", default=False)
+
+                if should_commit:
+                    print("コミットを実行します...")
+                    try:
+                        for f in modified_files:
+                            subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
+                        # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
+                        staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
+                        if staged_diff:
+                            subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
+                            print("✔ コミットが完了しました。")
+                        else:
+                            print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
+                    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                        print(f"⚠ コミットに失敗しました: {e}")
+                else:
+                    print("ℹ コミットを拒否（スキップ）しました。コードの変更内容はそのまま保持されています。")
+                    print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
 
             if success > 0 and fail == 0 and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
