@@ -109,7 +109,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         config_data = {
-            "test_command": "",
+            "test_command": [],
             "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
