@@ -235,6 +235,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
     apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時はai_metaの設定または自動検出)")
     apply_parser.add_argument("-e", "-r", "--exec", "--run", dest="exec_cmd", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にai_meta内の設定ファイルまたは指定されたコマンドを実行します (省略時は設定ファイルから取得)")
+    apply_parser.add_argument("--no-test", action="store_true", help="設定ファイルのコマンド実行および検証テストを明示的にスキップします")
     apply_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
 
@@ -488,6 +489,9 @@ def main(args: Optional[List[str]] = None) -> int:
             is_dry_run = getattr(parsed_args, "dry_run", False)
             test_option = getattr(parsed_args, "test", None) or getattr(parsed_args, "exec_cmd", None)
             project_root: Path = parsed_args.dir.resolve()
+            if test_option is None and not getattr(parsed_args, "no_test", False):
+                if load_test_command_from_meta(project_root):
+                    test_option = "auto"
             output_dir = _resolve_output_dir(project_root, None)
             created_cfg = ensure_default_config_file(output_dir, project_root)
             if created_cfg:
