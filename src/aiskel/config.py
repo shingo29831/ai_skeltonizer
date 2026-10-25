@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Union
 
 
 @dataclass
@@ -26,7 +26,25 @@ class SkeletonConfig:
         return False
 
 
-def _parse_command_file(file_path: Path) -> Optional[str]:
+def _extract_commands_from_val(val: Union[str, list]) -> List[str]:
+    cmds: List[str] = []
+    if isinstance(val, str):
+        lines = val.splitlines()
+    elif isinstance(val, list):
+        lines = []
+        for item in val:
+            if isinstance(item, str):
+                lines.extend(item.splitlines())
+    else:
+        return cmds
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith(("#", "//", ";")):
+            cmds.append(s)
+    return cmds
+
+
+def _parse_command_file(file_path: Path) -> Optional[List[str]]:
     # なぜ必要か: 多様な設定形式(JSON/テキスト/スクリプト)から実行コマンドを確実に抽出するため
     try:
         content = file_path.read_text(encoding="utf-8").strip()
@@ -45,21 +63,23 @@ def _parse_command_file(file_path: Path) -> Optional[str]:
                     "test", "run", "exec", "post_apply", "validation_command", "testCommand"
                 )
                 for k in priority_keys:
-                    if k in data and isinstance(data[k], str) and data[k].strip():
-                        return data[k].strip()
+                    if k in data:
+                        cmds = _extract_commands_from_val(data[k])
+                        if cmds:
+                            return cmds
                 if "scripts" in data and isinstance(data["scripts"], dict):
                     for k in ("test", "validation", "run"):
-                        val = data["scripts"].get(k)
-                        if isinstance(val, str) and val.strip():
-                            return val.strip()
+                        if k in data["scripts"]:
+                            cmds = _extract_commands_from_val(data["scripts"][k])
+                            if cmds:
+                                return cmds
         except Exception:
             pass
 
     if file_path.suffix.lower() == ".txt":
-        for line in content.splitlines():
-            s = line.strip()
-            if s and not s.startswith(("#", "//", ";")):
-                return s
+        lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", ";"))]
+        if lines:
+            return lines
 
     key_pattern = re.compile(
         r'^[ \t]*(?:test_command|test_cmd|command|cmd|test|run|exec|post_apply|testCommand)[ \t]*[:=][ \t]*["\']?(.*?)["\']?[ \t]*$',
@@ -67,13 +87,13 @@ def _parse_command_file(file_path: Path) -> Optional[str]:
     )
     m = key_pattern.search(content)
     if m:
-        val = m.group(1).strip()
-        if val:
-            return val
+        cmds = _extract_commands_from_val(m.group(1).strip())
+        if cmds:
+            return cmds
 
     lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", ";"))]
-    if len(lines) == 1 and not lines[0].startswith(("[", "{")):
-        return lines[0]
+    if lines and not lines[0].startswith(("[", "{")):
+        return lines
 
     return None
 
@@ -90,7 +110,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
         output_dir.mkdir(parents=True, exist_ok=True)
         config_data = {
             "test_command": "",
-            "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください",
+            "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return config_path
@@ -99,7 +119,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
         return None
 
 
-def load_test_command_from_meta(project_root: Path, output_dir: Optional[Path] = None) -> Optional[str]:
+def load_test_command_from_meta(project_root: Path, output_dir: Optional[Path] = None) -> Optional[List[str]]:
     """ai_metaディレクトリ等の設定ファイルから実行コマンドを取得する"""
     meta_dirs = []
     if output_dir:
@@ -154,7 +174,7 @@ def load_test_command_from_meta(project_root: Path, output_dir: Optional[Path] =
             if target.is_file():
                 # なぜ必要か: WindowsバッチとPOSIXシェルスクリプトの実行互換性を保持するため
                 if sys.platform == "win32" and target.suffix in (".bat", ".cmd"):
-                    return f'"{target}"'
-                return f'bash "{target}"' if target.suffix == ".sh" else f'"{target}"'
+                    return [f'"{target}"']
+                return [f'bash "{target}"' if target.suffix == ".sh" else f'"{target}"']
 
     return None

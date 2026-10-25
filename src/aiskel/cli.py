@@ -5,7 +5,7 @@ import subprocess
 import platform
 import re
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple, Union
 
 from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file
 from .core.scanner import get_target_files, generate_tree_text
@@ -86,14 +86,15 @@ def _prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
         return False
 
 
-def _run_validation_test(project_root: Path, test_command: Optional[str], timeout_sec: int = 60) -> Tuple[bool, str]:
-    cmd = test_command
-    if not cmd or cmd == "auto":
+def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60) -> Tuple[bool, str]:
+    commands: List[str] = []
+    if not test_command or test_command == "auto":
         # なぜ必要か: ai_metaの設定ファイルに指定されたコマンドを最優先し、未指定時のみ自動検出へ倒すため
-        meta_cmd = load_test_command_from_meta(project_root)
-        if meta_cmd:
-            cmd = meta_cmd
-            print(f"⚙ ai_meta の設定ファイルからコマンドを読み込みました: {cmd}")
+        meta_cmds = load_test_command_from_meta(project_root)
+        if meta_cmds:
+            commands = meta_cmds
+            cmd_summary = " && ".join(commands) if len(commands) > 1 else commands[0]
+            print(f"⚙ ai_meta の設定ファイルからコマンドを読み込みました ({len(commands)}件): {cmd_summary}")
         else:
             venv_pytest = None
             for venv_name in (".venv", "venv", "env"):
@@ -104,34 +105,48 @@ def _run_validation_test(project_root: Path, test_command: Optional[str], timeou
                     break
 
             if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
-                cmd = venv_pytest or f'"{sys.executable}" -m pytest'
+                detected = venv_pytest or f'"{sys.executable}" -m pytest'
             elif (project_root / "package.json").exists():
-                cmd = "npm test"
+                detected = "npm test"
             elif (project_root / "Cargo.toml").exists():
-                cmd = "cargo test"
+                detected = "cargo test"
             elif (project_root / "go.mod").exists():
-                cmd = "go test ./..."
+                detected = "go test ./..."
             else:
-                cmd = venv_pytest or f'"{sys.executable}" -m pytest'
+                detected = venv_pytest or f'"{sys.executable}" -m pytest'
+            commands = [detected]
+    elif isinstance(test_command, list):
+        commands = [c.strip() for c in test_command if c.strip()]
+    else:
+        commands = [c.strip() for c in test_command.splitlines() if c.strip() and not c.strip().startswith(("#", "//", ";"))]
 
-    print(f"\n🧪 検証テストを実行中: {cmd}")
-    try:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=project_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_sec,
-        )
-        return (proc.returncode == 0), proc.stdout
-    except subprocess.TimeoutExpired:
-        return False, f"テスト実行がタイムアウトしました ({timeout_sec}秒)"
-    except Exception as e:
-        return False, f"テスト実行コマンドの起動に失敗しました: {e}"
+    output_logs: List[str] = []
+    total = len(commands)
+    for idx, cmd in enumerate(commands, 1):
+        step_label = f"[{idx}/{total}] " if total > 1 else ""
+        print(f"\n🧪 検証テストを実行中: {step_label}{cmd}")
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=project_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_sec,
+            )
+            header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
+            output_logs.append(f"{header}{proc.stdout}")
+            if proc.returncode != 0:
+                return False, "\n".join(output_logs)
+        except subprocess.TimeoutExpired:
+            return False, f"テスト実行がタイムアウトしました ({timeout_sec}秒): {cmd}"
+        except Exception as e:
+            return False, f"テスト実行コマンドの起動に失敗しました: {cmd} ({e})"
+
+    return True, "\n".join(output_logs)
 
 def _normalize_cli_args(args: List[str]) -> List[str]:
     # 可変長位置引数の途中にオプションが混在した場合でも順序を再構成して解析エラーを防止
