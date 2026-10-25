@@ -488,6 +488,14 @@ def main(args: Optional[List[str]] = None) -> int:
             is_dry_run = getattr(parsed_args, "dry_run", False)
             test_option = getattr(parsed_args, "test", None) or getattr(parsed_args, "exec_cmd", None)
             project_root: Path = parsed_args.dir.resolve()
+            output_dir = _resolve_output_dir(project_root, None)
+            created_cfg = ensure_default_config_file(output_dir, project_root)
+            if created_cfg:
+                try:
+                    rel_cfg = created_cfg.relative_to(project_root)
+                except ValueError:
+                    rel_cfg = created_cfg
+                print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
             
             if parsed_args.patch_file:
                 patch_file: Path = parsed_args.patch_file.resolve()
