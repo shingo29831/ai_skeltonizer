@@ -99,6 +99,68 @@ def _rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> b
         print(f"⚠ ロールバックに失敗しました: {e}", file=sys.stderr)
         return False
 
+def _try_handle_cd_command(
+    cmd: str, current_dir: Path, dir_stack: List[Path], prev_dir: Optional[Path] = None
+) -> Tuple[bool, bool, Path, Optional[Path], str]:
+    # なぜ必要か: cd等によるワーキングディレクトリ変更を後続コマンドへ確実に引き継ぐため
+    trimmed = cmd.strip()
+    if not trimmed or any(op in trimmed for op in ("&&", "||", "|", ";", ">", "<")):
+        return False, True, current_dir, prev_dir, ""
+
+    parts = trimmed.split(None, 1)
+    op = parts[0].lower()
+
+    if op in ("cd", "chdir"):
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if arg.lower().startswith("/d"):
+            arg = arg[2:].strip()
+        if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
+            arg = arg[1:-1].strip()
+
+        if not arg:
+            return True, True, current_dir, prev_dir, f"カレントディレクトリ: {current_dir}"
+
+        if arg == "-":
+            if prev_dir is None:
+                return True, False, current_dir, prev_dir, "直前のディレクトリ (OLDPWD) が設定されていません。"
+            return True, True, prev_dir, current_dir, f"直前のディレクトリに戻りました: {prev_dir}"
+
+        target = Path(arg).expanduser() if arg.startswith("~") else Path(arg)
+        resolved = (current_dir / target).resolve() if not target.is_absolute() else target.resolve()
+
+        if not resolved.exists():
+            return True, False, current_dir, prev_dir, f"指定されたディレクトリが存在しません: {arg} (解決先: {resolved})"
+        if not resolved.is_dir():
+            return True, False, current_dir, prev_dir, f"指定されたパスはディレクトリではありません: {arg} (解決先: {resolved})"
+
+        return True, True, resolved, current_dir, f"ディレクトリを移動しました: {resolved}"
+
+    if op == "pushd":
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
+            arg = arg[1:-1].strip()
+        if not arg:
+            return True, False, current_dir, prev_dir, "pushd には移動先ディレクトリの指定が必要です。"
+
+        target = Path(arg).expanduser() if arg.startswith("~") else Path(arg)
+        resolved = (current_dir / target).resolve() if not target.is_absolute() else target.resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            return True, False, current_dir, prev_dir, f"指定されたディレクトリが存在しません: {arg} (解決先: {resolved})"
+
+        dir_stack.append(current_dir)
+        return True, True, resolved, current_dir, f"ディレクトリを移動しました (pushd): {resolved}"
+
+    if op == "popd":
+        if not dir_stack:
+            return True, False, current_dir, prev_dir, "ディレクトリスタックが空のため popd を実行できません。"
+        popped = dir_stack.pop()
+        if not popped.exists() or not popped.is_dir():
+            return True, False, current_dir, prev_dir, f"スタック内のディレクトリが存在しません: {popped}"
+        return True, True, popped, current_dir, f"ディレクトリを復帰しました (popd): {popped}"
+
+    return False, True, current_dir, prev_dir, ""
+
+
 def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60) -> Tuple[bool, str]:
     commands: List[str] = []
     if not test_command or test_command == "auto":
@@ -135,14 +197,29 @@ def _run_validation_test(project_root: Path, test_command: Optional[Union[str, L
 
     output_logs: List[str] = []
     total = len(commands)
+    current_dir = project_root
+    dir_stack: List[Path] = []
+    prev_dir: Optional[Path] = None
+
     for idx, cmd in enumerate(commands, 1):
         step_label = f"[{idx}/{total}] " if total > 1 else ""
         print(f"\n🧪 検証テストを実行中: {step_label}{cmd}")
+
+        is_cd, ok, new_dir, new_prev, msg = _try_handle_cd_command(cmd, current_dir, dir_stack, prev_dir)
+        if is_cd:
+            header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
+            if not ok:
+                output_logs.append(f"{header}エラー: {msg}\n")
+                return False, "\n".join(output_logs)
+            current_dir, prev_dir = new_dir, new_prev
+            output_logs.append(f"{header}{msg}\n")
+            continue
+
         try:
             proc = subprocess.run(
                 cmd,
                 shell=True,
-                cwd=project_root,
+                cwd=current_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
