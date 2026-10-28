@@ -863,6 +863,16 @@ def main(args: Optional[List[str]] = None) -> int:
                             if staged_diff:
                                 subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
                                 print("✔ コミットが完了しました。")
+                                push_prompt = "リモートリポジトリにプッシュ (git push) しますか？ [Enter/Space: y, 他: n]: "
+                                if _prompt_user_confirmation(push_prompt, default=False):
+                                    print("プッシュを実行中...")
+                                    push_res = subprocess.run(["git", "push"], cwd=project_root)
+                                    if push_res.returncode == 0:
+                                        print("✔ プッシュが完了しました。")
+                                    else:
+                                        print("⚠ プッシュに失敗しました（上記のエラーを確認してください）。", file=sys.stderr)
+                                else:
+                                    print("ℹ プッシュをスキップしました。")
                             else:
                                 print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
                         except (subprocess.CalledProcessError, FileNotFoundError) as e:
