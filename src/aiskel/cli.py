@@ -1,5 +1,6 @@
 """Module: @role: CLI引数の解析、実行オプションの検証、および各サブコマンドのディスパッチを担当する。"""
 import argparse
+import os
 import sys
 import subprocess
 import platform
@@ -64,24 +65,82 @@ def _get_clipboard_text() -> str:
         print(f"⚠ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
         return ""
 
+def _read_single_key_from_tty() -> Optional[str]:
+    # なぜ必要か: Enter/Space/他キーの1打鍵即時判定をクロスプラットフォームで実現するため
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+            ch = msvcrt.getwch()
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+            if ch in ('\x00', '\xe0'):
+                return ""
+            if ch == '\x03':
+                raise KeyboardInterrupt
+            return ch
+        except Exception:
+            return None
+    else:
+        try:
+            import termios
+            import tty
+            tty_file = None
+            if sys.stdin.isatty():
+                fd = sys.stdin.fileno()
+                stream = sys.stdin
+            else:
+                try:
+                    tty_file = open("/dev/tty", "r", encoding="utf-8")
+                    fd = tty_file.fileno()
+                    stream = tty_file
+                except OSError:
+                    return None
+
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                ch = stream.read(1)
+                try:
+                    termios.tcflush(fd, termios.TCIFLUSH)
+                except Exception:
+                    pass
+                return ch
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                if tty_file:
+                    tty_file.close()
+        except Exception:
+            return None
+
 def _prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
-    # なぜ必要か: パイプ入力時でもTTYから対話入力を安全に取得するため
+    # なぜ必要か: Enter/Spaceで肯定、他キーで否定を即時判定し非対話時も安全に処理するため
     try:
         sys.stdout.write(prompt)
         sys.stdout.flush()
+
+        key = _read_single_key_from_tty()
+        if key is not None:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return key in ("\r", "\n", " ", "y", "Y")
+
         if not sys.stdin.isatty():
             tty_path = "CON" if sys.platform == "win32" else "/dev/tty"
             try:
                 with open(tty_path, "r", encoding="utf-8") as tty:
-                    ans = tty.readline().strip().lower()
+                    raw_line = tty.readline()
             except OSError:
                 return default
         else:
-            ans = sys.stdin.readline().strip().lower()
+            raw_line = sys.stdin.readline()
 
-        if not ans:
+        if not raw_line:
             return default
-        return ans in ("y", "yes")
+
+        ans = raw_line.strip().lower()
+        if not ans:
+            return True
+        return ans in ("y", "yes", " ")
     except (EOFError, KeyboardInterrupt):
         return False
 
@@ -730,7 +789,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 if success > 0:
                     print(f"\n⚠ 成功した {success} 箇所を変更しました。")
 
-                retry_prompt = "\n新たに失敗箇所を修正したものをコピーした場合に、続けて変更を適用しますか？ [y/N]: "
+                retry_prompt = "\n新たに失敗箇所を修正したものをコピーした場合に、続けて変更を適用しますか？ [Enter/Space: y, 他: n]: "
                 if not _prompt_user_confirmation(retry_prompt, default=False):
                     print("ℹ パッチの継続適用を終了しました。")
                     break
@@ -741,7 +800,7 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("⚠ クリップボードが空です。修正したパッチをコピーしてください。")
                     else:
                         print("⚠ クリップボードに置換ブロック(<<<<)が見つかりません。")
-                    if not _prompt_user_confirmation("クリップボードを再取得しますか？ [y/N]: ", default=True):
+                    if not _prompt_user_confirmation("クリップボードを再取得しますか？ [Enter/Space: y, 他: n]: ", default=True):
                         break
                     new_text = _get_clipboard_text()
 
@@ -755,7 +814,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 print("🚀 クリップボードから修正パッチを読み込みました。続けて適用します...")
 
             if not is_dry_run and not is_revert and last_fail > 0 and total_success > 0:
-                rollback_prompt = "\nこれまでに適用した変更を元に戻しますか？ [y/N]: "
+                rollback_prompt = "\nこれまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
                 if _prompt_user_confirmation(rollback_prompt, default=False):
                     _rollback_modified_files(project_root, total_modified_files)
                     total_modified_files.clear()
@@ -786,7 +845,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 print(f"\n📦 コミットメッセージを検出しました: {initial_commit_msg}")
                 should_commit = getattr(parsed_args, "yes", False)
                 if not should_commit:
-                    should_commit = _prompt_user_confirmation("このメッセージでコミットを実行しますか？ [y/N]: ", default=False)
+                    should_commit = _prompt_user_confirmation("このメッセージでコミットを実行しますか？ [Enter/Space: y, 他: n]: ", default=False)
 
                 if should_commit:
                     print("コミットを実行します...")
