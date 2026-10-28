@@ -86,6 +86,19 @@ def _prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
         return False
 
 
+def _rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> bool:
+    # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git経由で完全ロールバックを保証
+    try:
+        for f in modified_files:
+            res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
+            if res.returncode != 0:
+                subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
+        print("🔄 変更ファイルを元の状態に復元しました。")
+        return True
+    except Exception as e:
+        print(f"⚠ ロールバックに失敗しました: {e}", file=sys.stderr)
+        return False
+
 def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60) -> Tuple[bool, str]:
     commands: List[str] = []
     if not test_command or test_command == "auto":
@@ -619,6 +632,16 @@ def main(args: Optional[List[str]] = None) -> int:
                     initial_commit_msg = extracted_commit
                 print("🚀 クリップボードから修正パッチを読み込みました。続けて適用します...")
 
+            if not is_dry_run and not is_revert and last_fail > 0 and total_success > 0:
+                rollback_prompt = "\nこれまでに適用した変更を元に戻しますか？ [y/N]: "
+                if _prompt_user_confirmation(rollback_prompt, default=False):
+                    _rollback_modified_files(project_root, total_modified_files)
+                    total_modified_files.clear()
+                    total_success = 0
+                else:
+                    print("ℹ 適用済みの変更はそのまま保持されています。")
+                    print("  (後から取り消す場合は 'git checkout .' などを実行してください)")
+
             if is_dry_run:
                 return 0 if last_fail == 0 else 1
 
@@ -632,18 +655,7 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("\n--- テスト失敗ログ ---", file=sys.stderr)
                         print(test_output, file=sys.stderr)
                         print("----------------------\n", file=sys.stderr)
-                    # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git内外を問わず完全ロールバックを保証
-                    rolled_back = False
-                    try:
-                        for f in total_modified_files:
-                            res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
-                            if res.returncode != 0:
-                                subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
-                        rolled_back = True
-                        print("🔄 git checkout / clean により変更ファイルを元の状態に復元しました。", file=sys.stderr)
-                    except Exception:
-                        pass
-                    if not rolled_back:
+                    if not _rollback_modified_files(project_root, total_modified_files):
                         apply_patch(patch_text, project_root, target_file, force_replace=True, revert=True)
                         print("🔄 逆パッチ適用により変更箇所を元に戻しました。", file=sys.stderr)
                     return 1
