@@ -66,6 +66,8 @@ class ProjectSyncer:
             "test.cmd",
             "run.sh",
         }
+        if self.config.bundle_filename:
+            protected_filenames.add(self.config.bundle_filename)
 
         deleted_count = 0
         for root, _, files in os.walk(self.output_dir):
@@ -209,6 +211,7 @@ class ProjectSyncer:
                 file_contents=self.file_contents_map,
                 bundle_format=self.config.bundle_format,
                 custom_policy_path=self.config.policy_path,
+                bundle_filename=self.config.bundle_filename,
             )
 
         return updated_count, skipped_count, bundle_path

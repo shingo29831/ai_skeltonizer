@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple, Union
 
-from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file
+from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file, load_bundle_filename_from_meta
 from .core.scanner import get_target_files, generate_tree_text
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
@@ -366,6 +366,8 @@ def _run_sync(
         except ValueError:
             rel_cfg = created_cfg
         print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
+    if not config.bundle_filename:
+        config.bundle_filename = load_bundle_filename_from_meta(project_root, output_dir)
     target_files = get_target_files(project_root)
 
     if focus_paths:

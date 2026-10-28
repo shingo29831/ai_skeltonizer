@@ -18,6 +18,7 @@ class SkeletonConfig:
     create_bundle: bool = True
     bundle_format: str = "txt"  # "txt", "xml" または "markdown"
     policy_path: Optional[Path] = None
+    bundle_filename: Optional[str] = None
 
     def is_full_code_path(self, target_path: Path) -> bool:
         for full_path in self.full_code_paths:
@@ -109,6 +110,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         config_data = {
+            "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
             "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
@@ -176,5 +178,75 @@ def load_test_command_from_meta(project_root: Path, output_dir: Optional[Path] =
                 if sys.platform == "win32" and target.suffix in (".bat", ".cmd"):
                     return [f'"{target}"']
                 return [f'bash "{target}"' if target.suffix == ".sh" else f'"{target}"']
+
+    return None
+
+
+def load_bundle_filename_from_meta(project_root: Path, output_dir: Optional[Path] = None) -> Optional[str]:
+    """ai_metaディレクトリ等の設定ファイルからバンドル出力ファイル名を取得する"""
+    meta_dirs = []
+    if output_dir:
+        meta_dirs.append(output_dir)
+    meta_dirs.extend([
+        project_root / "ai_meta",
+        project_root / ".ai_meta",
+    ])
+
+    checked_dirs: List[Path] = []
+    for d in meta_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in checked_dirs and resolved.exists() and resolved.is_dir():
+                checked_dirs.append(resolved)
+        except OSError:
+            continue
+
+    candidate_files = (
+        "config.json",
+        "settings.json",
+        "aiskel.json",
+        "aiskel_config.json",
+        ".aiskelrc.json",
+        ".aiskelrc",
+        "config.toml",
+        "settings.toml",
+        "config.yaml",
+        "config.yml",
+        "settings.yaml",
+        "settings.yml",
+        "config.ini",
+        "settings.ini",
+    )
+    priority_keys = ("bundle_filename", "bundle_name", "bundle_file", "architecture_bundle_filename")
+
+    for d in checked_dirs:
+        for fname in candidate_files:
+            target = d / fname
+            if not target.is_file():
+                continue
+            try:
+                content = target.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if not content:
+                continue
+
+            if target.suffix.lower() == ".json" or content.startswith("{"):
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        for k in priority_keys:
+                            if k in data and isinstance(data[k], str) and data[k].strip():
+                                return data[k].strip()
+                except Exception:
+                    pass
+
+            pattern = re.compile(
+                r'^[ \t]*(?:bundle_filename|bundle_name|bundle_file|architecture_bundle_filename)[ \t]*[:=][ \t]*["\']?(.*?)["\']?[ \t]*$',
+                re.MULTILINE | re.IGNORECASE,
+            )
+            m = pattern.search(content)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
 
     return None

@@ -60,10 +60,12 @@ def build_bundle_file(
     file_contents: Dict[str, str],
     bundle_format: str = "txt",
     custom_policy_path: Optional[Path] = None,
+    bundle_filename: Optional[str] = None,
 ) -> Path:
     policy_text = _discover_policy_text(project_root, custom_policy_path)
-    ext = "xml" if bundle_format == "xml" else ("md" if bundle_format in ("markdown", "md") else "txt")
-    architecture_path = output_dir / f"architecture_bundle.{ext}"
+    # なぜ必要か: 基本は.txt固定とし、設定ファイル指定時はその指定名を採用
+    filename = bundle_filename.strip() if bundle_filename and bundle_filename.strip() else "architecture_bundle.txt"
+    architecture_path = output_dir / filename
 
     arch_lines: List[str] = []
 
