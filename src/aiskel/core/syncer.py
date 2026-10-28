@@ -31,6 +31,10 @@ class ProjectSyncer:
 
         # なぜ必要か: バンドル群および自動生成・ユーザー設定ファイル(config.json等)の誤削除を防止
         protected_filenames = {
+            "architecture_bundle.txt",
+            "architecture_bundle.xml",
+            "architecture_bundle.md",
+            "architecture_bundle.markdown",
             "phase1_architecture_bundle.txt",
             "phase1_architecture_bundle.xml",
             "phase1_architecture_bundle.markdown",
@@ -67,7 +71,11 @@ class ProjectSyncer:
         for root, _, files in os.walk(self.output_dir):
             for file in files:
                 dest_path = Path(root) / file
-                if dest_path.name in protected_filenames or dest_path.name.startswith("phase"):
+                if (
+                    dest_path.name in protected_filenames
+                    or dest_path.name.startswith("architecture_bundle")
+                    or dest_path.name.startswith("phase")
+                ):
                     continue
                 try:
                     dest_path.unlink()

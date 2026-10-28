@@ -62,7 +62,8 @@ def build_bundle_file(
     custom_policy_path: Optional[Path] = None,
 ) -> Path:
     policy_text = _discover_policy_text(project_root, custom_policy_path)
-    architecture_path = output_dir / "phase1_architecture_bundle.txt"
+    ext = "xml" if bundle_format == "xml" else ("md" if bundle_format in ("markdown", "md") else "txt")
+    architecture_path = output_dir / f"architecture_bundle.{ext}"
 
     arch_lines: List[str] = []
 
