@@ -161,7 +161,7 @@ def _try_handle_cd_command(
     return False, True, current_dir, prev_dir, ""
 
 
-def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60) -> Tuple[bool, str]:
+def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60, verbose: bool = False) -> Tuple[bool, str]:
     commands: List[str] = []
     if not test_command or test_command == "auto":
         # なぜ必要か: ai_metaの設定ファイルに指定されたコマンドを最優先し、未指定時のみ自動検出へ倒すため
@@ -210,9 +210,13 @@ def _run_validation_test(project_root: Path, test_command: Optional[Union[str, L
             header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
             if not ok:
                 output_logs.append(f"{header}エラー: {msg}\n")
+                if verbose:
+                    print(f"✖ エラー: {msg}", file=sys.stderr)
                 return False, "\n".join(output_logs)
             current_dir, prev_dir = new_dir, new_prev
             output_logs.append(f"{header}{msg}\n")
+            if verbose and msg:
+                print(f"✔ {msg}")
             continue
 
         try:
@@ -229,6 +233,11 @@ def _run_validation_test(project_root: Path, test_command: Optional[Union[str, L
             )
             header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
             output_logs.append(f"{header}{proc.stdout}")
+            if verbose and proc.stdout:
+                sys.stdout.write(proc.stdout)
+                if not proc.stdout.endswith("\n"):
+                    sys.stdout.write("\n")
+                sys.stdout.flush()
             if proc.returncode != 0:
                 return False, "\n".join(output_logs)
         except subprocess.TimeoutExpired:
@@ -338,6 +347,12 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     revert_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     revert_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビューを表示します")
     revert_parser.add_argument("--no-sync", action="store_true", help="リバート成功後のスケルトン・バンドル自動同期をスキップします")
+
+    test_parser = subparsers.add_parser("test", aliases=["t"], help="設定ファイル(ai_meta)または指定されたテスト・検証コマンドを実行します")
+    test_parser.add_argument("cmd", nargs="*", default=[], help="実行するテストコマンド (省略時は設定ファイルから取得または自動検出)")
+    test_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    test_parser.add_argument("-q", "--quiet", action="store_true", help="テスト実行中の標準出力を抑制します")
+    test_parser.add_argument("--timeout", type=int, default=60, help="コマンド1件あたりのタイムアウト秒数 (デフォルト: 60秒)")
 
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
@@ -519,6 +534,34 @@ def _trigger_auto_sync(project_root: Path, action_label: str) -> None:
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("test", "t"):
+            project_root: Path = parsed_args.dir.resolve()
+            if not project_root.exists() or not project_root.is_dir():
+                print(f"エラー: 指定されたディレクトリが存在しません: {project_root}", file=sys.stderr)
+                return 1
+
+            custom_cmd = " ".join(parsed_args.cmd).strip() if parsed_args.cmd else None
+            is_verbose = not getattr(parsed_args, "quiet", False)
+            timeout_sec = getattr(parsed_args, "timeout", 60)
+
+            test_ok, test_output = _run_validation_test(
+                project_root,
+                custom_cmd or "auto",
+                timeout_sec=timeout_sec,
+                verbose=is_verbose,
+            )
+
+            if test_ok:
+                print("\n✅ テストが正常に完了しました。")
+                return 0
+            else:
+                print("\n❌ テストが失敗しました。", file=sys.stderr)
+                if not is_verbose and test_output:
+                    print("\n--- テスト失敗ログ ---", file=sys.stderr)
+                    print(test_output, file=sys.stderr)
+                    print("----------------------\n", file=sys.stderr)
+                return 1
 
         is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c", "cp")
         copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
