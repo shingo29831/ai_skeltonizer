@@ -13,19 +13,19 @@ def estimate_tokens(text: str) -> int:
 
     tokens = 0.0
 
-    # BPEで消滅しやすい改行・空白・記号・サブワードを高精度推計
-    tokens += len(re.findall(r'\r\n|\r|\n', text))
+    # 256k大語彙LLMの結合・CJK・記号特性に基づき推計
+    tokens += len(re.findall(r'\r\n|\r|\n', text)) * 0.9
     for spaces in re.findall(r' {2,}', text):
-        tokens += max(1.0, len(spaces) / 3.0)
+        tokens += max(0.5, len(spaces) / 4.0)
 
     cjk_chars = re.findall(r'[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf\u3400-\u4dbf]', text)
-    tokens += len(cjk_chars) * 1.2
+    tokens += len(cjk_chars) * 0.75
 
     special_symbols = re.findall(r'[\u2500-\u257f\u2580-\u259f\u2190-\u21ff\u2600-\u26ff\u2700-\u27bf]', text)
-    tokens += len(special_symbols) * 1.2
+    tokens += len(special_symbols) * 1.0
 
     ascii_symbols = re.findall(r'[!-/:-@\[-`{-~]', text)
-    tokens += len(ascii_symbols) * 1.0
+    tokens += len(ascii_symbols) * 0.65
 
     clean_text = re.sub(
         r'[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf\u3400-\u4dbf\u2500-\u257f\u2580-\u259f\u2190-\u21ff\u2600-\u26ff\u2700-\u27bf]',
@@ -39,12 +39,12 @@ def estimate_tokens(text: str) -> int:
             subwords = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)', word)
             for sub in subwords or [word]:
                 length = len(sub)
-                if length <= 4:
+                if length <= 8:
                     tokens += 1.0
-                elif length <= 8:
-                    tokens += 1.3
+                elif length <= 14:
+                    tokens += 1.4
                 else:
-                    tokens += length / 3.5
+                    tokens += length / 5.5
 
     return int(round(tokens))
 
