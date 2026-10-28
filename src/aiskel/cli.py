@@ -783,6 +783,29 @@ def main(args: Optional[List[str]] = None) -> int:
                         for d in failed_details:
                             print(f"  - {d}")
 
+                    if not is_dry_run and not is_revert:
+                        if total_success > 0:
+                            header = f"提示されたパッチのうち一部のみ適用されました (成功: {total_success}箇所, 失敗: {fail}箇所)。"
+                        else:
+                            header = f"提示されたパッチの適用に失敗しました (失敗: {fail}箇所)。"
+                        report_lines = [
+                            header,
+                            "以下の失敗箇所について、現在のコードと整合する修正パッチを再提示してください。\n",
+                            "【失敗箇所】",
+                        ]
+                        if failed_details:
+                            for d in failed_details:
+                                report_lines.append(f"- {d}")
+                        else:
+                            report_lines.append("- 置換テキストの不一致または構文エラー")
+                        report_text = "\n".join(report_lines)
+                        try:
+                            set_clipboard_text(report_text)
+                            status_label = "一部適用の結果" if total_success > 0 else "適用失敗の結果"
+                            print(f"📋 {status_label}と失敗箇所をクリップボードにコピーしました (AIチャットにそのままペースト可能)。")
+                        except Exception as e:
+                            print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
+
                 if is_dry_run or is_revert or fail == 0:
                     break
 
