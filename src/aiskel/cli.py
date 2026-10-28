@@ -826,44 +826,60 @@ def main(args: Optional[List[str]] = None) -> int:
             if is_dry_run:
                 return 0 if last_fail == 0 else 1
 
+            test_failed = False
             if not is_revert and test_option is not None and total_success > 0 and last_fail == 0:
                 test_ok, test_output = _run_validation_test(project_root, test_option)
                 if test_ok:
                     print("✅ 検証テストに成功しました。")
                 else:
-                    print("\n❌ 検証テストが失敗しました。変更を即座に自動リバート（ロールバック）します...", file=sys.stderr)
+                    test_failed = True
+                    print("\n❌ 検証テストが失敗しました。", file=sys.stderr)
                     if test_output:
                         print("\n--- テスト失敗ログ ---", file=sys.stderr)
                         print(test_output, file=sys.stderr)
                         print("----------------------\n", file=sys.stderr)
-                    if not _rollback_modified_files(project_root, total_modified_files):
-                        apply_patch(patch_text, project_root, target_file, force_replace=True, revert=True)
-                        print("🔄 逆パッチ適用により変更箇所を元に戻しました。", file=sys.stderr)
-                    return 1
 
-            if not is_revert and initial_commit_msg and total_success > 0 and last_fail == 0:
-                print(f"\n📦 コミットメッセージを検出しました: {initial_commit_msg}")
-                should_commit = getattr(parsed_args, "yes", False)
-                if not should_commit:
-                    should_commit = _prompt_user_confirmation("このメッセージでコミットを実行しますか？ [Enter/Space: y, 他: n]: ", default=False)
+            if not is_revert and total_success > 0 and last_fail == 0:
+                commit_msg = initial_commit_msg or "chore: apply patch"
+                if initial_commit_msg or test_failed:
+                    if initial_commit_msg:
+                        print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
+                    prompt_msg = (
+                        "テストが失敗しましたが、コミットを実行しますか？ [Enter/Space: y, 他: n]: "
+                        if test_failed
+                        else "このメッセージでコミットを実行しますか？ [Enter/Space: y, 他: n]: "
+                    )
+                    should_commit = False if test_failed else getattr(parsed_args, "yes", False)
+                    if not should_commit:
+                        should_commit = _prompt_user_confirmation(prompt_msg, default=False)
 
-                if should_commit:
-                    print("コミットを実行します...")
-                    try:
-                        for f in total_modified_files:
-                            subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
-                        # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
-                        staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
-                        if staged_diff:
-                            subprocess.run(["git", "commit", "-m", initial_commit_msg], cwd=project_root, check=True)
-                            print("✔ コミットが完了しました。")
-                        else:
-                            print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
-                    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                        print(f"⚠ コミットに失敗しました: {e}")
-                else:
-                    print("ℹ コミットを拒否（スキップ）しました。コードの変更内容はそのまま保持されています。")
-                    print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
+                    if should_commit:
+                        print("コミットを実行します...")
+                        try:
+                            for f in total_modified_files:
+                                subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
+                            # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
+                            staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
+                            if staged_diff:
+                                subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
+                                print("✔ コミットが完了しました。")
+                            else:
+                                print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
+                        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                            print(f"⚠ コミットに失敗しました: {e}")
+                    else:
+                        print("ℹ コミットを拒否（スキップ）しました。")
+                        if test_failed:
+                            rollback_prompt = "テストが失敗した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
+                            if _prompt_user_confirmation(rollback_prompt, default=False):
+                                _rollback_modified_files(project_root, total_modified_files)
+                                total_modified_files.clear()
+                                total_success = 0
+                                return 1
+                        print("ℹ コードの変更内容はそのまま保持されています。")
+                        print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
+                        if test_failed:
+                            return 1
 
             if total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
