@@ -533,13 +533,13 @@ def main(args: Optional[List[str]] = None) -> int:
                     print("🚀 クリップボードからAIの出力テキストを読み込みました。")
 
             target_file = parsed_args.target.resolve() if parsed_args.target else None
-            commit_msg, patch_text = _extract_commit_message(patch_text)
+            initial_commit_msg, patch_text = _extract_commit_message(patch_text)
             
-            if is_revert and commit_msg:
+            if is_revert and initial_commit_msg:
                 try:
                     last_commit_msg = subprocess.check_output(["git", "log", "-1", "--pretty=%B"], cwd=project_root, encoding="utf-8", stderr=subprocess.DEVNULL).strip()
-                    if last_commit_msg.splitlines()[0].strip() == commit_msg.splitlines()[0].strip():
-                        print(f"\n📦 直前のコミットが対象パッチのコミットと一致しました: {commit_msg}")
+                    if last_commit_msg.splitlines()[0].strip() == initial_commit_msg.splitlines()[0].strip():
+                        print(f"\n📦 直前のコミットが対象パッチのコミットと一致しました: {initial_commit_msg}")
                         print("コミットを破棄(git reset --hard HEAD~1)して元に戻します...")
                         subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=project_root, check=True)
                         print("✔ コミットの破棄が完了しました。")
@@ -549,29 +549,80 @@ def main(args: Optional[List[str]] = None) -> int:
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
 
-            patch_result = apply_patch(
-                patch_text, 
-                project_root, 
-                target_file,
-                force_replace=getattr(parsed_args, "force_replace", False),
-                revert=is_revert,
-                dry_run=is_dry_run
-            )
-            success, fail, skipped, modified_files = patch_result[0], patch_result[1], patch_result[2], patch_result[3]
-            
-            action_name = "リバート" if is_revert else "適用"
-            mode_prefix = "[DRY-RUN] " if is_dry_run else ""
-            print(f"\n=== {mode_prefix}{action_name}結果 ===")
-            print(f"✔ 成功: {success} 箇所")
-            if skipped > 0:
-                print(f"⏭ スキップ (適用済み): {skipped} 箇所")
-            if fail > 0:
-                print(f"✖ 失敗: {fail} 箇所")
+            total_modified_files: Set[Path] = set()
+            total_success = 0
+            total_skipped = 0
+            last_fail = 0
+            current_patch = patch_text
+            iteration = 0
+
+            while True:
+                iteration += 1
+                patch_result = apply_patch(
+                    current_patch, 
+                    project_root, 
+                    target_file,
+                    force_replace=getattr(parsed_args, "force_replace", False),
+                    revert=is_revert,
+                    dry_run=is_dry_run
+                )
+                success, fail, skipped, modified_files = patch_result[0], patch_result[1], patch_result[2], patch_result[3]
+                failed_details = getattr(patch_result, "failed_details", [])
+
+                total_success += success
+                total_skipped += skipped
+                last_fail = fail
+                total_modified_files.update(modified_files)
+
+                action_name = "リバート" if is_revert else "適用"
+                mode_prefix = "[DRY-RUN] " if is_dry_run else ""
+                print(f"\n=== {mode_prefix}{action_name}結果 ===")
+                iter_note = f" (累計: {total_success} 箇所)" if iteration > 1 else ""
+                print(f"✔ 成功: {success} 箇所{iter_note}")
+                if skipped > 0 or (iteration > 1 and total_skipped > 0):
+                    sk_note = f" (累計: {total_skipped} 箇所)" if iteration > 1 else ""
+                    print(f"⏭ スキップ (適用済み): {skipped} 箇所{sk_note}")
+                if fail > 0:
+                    print(f"✖ 失敗: {fail} 箇所")
+                    if failed_details:
+                        print("\n【失敗箇所】")
+                        for d in failed_details:
+                            print(f"  - {d}")
+
+                if is_dry_run or is_revert or fail == 0:
+                    break
+
+                if success > 0:
+                    print(f"\n⚠ 成功した {success} 箇所を変更しました。")
+
+                retry_prompt = "\n新たに失敗箇所を修正したものをコピーした場合に、続けて変更を適用しますか？ [y/N]: "
+                if not _prompt_user_confirmation(retry_prompt, default=False):
+                    print("ℹ パッチの継続適用を終了しました。")
+                    break
+
+                new_text = _get_clipboard_text()
+                while not new_text or not re.search(r'<{4,}', new_text):
+                    if not new_text:
+                        print("⚠ クリップボードが空です。修正したパッチをコピーしてください。")
+                    else:
+                        print("⚠ クリップボードに置換ブロック(<<<<)が見つかりません。")
+                    if not _prompt_user_confirmation("クリップボードを再取得しますか？ [y/N]: ", default=True):
+                        break
+                    new_text = _get_clipboard_text()
+
+                if not new_text or not re.search(r'<{4,}', new_text):
+                    print("ℹ パッチの継続適用を終了しました。")
+                    break
+
+                extracted_commit, current_patch = _extract_commit_message(new_text)
+                if not initial_commit_msg and extracted_commit:
+                    initial_commit_msg = extracted_commit
+                print("🚀 クリップボードから修正パッチを読み込みました。続けて適用します...")
 
             if is_dry_run:
-                return 0 if fail == 0 else 1
+                return 0 if last_fail == 0 else 1
 
-            if not is_revert and test_option is not None and success > 0 and fail == 0:
+            if not is_revert and test_option is not None and total_success > 0 and last_fail == 0:
                 test_ok, test_output = _run_validation_test(project_root, test_option)
                 if test_ok:
                     print("✅ 検証テストに成功しました。")
@@ -584,7 +635,7 @@ def main(args: Optional[List[str]] = None) -> int:
                     # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git内外を問わず完全ロールバックを保証
                     rolled_back = False
                     try:
-                        for f in modified_files:
+                        for f in total_modified_files:
                             res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
                             if res.returncode != 0:
                                 subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
@@ -597,8 +648,8 @@ def main(args: Optional[List[str]] = None) -> int:
                         print("🔄 逆パッチ適用により変更箇所を元に戻しました。", file=sys.stderr)
                     return 1
 
-            if not is_revert and commit_msg and success > 0 and fail == 0:
-                print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
+            if not is_revert and initial_commit_msg and total_success > 0 and last_fail == 0:
+                print(f"\n📦 コミットメッセージを検出しました: {initial_commit_msg}")
                 should_commit = getattr(parsed_args, "yes", False)
                 if not should_commit:
                     should_commit = _prompt_user_confirmation("このメッセージでコミットを実行しますか？ [y/N]: ", default=False)
@@ -606,12 +657,12 @@ def main(args: Optional[List[str]] = None) -> int:
                 if should_commit:
                     print("コミットを実行します...")
                     try:
-                        for f in modified_files:
+                        for f in total_modified_files:
                             subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
                         # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
                         staged_diff = subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8").strip()
                         if staged_diff:
-                            subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
+                            subprocess.run(["git", "commit", "-m", initial_commit_msg], cwd=project_root, check=True)
                             print("✔ コミットが完了しました。")
                         else:
                             print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
@@ -621,11 +672,11 @@ def main(args: Optional[List[str]] = None) -> int:
                     print("ℹ コミットを拒否（スキップ）しました。コードの変更内容はそのまま保持されています。")
                     print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
 
-            if success > 0 and fail == 0 and not getattr(parsed_args, "no_sync", False):
+            if total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
                 _trigger_auto_sync(project_root, action_name)
 
-            return 0 if fail == 0 else 1
+            return 0 if last_fail == 0 else 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()

@@ -40,6 +40,18 @@ DELETE_FILE_DIRECTIVE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+class PatchResult(tuple):
+    # なぜ必要か: 既存の4要素タプル展開との後方互換を保ちつつ失敗詳細属性を安全に提供するため
+    def __new__(cls, success: int, fail: int, skipped: int, modified_files: Set[Path], failed_details: Optional[List[str]] = None):
+        return super().__new__(cls, (success, fail, skipped, modified_files))
+
+    def __init__(self, success: int, fail: int, skipped: int, modified_files: Set[Path], failed_details: Optional[List[str]] = None):
+        self.success = success
+        self.fail = fail
+        self.skipped = skipped
+        self.modified_files = modified_files
+        self.failed_details = failed_details or []
+
 def _clean_excessive_blank_lines(lines: List[str], change_idx: int = 0) -> List[str]:
     # なぜ必要か: コード削除によって生じる3行以上の過剰な空行をPEP 8等の規約に合わせて最大2行に圧縮するため
     result: List[str] = []
@@ -617,10 +629,11 @@ def _replace_blocks_in_lines(
     project_root: Path,
     allow_create: bool = True,
     force_replace: bool = False
-) -> Tuple[int, int, int, List[str]]:
+) -> Tuple[int, int, int, List[str], List[str]]:
     success = 0
     fail = 0
     skipped = 0
+    failed_items: List[str] = []
     result_lines = list(target_lines)
     
     blocks = _extract_blocks(source_lines)
@@ -657,9 +670,10 @@ def _replace_blocks_in_lines(
                 success += 1
         else:
             print(f"✖ {type_label}置換失敗: 対象ファイルに{type_label} '{block_name}' が見つかりません。")
+            failed_items.append(f"{disp_path}: {type_label} '{block_name}' が見つかりません")
             fail += 1
         
-    return success, fail, skipped, result_lines
+    return success, fail, skipped, result_lines, failed_items
 
 def generate_diff_display(file_path: Path, original: str, updated: str, project_root: Path) -> str:
     """変更前後の文字列からカラー付き Unified Diff を生成する"""
@@ -690,10 +704,11 @@ def generate_diff_display(file_path: Path, original: str, updated: str, project_
             colored_lines.append(stripped)
     return "\n".join(colored_lines)
 
-def _apply_block_replacement(patch_text: str, project_root: Path, target_file: Path | None, dry_run: bool = False) -> Tuple[int, int, int, Set[Path]]:
+def _apply_block_replacement(patch_text: str, project_root: Path, target_file: Path | None, dry_run: bool = False) -> PatchResult:
     success_count = 0
     fail_count = 0
     skipped_count = 0
+    failed_details: List[str] = []
     modified_files: Set[Path] = set()
     
     current_file = target_file
@@ -740,31 +755,35 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
                     success_count += 1
                     modified_files.add(current_file)
                 else:
-                    s, f, sk, new_lines = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
+                    s, f, sk, new_lines, bf = _replace_blocks_in_lines(file_contents[current_file], block_lines, current_file, project_root)
                     success_count += s
                     fail_count += f
                     skipped_count += sk
+                    failed_details.extend(bf)
                     if s > 0:
                         modified_files.add(current_file)
                     file_contents[current_file] = new_lines
         i += 1
 
-    if fail_count > 0:
-        return success_count, fail_count, skipped_count, set()
-
     syntax_errors = []
+    syntax_error_files: Set[Path] = set()
     for path, lines_list in file_contents.items():
-        if path.suffix.lower() == ".py":
+        if path.suffix.lower() == ".py" and path in modified_files:
             try:
                 ast.parse("\n".join(lines_list), filename=str(path))
             except SyntaxError as se:
                 syntax_errors.append(f"  - {path.name}:{se.lineno}: {se.msg}")
+                syntax_error_files.add(path)
+                failed_details.append(f"{path.name}:{se.lineno}: 構文エラー ({se.msg})")
 
     if syntax_errors:
-        print(f"\n⛔ パッチ適用後のコードに構文エラーを検知したため、処理を中断しました:", file=sys.stderr)
+        print(f"\n⛔ パッチ適用後のコードに構文エラーを検知しました:", file=sys.stderr)
         for err in syntax_errors:
             print(err, file=sys.stderr)
-        return success_count, fail_count + len(syntax_errors), skipped_count, set()
+        fail_count += len(syntax_errors)
+        for p in syntax_error_files:
+            modified_files.discard(p)
+            file_contents[p] = original_contents.get(p, "").splitlines()
 
     if dry_run:
         for path in modified_files:
@@ -773,17 +792,19 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
             diff_text = generate_diff_display(path, orig, upd, project_root)
             if diff_text:
                 print(diff_text)
-        return success_count, fail_count, skipped_count, modified_files
+        return PatchResult(success_count, fail_count, skipped_count, modified_files, failed_details)
 
+    written_files: Set[Path] = set()
     for path in modified_files:
-        if path in file_contents:
+        if path in file_contents and path not in syntax_error_files:
             path.parent.mkdir(parents=True, exist_ok=True)
             new_content = "\n".join(file_contents[path])
             if new_content and not new_content.endswith("\n"):
                 new_content += "\n"
             path.write_text(new_content, encoding="utf-8")
+            written_files.add(path)
         
-    return success_count, fail_count, skipped_count, modified_files
+    return PatchResult(success_count, fail_count, skipped_count, written_files, failed_details)
 
 def apply_patch(
     patch_text: str,
@@ -792,9 +813,9 @@ def apply_patch(
     force_replace: bool = False,
     revert: bool = False,
     dry_run: bool = False
-) -> Tuple[int, int, int, Set[Path]]:
+) -> PatchResult:
     """
-    パッチテキストを解析し、トランザクション保証(All-or-Nothing)の下でファイルを書き換える。
+    パッチテキストを解析し、ファイルを書き換える。
     コード削除およびファイル自体の削除操作にも対応する。
     """
     if not _DELIMITER_START.search(patch_text) or not _DELIMITER_MID.search(patch_text) or not _DELIMITER_END.search(patch_text):
@@ -805,13 +826,14 @@ def apply_patch(
         else:
             if revert:
                 print("✖ エラー: リバート処理には置換ブロック(<<<< ==== >>>>)が必要です。")
-                return 0, 1, 0, set()
+                return PatchResult(0, 1, 0, set(), ["リバート処理には置換ブロック(<<<< ==== >>>>)が必要です"])
             print("ℹ 置換ブロック(<<<<)が見つからないため、関数・クラス単位の自動置換を試みます...")
             return _apply_block_replacement(patch_text, project_root, target_file, dry_run=dry_run)
 
     success_count = 0
     fail_count = 0
     skipped_count = 0
+    failed_details: List[str] = []
     modified_files: Set[Path] = set()
     files_to_delete: Set[Path] = set()
 
@@ -868,6 +890,7 @@ def apply_patch(
             _check_and_warn_delimiter(line, i + 1)
             if not current_file:
                 print(f"⚠ 警告: ファイルパスが指定されていないため、ブロックをスキップします (行: {i+1})")
+                failed_details.append(f"行 {i+1}: ファイルパスが指定されていません")
                 fail_count += 1
                 while i < len(lines) and not _DELIMITER_END.match(lines[i]):
                     i += 1
@@ -976,6 +999,7 @@ def apply_patch(
                         skipped_count += 1
                     else:
                         print(f"✖ 関数/クラス削除失敗: {del_node_name} ({disp_path})")
+                        failed_details.append(f"{disp_path}: 削除対象の関数/クラス '{del_node_name}' が見つかりません")
                         fail_count += 1
                 i += 1
                 continue
@@ -985,6 +1009,7 @@ def apply_patch(
                 if is_empty_search:
                     if revert:
                         print(f"✖ リバート失敗: 空の検索ブロックに対するリバートは行えません: {disp_path}")
+                        failed_details.append(f"{disp_path}: 空の検索ブロックに対するリバートは行えません")
                         fail_count += 1
                         i += 1
                         continue
@@ -992,6 +1017,7 @@ def apply_patch(
                     replace_text = "\n".join(replace_lines).strip()
                     if not replace_text:
                         print(f"✖ 置換失敗: 置換後コードが空です: {disp_path}")
+                        failed_details.append(f"{disp_path}: 置換後コードが空です")
                         fail_count += 1
                         i += 1
                         continue
@@ -1063,7 +1089,8 @@ def apply_patch(
                                     success_count += 1
                                     modified_files.add(current_file)
                         else:
-                            s, f, sk, new_lines = _replace_blocks_in_lines(content_lines, replace_lines, current_file, project_root, allow_create=True, force_replace=force_replace)
+                            s, f, sk, new_lines, bf = _replace_blocks_in_lines(content_lines, replace_lines, current_file, project_root, allow_create=True, force_replace=force_replace)
+                            failed_details.extend(bf)
                             if s > 0:
                                 new_content = "\n".join(new_lines)
                                 if not new_content.endswith("\n"):
@@ -1124,10 +1151,14 @@ def apply_patch(
                     else:
                         action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
                         print(f"✖ {action_label}失敗: {disp_path}\n  -> {error_msg}")
+                        search_hint = next((l.strip() for l in search_lines if l.strip()), "")
+                        hint_str = f" (検索行: '{search_hint[:40]}')" if search_hint else ""
+                        failed_details.append(f"{disp_path}: {action_label}失敗 - {error_msg}{hint_str}")
                         fail_count += 1
             else:
                 if revert:
                     print(f"✖ リバート失敗: 対象ファイルが存在しません: {disp_path}")
+                    failed_details.append(f"{disp_path}: 対象ファイルが存在しません")
                     fail_count += 1
                 else:
                     new_content = "\n".join(replace_lines)
@@ -1140,15 +1171,11 @@ def apply_patch(
                 
         i += 1
 
-    # トランザクション判定: 1箇所でも失敗した場合はディスクへの書き込み・削除を行わず中止
-    if fail_count > 0:
-        print(f"\n⛔ 置換エラーが発生したため、トランザクションを中断しました。ディスクへの書き込み・削除は一切行われていません (All-or-Nothing)。")
-        return success_count, fail_count, skipped_count, set()
-
-    # なぜ必要か: 不正な置換によるPython構文エラーファイルのディスク反映および誤コミットを未然に完全遮断
+    # 構文エラーチェック: 構文エラーの発生したファイルは安全のため変更を除外
     syntax_errors = []
+    syntax_error_files: Set[Path] = set()
     for path, content in file_contents.items():
-        if path.suffix.lower() == ".py" and path not in files_to_delete:
+        if path.suffix.lower() == ".py" and path not in files_to_delete and path in modified_files:
             try:
                 ast.parse(content, filename=str(path))
             except SyntaxError as se:
@@ -1157,13 +1184,17 @@ def apply_patch(
                 except ValueError:
                     rel_p = path
                 syntax_errors.append(f"  - {rel_p}:{se.lineno}: {se.msg} (行: '{se.text.strip() if se.text else ''}')")
+                syntax_error_files.add(path)
+                failed_details.append(f"{rel_p}:{se.lineno}: 構文エラー ({se.msg})")
 
     if syntax_errors:
-        print(f"\n⛔ パッチ適用後のコードに構文エラー(SyntaxError)を検知したため、トランザクションを中断しました:", file=sys.stderr)
+        print(f"\n⛔ パッチ適用後のコードに構文エラー(SyntaxError)を検知しました:", file=sys.stderr)
         for err in syntax_errors:
             print(err, file=sys.stderr)
-        print("ディスクへの変更およびGitコミットは行われていません (All-or-Nothing)。", file=sys.stderr)
-        return success_count, fail_count + len(syntax_errors), skipped_count, set()
+        fail_count += len(syntax_errors)
+        for p in syntax_error_files:
+            modified_files.discard(p)
+            file_contents[p] = original_contents.get(p, "")
 
     # Dry-runプレビュー出力
     if dry_run:
@@ -1173,22 +1204,26 @@ def apply_patch(
             diff_text = generate_diff_display(path, orig, file_contents.get(path, ""), project_root)
             if diff_text:
                 print(diff_text)
-        return success_count, fail_count, skipped_count, modified_files
+        return PatchResult(success_count, fail_count, skipped_count, modified_files, failed_details)
 
-    # トランザクション確定: 全ての変更・削除をディスクに一括反映
+    # ディスクへの部分適用反映: 成功した変更・削除をディスクに反映
+    written_files: Set[Path] = set()
     for path in files_to_delete:
-        if path.exists():
-            path.unlink()
-            try:
-                parent = path.parent
-                if parent != project_root and not any(parent.iterdir()):
-                    parent.rmdir()
-            except OSError:
-                pass
+        if path in modified_files and path not in syntax_error_files:
+            if path.exists():
+                path.unlink()
+                try:
+                    parent = path.parent
+                    if parent != project_root and not any(parent.iterdir()):
+                        parent.rmdir()
+                except OSError:
+                    pass
+            written_files.add(path)
 
     for path in modified_files:
-        if path not in files_to_delete and path in file_contents:
+        if path not in files_to_delete and path in file_contents and path not in syntax_error_files:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(file_contents[path], encoding="utf-8")
+            written_files.add(path)
 
-    return success_count, fail_count, skipped_count, modified_files
+    return PatchResult(success_count, fail_count, skipped_count, written_files, failed_details)
