@@ -112,6 +112,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
         config_data = {
             "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
+            "exclude_paths": [],
             "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -250,3 +251,84 @@ def load_bundle_filename_from_meta(project_root: Path, output_dir: Optional[Path
                 return m.group(1).strip()
 
     return None
+
+
+def load_bloat_config_from_meta(
+    project_root: Path, output_dir: Optional[Path] = None
+) -> Tuple[Optional[int], Optional[int], Set[str]]:
+    """ai_meta等の設定ファイルから肥大化判定の閾値(lines, chars)および除外パスを取得する"""
+    meta_dirs = []
+    if output_dir:
+        meta_dirs.append(output_dir)
+    meta_dirs.extend([
+        project_root / "ai_meta",
+        project_root / ".ai_meta",
+    ])
+
+    checked_dirs: List[Path] = []
+    for d in meta_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in checked_dirs and resolved.exists() and resolved.is_dir():
+                checked_dirs.append(resolved)
+        except OSError:
+            continue
+
+    candidate_files = (
+        "config.json",
+        "settings.json",
+        "aiskel.json",
+        "aiskel_config.json",
+        ".aiskelrc.json",
+        ".aiskelrc",
+        "config.toml",
+        "settings.toml",
+        "config.yaml",
+        "config.yml",
+        "settings.yaml",
+        "settings.yml",
+        "config.ini",
+        "settings.ini",
+    )
+
+    max_lines: Optional[int] = None
+    max_chars: Optional[int] = None
+    exclude_paths: Set[str] = set()
+
+    for d in checked_dirs:
+        for fname in candidate_files:
+            target = d / fname
+            if not target.is_file():
+                continue
+            try:
+                content = target.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if not content:
+                continue
+
+            if target.suffix.lower() == ".json" or content.startswith("{"):
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        for l_key in ("bloat_max_lines", "max_lines", "bloat_lines"):
+                            if l_key in data and isinstance(data[l_key], int):
+                                max_lines = data[l_key]
+                                break
+                        for c_key in ("bloat_max_chars", "max_chars", "bloat_chars"):
+                            if c_key in data and isinstance(data[c_key], int):
+                                max_chars = data[c_key]
+                                break
+                        for ex_key in ("exclude_paths", "ignore_paths", "bloat_exclude", "exclude", "ignore"):
+                            if ex_key in data:
+                                val = data[ex_key]
+                                if isinstance(val, list):
+                                    for item in val:
+                                        if isinstance(item, str) and item.strip():
+                                            exclude_paths.add(item.strip())
+                                elif isinstance(val, str) and val.strip():
+                                    exclude_paths.add(val.strip())
+                except Exception:
+                    pass
+
+    return max_lines, max_chars, exclude_paths

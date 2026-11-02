@@ -8,8 +8,9 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple, Union
 
-from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file, load_bundle_filename_from_meta
+from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file, load_bundle_filename_from_meta, load_bloat_config_from_meta
 from .core.scanner import get_target_files, generate_tree_text
+from .core.bloat_detector import detect_bloated_files, format_bloat_report, DEFAULT_BLOAT_MAX_LINES, DEFAULT_BLOAT_MAX_CHARS
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
@@ -311,6 +312,10 @@ def _normalize_cli_args(args: List[str]) -> List[str]:
     if not args:
         return args
 
+    # なぜ必要か: サブコマンド実行時にルートレベルの -c 正規化との競合を防ぐため
+    if args[0] in ("apply", "a", "revert", "r", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size"):
+        return args
+
     cmd_idx = -1
     for i, a in enumerate(args):
         if a in ("copy", "c", "cp"):
@@ -418,6 +423,14 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
     copy_parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"コピーを許可する最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
+
+    bloat_parser = subparsers.add_parser("bloat", aliases=["b", "size"], help="ファイルの行数・文字数を計測し、肥大化ファイルを検出してAI向け分割指示をクリップボードに保存します")
+    bloat_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    bloat_parser.add_argument("-l", "--max-lines", type=int, default=None, help=f"肥大化とみなす最大行数 (デフォルト: {DEFAULT_BLOAT_MAX_LINES})")
+    bloat_parser.add_argument("-c", "-C", "--max-chars", type=int, default=None, help=f"肥大化とみなす最大文字数 (デフォルト: {DEFAULT_BLOAT_MAX_CHARS:,})")
+    bloat_parser.add_argument("-e", "--exclude", action="append", default=[], help="追加で除外するファイルまたはディレクトリパス (カンマ区切り可)")
+    bloat_parser.add_argument("--no-clipboard", action="store_true", help="クリップボードへの自動保存を行わず標準出力のみ行います")
+    bloat_parser.add_argument("-q", "--quiet", action="store_true", help="肥大化ファイルが検出されなかった場合のメッセージを抑制します")
 
     docs_parser = subparsers.add_parser("docs", aliases=["d"], help="HTMLドキュメントをAI向けに解析・軽量構造化して出力します")
     docs_parser.add_argument("targets", type=Path, nargs="*", default=[], help="解析対象のHTMLファイルまたはディレクトリのパス (省略時は標準入力またはカレントディレクトリ)")
@@ -593,6 +606,42 @@ def _trigger_auto_sync(project_root: Path, action_label: str) -> None:
 def main(args: Optional[List[str]] = None) -> int:
     try:
         parsed_args = parse_arguments(args)
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("bloat", "b", "size"):
+            project_root: Path = parsed_args.project_dir.resolve()
+            if not project_root.exists() or not project_root.is_dir():
+                print(f"エラー: 指定されたディレクトリが存在しません: {project_root}", file=sys.stderr)
+                return 1
+
+            meta_lines, meta_chars, meta_excludes = load_bloat_config_from_meta(project_root)
+            max_lines = parsed_args.max_lines if parsed_args.max_lines is not None else (meta_lines or DEFAULT_BLOAT_MAX_LINES)
+            max_chars = parsed_args.max_chars if parsed_args.max_chars is not None else (meta_chars or DEFAULT_BLOAT_MAX_CHARS)
+
+            cli_excludes = _process_comma_separated_args(parsed_args.exclude)
+            all_excludes = meta_excludes | cli_excludes
+
+            bloated = detect_bloated_files(
+                project_root=project_root,
+                max_lines=max_lines,
+                max_chars=max_chars,
+                exclude_paths=all_excludes,
+            )
+
+            if not bloated:
+                if not getattr(parsed_args, "quiet", False):
+                    print(f"✔ 肥大化ファイルは検出されませんでした (基準: 行数 >= {max_lines}, 文字数 >= {max_chars:,})")
+                return 0
+
+            report = format_bloat_report(bloated, max_lines=max_lines, max_chars=max_chars)
+            print(report)
+
+            if not getattr(parsed_args, "no_clipboard", False):
+                try:
+                    set_clipboard_text(report)
+                    print(f"\n📋 肥大化ファイル一覧 ({len(bloated)}件) をクリップボードにコピーしました (AIチャットにそのままペースト可能)。")
+                except Exception as e:
+                    print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
+            return 0
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("test", "t"):
             project_root: Path = parsed_args.dir.resolve()
