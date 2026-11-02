@@ -884,7 +884,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 if success > 0:
                     print(f"\n⚠ 成功した {success} 箇所を変更しました。")
 
-                retry_prompt = "\n新たに失敗箇所を修正したものをコピーした場合に、続けて変更を適用しますか？ [Enter/Space: y, 他: n]: "
+                retry_prompt = "\n修正パッチをコピーして、続けて適用しますか？ [Enter/Space: y, 他: n]: "
                 if not _prompt_user_confirmation(retry_prompt, default=False):
                     print("ℹ パッチの継続適用を終了しました。")
                     break
