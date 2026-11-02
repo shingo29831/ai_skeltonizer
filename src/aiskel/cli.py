@@ -10,7 +10,13 @@ from typing import List, Optional, Set, Tuple, Union
 
 from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file, load_bundle_filename_from_meta, load_bloat_config_from_meta
 from .core.scanner import get_target_files, generate_tree_text
-from .core.bloat_detector import detect_bloated_files, format_bloat_report, DEFAULT_BLOAT_MAX_LINES, DEFAULT_BLOAT_MAX_CHARS
+from .core.bloat_detector import (
+    detect_bloated_files,
+    format_bloat_report,
+    check_and_warn_bloated_files,
+    DEFAULT_BLOAT_MAX_LINES,
+    DEFAULT_BLOAT_MAX_CHARS,
+)
 from .core.syncer import ProjectSyncer
 from .core.layer_filter import filter_logic_files
 from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
@@ -401,6 +407,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     apply_parser.add_argument("--no-test", action="store_true", help="設定ファイルのコマンド実行および検証テストを明示的にスキップします")
     apply_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
+    apply_parser.add_argument("--no-bloat", action="store_true", help="置換適用後のファイル肥大化自動チェックをスキップします")
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
     revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス")
@@ -966,6 +973,15 @@ def main(args: Optional[List[str]] = None) -> int:
             if total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
                 _trigger_auto_sync(project_root, action_name)
+
+            if not is_revert and total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_bloat", False):
+                meta_l, meta_c, meta_ex = load_bloat_config_from_meta(project_root)
+                check_and_warn_bloated_files(
+                    project_root,
+                    max_lines=meta_l or DEFAULT_BLOAT_MAX_LINES,
+                    max_chars=meta_c or DEFAULT_BLOAT_MAX_CHARS,
+                    exclude_paths=meta_ex,
+                )
 
             return 0 if last_fail == 0 else 1
 

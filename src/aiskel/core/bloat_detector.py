@@ -129,3 +129,32 @@ def format_bloat_report(bloated_files: List[BloatFileInfo], max_lines: int, max_
         lines.append(f"- {item.rel_path}: {item.lines} lines, {item.chars:,} chars ({reason_str})")
 
     return "\n".join(lines)
+
+
+def check_and_warn_bloated_files(
+    project_root: Path,
+    max_lines: int = DEFAULT_BLOAT_MAX_LINES,
+    max_chars: int = DEFAULT_BLOAT_MAX_CHARS,
+    exclude_paths: Optional[Set[str]] = None,
+) -> List[BloatFileInfo]:
+    """パッチ適用後等に肥大化ファイルを検査し、検出時のみコンソールに警告を出力する(クリップボード更新なし)"""
+    bloated = detect_bloated_files(
+        project_root=project_root,
+        max_lines=max_lines,
+        max_chars=max_chars,
+        exclude_paths=exclude_paths,
+    )
+
+    if bloated:
+        print(f"\n⚠ 肥大化ファイルを検出しました ({len(bloated)}件, 行数 >= {max_lines} または 文字数 >= {max_chars:,}):")
+        for item in bloated:
+            reasons = []
+            if item.exceeds_lines:
+                reasons.append("lines")
+            if item.exceeds_chars:
+                reasons.append("chars")
+            reason_str = "+".join(reasons)
+            print(f"  - {item.rel_path}: {item.lines} lines, {item.chars:,} chars ({reason_str})")
+        print("  (AIへの分割指示テキスト生成・コピーは 'aiskel bloat' を実行してください)")
+
+    return bloated
