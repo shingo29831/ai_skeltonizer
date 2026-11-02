@@ -26,8 +26,22 @@ from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets, DEFAULT_MAX_CHARS
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
 from .core.watcher import watch_project
+from .core.test_runner import run_validation_test, try_handle_cd_command
+from .cli_interaction import (
+    extract_commit_message,
+    read_single_key_from_tty,
+    prompt_user_confirmation,
+    rollback_modified_files,
+)
 
-def _extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
+_run_validation_test = run_validation_test
+_try_handle_cd_command = try_handle_cd_command
+_extract_commit_message = extract_commit_message
+_read_single_key_from_tty = read_single_key_from_tty
+_prompt_user_confirmation = prompt_user_confirmation
+_rollback_modified_files = rollback_modified_files
+
+def _extract_commit_message_deprecated(patch_text: str) -> Tuple[Optional[str], str]:
     # ソースコード内の正規表現リテラルに誤マッチしないようタグ文字列を分割定義
     tag_start = "<" + "commit>"
     tag_end = "</" + "commit>"
@@ -72,246 +86,6 @@ def _get_clipboard_text() -> str:
         print(f"⚠ クリップボードの読み込みに失敗しました: {e}", file=sys.stderr)
         return ""
 
-def _read_single_key_from_tty() -> Optional[str]:
-    # なぜ必要か: Enter/Space/他キーの1打鍵即時判定をクロスプラットフォームで実現するため
-    if sys.platform == "win32":
-        try:
-            import msvcrt
-            ch = msvcrt.getwch()
-            while msvcrt.kbhit():
-                msvcrt.getwch()
-            if ch in ('\x00', '\xe0'):
-                return ""
-            if ch == '\x03':
-                raise KeyboardInterrupt
-            return ch
-        except Exception:
-            return None
-    else:
-        try:
-            import termios
-            import tty
-            tty_file = None
-            if sys.stdin.isatty():
-                fd = sys.stdin.fileno()
-                stream = sys.stdin
-            else:
-                try:
-                    tty_file = open("/dev/tty", "r", encoding="utf-8")
-                    fd = tty_file.fileno()
-                    stream = tty_file
-                except OSError:
-                    return None
-
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                ch = stream.read(1)
-                try:
-                    termios.tcflush(fd, termios.TCIFLUSH)
-                except Exception:
-                    pass
-                return ch
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                if tty_file:
-                    tty_file.close()
-        except Exception:
-            return None
-
-def _prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
-    # なぜ必要か: Enter/Spaceで肯定、他キーで否定を即時判定し非対話時も安全に処理するため
-    try:
-        sys.stdout.write(prompt)
-        sys.stdout.flush()
-
-        key = _read_single_key_from_tty()
-        if key is not None:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            return key in ("\r", "\n", " ", "y", "Y")
-
-        if not sys.stdin.isatty():
-            tty_path = "CON" if sys.platform == "win32" else "/dev/tty"
-            try:
-                with open(tty_path, "r", encoding="utf-8") as tty:
-                    raw_line = tty.readline()
-            except OSError:
-                return default
-        else:
-            raw_line = sys.stdin.readline()
-
-        if not raw_line:
-            return default
-
-        ans = raw_line.strip().lower()
-        if not ans:
-            return True
-        return ans in ("y", "yes", " ")
-    except (EOFError, KeyboardInterrupt):
-        return False
-
-
-def _rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> bool:
-    # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git経由で完全ロールバックを保証
-    try:
-        for f in modified_files:
-            res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
-            if res.returncode != 0:
-                subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
-        print("🔄 変更ファイルを元の状態に復元しました。")
-        return True
-    except Exception as e:
-        print(f"⚠ ロールバックに失敗しました: {e}", file=sys.stderr)
-        return False
-
-def _try_handle_cd_command(
-    cmd: str, current_dir: Path, dir_stack: List[Path], prev_dir: Optional[Path] = None
-) -> Tuple[bool, bool, Path, Optional[Path], str]:
-    # なぜ必要か: cd等によるワーキングディレクトリ変更を後続コマンドへ確実に引き継ぐため
-    trimmed = cmd.strip()
-    if not trimmed or any(op in trimmed for op in ("&&", "||", "|", ";", ">", "<")):
-        return False, True, current_dir, prev_dir, ""
-
-    parts = trimmed.split(None, 1)
-    op = parts[0].lower()
-
-    if op in ("cd", "chdir"):
-        arg = parts[1].strip() if len(parts) > 1 else ""
-        if arg.lower().startswith("/d"):
-            arg = arg[2:].strip()
-        if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
-            arg = arg[1:-1].strip()
-
-        if not arg:
-            return True, True, current_dir, prev_dir, f"カレントディレクトリ: {current_dir}"
-
-        if arg == "-":
-            if prev_dir is None:
-                return True, False, current_dir, prev_dir, "直前のディレクトリ (OLDPWD) が設定されていません。"
-            return True, True, prev_dir, current_dir, f"直前のディレクトリに戻りました: {prev_dir}"
-
-        target = Path(arg).expanduser() if arg.startswith("~") else Path(arg)
-        resolved = (current_dir / target).resolve() if not target.is_absolute() else target.resolve()
-
-        if not resolved.exists():
-            return True, False, current_dir, prev_dir, f"指定されたディレクトリが存在しません: {arg} (解決先: {resolved})"
-        if not resolved.is_dir():
-            return True, False, current_dir, prev_dir, f"指定されたパスはディレクトリではありません: {arg} (解決先: {resolved})"
-
-        return True, True, resolved, current_dir, f"ディレクトリを移動しました: {resolved}"
-
-    if op == "pushd":
-        arg = parts[1].strip() if len(parts) > 1 else ""
-        if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
-            arg = arg[1:-1].strip()
-        if not arg:
-            return True, False, current_dir, prev_dir, "pushd には移動先ディレクトリの指定が必要です。"
-
-        target = Path(arg).expanduser() if arg.startswith("~") else Path(arg)
-        resolved = (current_dir / target).resolve() if not target.is_absolute() else target.resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            return True, False, current_dir, prev_dir, f"指定されたディレクトリが存在しません: {arg} (解決先: {resolved})"
-
-        dir_stack.append(current_dir)
-        return True, True, resolved, current_dir, f"ディレクトリを移動しました (pushd): {resolved}"
-
-    if op == "popd":
-        if not dir_stack:
-            return True, False, current_dir, prev_dir, "ディレクトリスタックが空のため popd を実行できません。"
-        popped = dir_stack.pop()
-        if not popped.exists() or not popped.is_dir():
-            return True, False, current_dir, prev_dir, f"スタック内のディレクトリが存在しません: {popped}"
-        return True, True, popped, current_dir, f"ディレクトリを復帰しました (popd): {popped}"
-
-    return False, True, current_dir, prev_dir, ""
-
-
-def _run_validation_test(project_root: Path, test_command: Optional[Union[str, List[str]]], timeout_sec: int = 60, verbose: bool = False) -> Tuple[bool, str]:
-    commands: List[str] = []
-    if not test_command or test_command == "auto":
-        # なぜ必要か: ai_metaの設定ファイルに指定されたコマンドを最優先し、未指定時のみ自動検出へ倒すため
-        meta_cmds = load_test_command_from_meta(project_root)
-        if meta_cmds:
-            commands = meta_cmds
-            cmd_summary = " && ".join(commands) if len(commands) > 1 else commands[0]
-            print(f"⚙ ai_meta の設定ファイルからコマンドを読み込みました ({len(commands)}件): {cmd_summary}")
-        else:
-            venv_pytest = None
-            for venv_name in (".venv", "venv", "env"):
-                scripts_dir = project_root / venv_name / ("Scripts" if sys.platform == "win32" else "bin")
-                pt = scripts_dir / ("pytest.exe" if sys.platform == "win32" else "pytest")
-                if pt.exists():
-                    venv_pytest = f'"{pt}"'
-                    break
-
-            if (project_root / "pyproject.toml").exists() or (project_root / "pytest.ini").exists() or (project_root / "tests").exists():
-                detected = venv_pytest or f'"{sys.executable}" -m pytest'
-            elif (project_root / "package.json").exists():
-                detected = "npm test"
-            elif (project_root / "Cargo.toml").exists():
-                detected = "cargo test"
-            elif (project_root / "go.mod").exists():
-                detected = "go test ./..."
-            else:
-                detected = venv_pytest or f'"{sys.executable}" -m pytest'
-            commands = [detected]
-    elif isinstance(test_command, list):
-        commands = [c.strip() for c in test_command if c.strip()]
-    else:
-        commands = [c.strip() for c in test_command.splitlines() if c.strip() and not c.strip().startswith(("#", "//", ";"))]
-
-    output_logs: List[str] = []
-    total = len(commands)
-    current_dir = project_root
-    dir_stack: List[Path] = []
-    prev_dir: Optional[Path] = None
-
-    for idx, cmd in enumerate(commands, 1):
-        step_label = f"[{idx}/{total}] " if total > 1 else ""
-        print(f"\n🧪 検証テストを実行中: {step_label}{cmd}")
-
-        is_cd, ok, new_dir, new_prev, msg = _try_handle_cd_command(cmd, current_dir, dir_stack, prev_dir)
-        if is_cd:
-            header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
-            if not ok:
-                output_logs.append(f"{header}エラー: {msg}\n")
-                if verbose:
-                    print(f"✖ エラー: {msg}", file=sys.stderr)
-                return False, "\n".join(output_logs)
-            current_dir, prev_dir = new_dir, new_prev
-            output_logs.append(f"{header}{msg}\n")
-            if verbose and msg:
-                print(f"✔ {msg}")
-            continue
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=current_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_sec,
-            )
-            header = f"=== {step_label}{cmd} ===\n" if total > 1 else ""
-            output_logs.append(f"{header}{proc.stdout}")
-            if verbose and proc.stdout:
-                sys.stdout.write(proc.stdout)
-                if not proc.stdout.endswith("\n"):
-                    sys.stdout.write("\n")
-                sys.stdout.flush()
-            if proc.returncode != 0:
-                return False, "\n".join(output_logs)
-        except subprocess.TimeoutExpired:
-            return False, f"テスト実行がタイムアウトしました ({timeout_sec}秒): {cmd}"
-        except Exception as e:
-            return False, f"テスト実行コマンドの起動に失敗しました: {cmd} ({e})"
-
-    return True, "\n".join(output_logs)
 
 def _normalize_cli_args(args: List[str]) -> List[str]:
     # 可変長位置引数の途中にオプションが混在した場合でも順序を再構成して解析エラーを防止
