@@ -528,6 +528,7 @@ def _run_sync(
     git_diff: bool = False,
     no_ui: bool = False,
     quiet: bool = False,
+    check_bloat: bool = True,
 ) -> Tuple[int, int, int, Optional[Path]]:
     _ensure_gitignore_updated(project_root, output_dir)
     created_cfg = ensure_default_config_file(output_dir, project_root)
@@ -594,9 +595,18 @@ def _run_sync(
         else:
             print(f"  - 削減トークン数 : 約 {stats.saved_tokens:,} tokens ({stats.reduction_percentage:.1f}% 削減)")
 
+        if check_bloat:
+            meta_l, meta_c, meta_ex = load_bloat_config_from_meta(project_root, output_dir)
+            check_and_warn_bloated_files(
+                project_root,
+                max_lines=meta_l or DEFAULT_BLOAT_MAX_LINES,
+                max_chars=meta_c or DEFAULT_BLOAT_MAX_CHARS,
+                exclude_paths=meta_ex,
+            )
+
     return updated_count, skipped_count, deleted_count, bundle_path
 
-def _trigger_auto_sync(project_root: Path, action_label: str) -> None:
+def _trigger_auto_sync(project_root: Path, action_label: str, check_bloat: bool = True) -> None:
     # なぜ必要か: コード変更コマンド実行後に最新のスケルトンとバンドル状態を完全同期・担保するため
     output_dir = _resolve_output_dir(project_root, None)
     sync_config = SkeletonConfig(
@@ -608,7 +618,7 @@ def _trigger_auto_sync(project_root: Path, action_label: str) -> None:
         policy_path=None,
     )
     print(f"\n🔄 {action_label}完了に伴い、スケルトンとバンドルを自動同期します...")
-    _run_sync(project_root, output_dir, sync_config, quiet=False)
+    _run_sync(project_root, output_dir, sync_config, quiet=False, check_bloat=check_bloat)
 
 def main(args: Optional[List[str]] = None) -> int:
     try:
@@ -972,16 +982,8 @@ def main(args: Optional[List[str]] = None) -> int:
 
             if total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
-                _trigger_auto_sync(project_root, action_name)
-
-            if not is_revert and total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_bloat", False):
-                meta_l, meta_c, meta_ex = load_bloat_config_from_meta(project_root)
-                check_and_warn_bloated_files(
-                    project_root,
-                    max_lines=meta_l or DEFAULT_BLOAT_MAX_LINES,
-                    max_chars=meta_c or DEFAULT_BLOAT_MAX_CHARS,
-                    exclude_paths=meta_ex,
-                )
+                should_bloat = not is_revert and not getattr(parsed_args, "no_bloat", False)
+                _trigger_auto_sync(project_root, action_name, check_bloat=should_bloat)
 
             return 0 if last_fail == 0 else 1
 
