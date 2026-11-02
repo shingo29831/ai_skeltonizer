@@ -605,6 +605,8 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
     # 一致箇所の詳細診断 (エラー表示用)
     best_match_count = 0
     best_match_line = ""
+    best_match_file_lineno = -1
+    best_match_file_line = ""
     for i in range(len(non_empty_content)):
         match_count = 0
         while i + match_count < len(non_empty_content) and match_count < ne_search_len:
@@ -616,9 +618,37 @@ def _find_and_replace(content: str, search_lines: List[str], replace_lines: List
             best_match_count = match_count
             if match_count < ne_search_len:
                 best_match_line = non_empty_search[match_count]
+                if i + match_count < len(non_empty_content):
+                    best_match_file_lineno = non_empty_content[i + match_count][0] + 1
+                    best_match_file_line = non_empty_content[i + match_count][1]
 
     if best_match_count > 0:
-        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります:\n    '{best_match_line}'", False
+        file_hint = f" (ファイル行 {best_match_file_lineno})" if best_match_file_lineno > 0 else ""
+        diff_detail = f"\n    検索指定: '{best_match_line}'"
+        if best_match_file_line:
+            diff_detail += f"\n    ファイル: '{best_match_file_line}'"
+        return None, f"途中まで一致しましたが、以下の行がファイル内の記述と異なります{file_hint}:{diff_detail}", False
+
+    target_search_line = non_empty_search[0] if non_empty_search else (core_search[0] if core_search else "")
+    best_sim_ratio = 0.0
+    best_sim_lineno = -1
+    best_sim_line = ""
+    for idx, line_str in non_empty_content:
+        ratio = difflib.SequenceMatcher(None, target_search_line, line_str).ratio()
+        if ratio > best_sim_ratio:
+            best_sim_ratio = ratio
+            best_sim_lineno = idx + 1
+            best_sim_line = line_str
+
+    if best_sim_ratio >= 0.6 and best_sim_lineno > 0:
+        return None, (
+            f"検索テキストがファイル内に見つかりませんでした:\n"
+            f"    検索指定: '{target_search_line}'\n"
+            f"    類似候補 (ファイル行 {best_sim_lineno}): '{best_sim_line}'"
+        ), False
+
+    if target_search_line:
+        return None, f"検索テキストがファイル内に見つかりませんでした:\n    検索指定: '{target_search_line}'", False
 
     return None, "検索テキストがファイル内に見つかりませんでした。", False
 
@@ -772,9 +802,10 @@ def _apply_block_replacement(patch_text: str, project_root: Path, target_file: P
             try:
                 ast.parse("\n".join(lines_list), filename=str(path))
             except SyntaxError as se:
-                syntax_errors.append(f"  - {path.name}:{se.lineno}: {se.msg}")
+                line_snippet = f" (行: '{se.text.strip()}')" if se.text and se.text.strip() else ""
+                syntax_errors.append(f"  - {path.name}:{se.lineno}: {se.msg}{line_snippet}")
                 syntax_error_files.add(path)
-                failed_details.append(f"{path.name}:{se.lineno}: 構文エラー ({se.msg})")
+                failed_details.append(f"{path.name}:{se.lineno}: 構文エラー ({se.msg}){line_snippet}")
 
     if syntax_errors:
         print(f"\n⛔ パッチ適用後のコードに構文エラーを検知しました:", file=sys.stderr)
@@ -887,7 +918,8 @@ def apply_patch(
             continue
 
         if _DELIMITER_START.match(line):
-            _check_and_warn_delimiter(line, i + 1)
+            block_line_no = i + 1
+            _check_and_warn_delimiter(line, block_line_no)
             if not current_file:
                 print(f"⚠ 警告: ファイルパスが指定されていないため、ブロックをスキップします (行: {i+1})")
                 failed_details.append(f"行 {i+1}: ファイルパスが指定されていません")
@@ -1139,7 +1171,7 @@ def apply_patch(
 
                     new_content, error_msg, is_skipped = _find_and_replace(content, search_lines, replace_lines, force_replace)
                     if is_skipped:
-                        action_label = "リバート" if revert else ("削除" if is_empty_replace else "置換")
+                        action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
                         print(f"⏭ {action_label}スキップ (適用済み): {disp_path}")
                         skipped_count += 1
                     elif new_content is not None:
@@ -1150,10 +1182,8 @@ def apply_patch(
                         modified_files.add(current_file)
                     else:
                         action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
-                        print(f"✖ {action_label}失敗: {disp_path}\n  -> {error_msg}")
-                        search_hint = next((l.strip() for l in search_lines if l.strip()), "")
-                        hint_str = f" (検索行: '{search_hint[:40]}')" if search_hint else ""
-                        failed_details.append(f"{disp_path}: {action_label}失敗 - {error_msg}{hint_str}")
+                        print(f"✖ {action_label}失敗: {disp_path} (パッチ行 {block_line_no})\n  -> {error_msg}")
+                        failed_details.append(f"{disp_path}: {action_label}失敗 (パッチ行 {block_line_no})\n  -> {error_msg}")
                         fail_count += 1
             else:
                 if revert:
@@ -1183,9 +1213,10 @@ def apply_patch(
                     rel_p = path.relative_to(project_root)
                 except ValueError:
                     rel_p = path
-                syntax_errors.append(f"  - {rel_p}:{se.lineno}: {se.msg} (行: '{se.text.strip() if se.text else ''}')")
+                line_snippet = f" (行: '{se.text.strip()}')" if se.text and se.text.strip() else ""
+                syntax_errors.append(f"  - {rel_p}:{se.lineno}: {se.msg}{line_snippet}")
                 syntax_error_files.add(path)
-                failed_details.append(f"{rel_p}:{se.lineno}: 構文エラー ({se.msg})")
+                failed_details.append(f"{rel_p}:{se.lineno}: 構文エラー ({se.msg}){line_snippet}")
 
     if syntax_errors:
         print(f"\n⛔ パッチ適用後のコードに構文エラー(SyntaxError)を検知しました:", file=sys.stderr)

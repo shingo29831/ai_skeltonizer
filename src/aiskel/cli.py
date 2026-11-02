@@ -847,7 +847,10 @@ def main(args: Optional[List[str]] = None) -> int:
                     if failed_details:
                         print("\n【失敗箇所】")
                         for d in failed_details:
-                            print(f"  - {d}")
+                            d_lines = d.splitlines()
+                            print(f"  - {d_lines[0]}")
+                            for sub_line in d_lines[1:]:
+                                print(f"    {sub_line}")
 
                     if not is_dry_run and not is_revert:
                         if total_success > 0:
@@ -861,7 +864,10 @@ def main(args: Optional[List[str]] = None) -> int:
                         ]
                         if failed_details:
                             for d in failed_details:
-                                report_lines.append(f"- {d}")
+                                d_lines = d.splitlines()
+                                report_lines.append(f"- {d_lines[0]}")
+                                for sub_line in d_lines[1:]:
+                                    report_lines.append(f"  {sub_line}")
                         else:
                             report_lines.append("- 置換テキストの不一致または構文エラー")
                         report_text = "\n".join(report_lines)
