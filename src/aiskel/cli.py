@@ -908,15 +908,27 @@ def main(args: Optional[List[str]] = None) -> int:
                     initial_commit_msg = extracted_commit
                 print("🚀 クリップボードから修正パッチを読み込みました。続けて適用します...")
 
+            commit_partial = False
+            committed_successfully = False
             if not is_dry_run and not is_revert and last_fail > 0 and total_success > 0:
-                rollback_prompt = "\nこれまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
-                if _prompt_user_confirmation(rollback_prompt, default=False):
-                    _rollback_modified_files(project_root, total_modified_files)
-                    total_modified_files.clear()
-                    total_success = 0
+                commit_msg_preview = initial_commit_msg or "chore: apply patch"
+                if initial_commit_msg:
+                    print(f"\n📦 コミットメッセージを検出しました: {commit_msg_preview}")
+                    commit_prompt = f"適用に成功した変更 ({total_success}箇所) をこのメッセージでコミットしますか？ [Enter/Space: y, 他: n]: "
                 else:
-                    print("ℹ 適用済みの変更はそのまま保持されています。")
-                    print("  (後から取り消す場合は 'git checkout .' などを実行してください)")
+                    commit_prompt = f"\n適用に成功した変更 ({total_success}箇所) をコミットしますか？ [Enter/Space: y, 他: n]: "
+
+                if _prompt_user_confirmation(commit_prompt, default=False):
+                    commit_partial = True
+                else:
+                    rollback_prompt = "これまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
+                    if _prompt_user_confirmation(rollback_prompt, default=False):
+                        _rollback_modified_files(project_root, total_modified_files)
+                        total_modified_files.clear()
+                        total_success = 0
+                    else:
+                        print("ℹ コミットをスキップし、適用済みの変更はそのまま保持されています。")
+                        print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
 
             if is_dry_run:
                 return 0 if last_fail == 0 else 1
@@ -934,17 +946,17 @@ def main(args: Optional[List[str]] = None) -> int:
                         print(test_output, file=sys.stderr)
                         print("----------------------\n", file=sys.stderr)
 
-            if not is_revert and total_success > 0 and last_fail == 0:
+            if not is_revert and total_success > 0 and (last_fail == 0 or commit_partial):
                 commit_msg = initial_commit_msg or "chore: apply patch"
-                if initial_commit_msg or test_failed:
-                    if initial_commit_msg:
+                if initial_commit_msg or test_failed or commit_partial:
+                    if initial_commit_msg and not commit_partial:
                         print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
                     prompt_msg = (
                         "テストが失敗しましたが、コミットを実行しますか？ [Enter/Space: y, 他: n]: "
                         if test_failed
                         else "このメッセージでコミットを実行しますか？ [Enter/Space: y, 他: n]: "
                     )
-                    should_commit = False if test_failed else getattr(parsed_args, "yes", False)
+                    should_commit = True if commit_partial else (False if test_failed else getattr(parsed_args, "yes", False))
                     if not should_commit:
                         should_commit = _prompt_user_confirmation(prompt_msg, default=False)
 
@@ -958,6 +970,7 @@ def main(args: Optional[List[str]] = None) -> int:
                             if staged_diff:
                                 subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
                                 print("✔ コミットが完了しました。")
+                                committed_successfully = True
                                 push_prompt = "リモートリポジトリにプッシュ (git push) しますか？ [Enter/Space: y, 他: n]: "
                                 if _prompt_user_confirmation(push_prompt, default=False):
                                     print("プッシュを実行中...")
@@ -986,12 +999,12 @@ def main(args: Optional[List[str]] = None) -> int:
                         if test_failed:
                             return 1
 
-            if total_success > 0 and last_fail == 0 and not getattr(parsed_args, "no_sync", False):
+            if total_success > 0 and (last_fail == 0 or commit_partial) and not getattr(parsed_args, "no_sync", False):
                 action_name = "リバート" if is_revert else "置換"
                 should_bloat = not is_revert and not getattr(parsed_args, "no_bloat", False)
                 _trigger_auto_sync(project_root, action_name, check_bloat=should_bloat)
 
-            return 0 if last_fail == 0 else 1
+            return 0 if (last_fail == 0 or committed_successfully) else 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()
