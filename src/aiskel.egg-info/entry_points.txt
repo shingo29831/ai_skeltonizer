@@ -1,0 +1,3 @@
+[console_scripts]
+aiskel = aiskel.cli:main
+skelify = aiskel.cli:main

@@ -1,46 +1,87 @@
-# Role: Git管理から除外すべきPython開発環境、ビルド成果物、AIコンテキスト出力フォルダなどの不要ファイルを定義する。
-
-# --- Python バイトコード・キャッシュ ---
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 
-# --- 仮想環境 ---
+# Virtual Environments
 venv/
-.venv/
 env/
+.env/
+.venv/
+
+# Environment Variables
 .env
 
-# --- ビルド・パッケージング成果物 ---
-build/
-dist/
-*.egg-info/
-.eggs/
-wheels/
-
-# --- テスト・静的解析ツール ---
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-*.cover
-.tox/
-.nox/
-
-# --- エディタ・IDE・OS関連 ---
+# IDEs and Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Project Specific
+# Downloaded binaries
+ffmpeg.exe
+
+# Logs and Analysis Dumps
+*.log
+ffmpeg_error.log
+filtered_match_logs*.txt
+filtered_log*.txt
+potential_logs*.txt
+useless_logs*.txt
+
+# Match data and recordings
+records/*
+match_*.json
+*.mkv
+*.mp4
+*.jpg
+
+# OS generated files
 .DS_Store
 Thumbs.db
 
-# --- py-skeletonizer の出力フォルダ（AI用コンテキストコピー） ---
-*_ai_context/
-ai_context_output/
-ai_context_bundle.*
-
 # aiskel output directory
 ai_meta/
+
+auth.key
+auth.pub
+main.dist/
+main.build/
+Output/
+update.zip
+*.exe
+.exe
+
+main.onefile-build/
+
+# C++ Audio Processor Build
+cpp/audio_processor/build/
+cpp/audio_processor/out/
+cpp/audio_processor/.vs/
+cpp/audio_processor/CMakeCache.txt
+cpp/audio_processor/CMakeFiles/
+cpp/audio_processor/Makefile
+cpp/audio_processor/cmake_install.cmake
+
+# Third-party binaries and huge AI models (NVIDIA Maxine, DeepFilterNet, RNNoise)
+cpp/third_party/nvidia_maxine/bin/*.dll
+cpp/third_party/nvidia_maxine/models/
+cpp/audio_processor/models/
+*.tar.gz
+bin/*.rnnn
+*.rnnn
+
+# C++ Build Artifacts & Dynamic Libraries
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+build/
+out/
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake

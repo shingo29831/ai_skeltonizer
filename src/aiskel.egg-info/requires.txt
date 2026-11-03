@@ -1,0 +1,13 @@
+pathspec>=0.12.0
+tree-sitter>=0.22.0
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-c-sharp
+
+[dev]
+pytest>=8.0.0
+mypy>=1.8.0
+ruff>=0.3.0
