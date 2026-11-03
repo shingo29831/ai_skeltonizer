@@ -22,7 +22,7 @@ def validate_python_syntax(
     to_delete = files_to_delete or set()
 
     for path, content in file_contents.items():
-        if path.suffix.lower() == ".py" and path not in to_delete and path in modified_files:
+        if path.suffix.lower() == ".py" and path not in to_delete and path in modified_files and content is not None:
             try:
                 ast.parse(content, filename=str(path))
             except SyntaxError as se:
@@ -89,11 +89,12 @@ def commit_patch_transaction(
 
     for path in modified_files:
         if path not in files_to_delete and path in file_contents and path not in syntax_error_files:
-            path.parent.mkdir(parents=True, exist_ok=True)
             new_content = file_contents[path]
-            if new_content and not new_content.endswith("\n"):
-                new_content += "\n"
-            path.write_text(new_content, encoding="utf-8")
-            written_files.add(path)
+            if new_content is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if new_content and not new_content.endswith("\n"):
+                    new_content += "\n"
+                path.write_text(new_content, encoding="utf-8")
+                written_files.add(path)
 
     return PatchResult(success_count, fail_count, skipped_count, written_files, failed_details)

@@ -47,6 +47,21 @@ _DELIMITER_START = re.compile(r'^[ \t]*<{4,}\s*$', re.MULTILINE)
 _DELIMITER_MID = re.compile(r'^[ \t]*={4,}\s*$', re.MULTILINE)
 _DELIMITER_END = re.compile(r'^[ \t]*>{4,}\s*$', re.MULTILINE)
 
+def _safe_read_text(file_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    # なぜ必要か: バイナリや非UTF-8ファイルを安全に判別しクラッシュを防ぐため
+    try:
+        raw_bytes = file_path.read_bytes()
+    except OSError as e:
+        return None, f"ファイル読み込みエラー: {e}"
+    if b"\x00" in raw_bytes[:8192]:
+        return None, "バイナリファイルのためテキストパッチを適用できません"
+    for enc in ("utf-8", "utf-8-sig", "cp932", "latin-1"):
+        try:
+            return raw_bytes.decode(enc), None
+        except UnicodeDecodeError:
+            continue
+    return None, "テキストとしてデコードできません"
+
 def _check_and_warn_delimiter(line: str, line_no: int) -> None:
     # なぜ必要か: AIが標準仕様(4文字)と異なる文字数の区切りを出力した際にユーザーに注意喚起するため
     stripped = line.strip()
@@ -104,15 +119,6 @@ def apply_patch(
             target_node = file_match.group(2)
             file_delete_flag = bool(file_match.group(3)) or any(line.strip().lower().startswith(kw) for kw in ("削除:", "delete:", "remove:"))
             
-            if current_file not in file_contents:
-                if current_file.exists():
-                    orig_text = current_file.read_text(encoding="utf-8")
-                    file_contents[current_file] = orig_text
-                    original_contents[current_file] = orig_text
-                else:
-                    file_contents[current_file] = ""
-                    original_contents[current_file] = ""
-            
             # ブロックを伴わない単体ファイル削除ディレクティブの処理
             if file_delete_flag and (i + 1 >= len(lines) or not _DELIMITER_START.match(lines[i+1])):
                 try:
@@ -126,10 +132,23 @@ def apply_patch(
                     files_to_delete.add(current_file)
                     modified_files.add(current_file)
                     file_contents[current_file] = ""
+                    original_contents[current_file] = ""
                     print(f"🗑 ファイル削除成功: {disp_path}")
                     success_count += 1
                 i += 1
                 continue
+
+            if current_file not in file_contents:
+                if file_delete_flag:
+                    file_contents[current_file] = ""
+                    original_contents[current_file] = ""
+                elif current_file.exists():
+                    orig_text, _ = _safe_read_text(current_file)
+                    file_contents[current_file] = orig_text
+                    original_contents[current_file] = orig_text
+                else:
+                    file_contents[current_file] = ""
+                    original_contents[current_file] = ""
 
             i += 1
             continue
@@ -215,6 +234,14 @@ def apply_patch(
                     file_contents[current_file] = ""
                     print(f"🗑 ファイル削除成功: {disp_path}")
                     success_count += 1
+                i += 1
+                continue
+
+            if content is None:
+                action_label = "リバート" if revert else "適用"
+                print(f"✖ {action_label}失敗: {disp_path} (パッチ行 {block_line_no})\n  -> バイナリファイルまたは読み込み不能なファイルです")
+                failed_details.append(f"{disp_path}: {action_label}失敗 (パッチ行 {block_line_no})\n  -> バイナリファイルまたは読み込み不能なファイルです")
+                fail_count += 1
                 i += 1
                 continue
 
