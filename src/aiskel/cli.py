@@ -8,22 +8,16 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple, Union
 
-from .config import SkeletonConfig, load_test_command_from_meta, ensure_default_config_file, load_bundle_filename_from_meta, load_bloat_config_from_meta
-from .core.scanner import get_target_files, generate_tree_text
+from .config import SkeletonConfig, load_bloat_config_from_meta
 from .core.bloat_detector import (
     detect_bloated_files,
     format_bloat_report,
-    check_and_warn_bloated_files,
     DEFAULT_BLOAT_MAX_LINES,
     DEFAULT_BLOAT_MAX_CHARS,
 )
-from .core.syncer import ProjectSyncer
-from .core.layer_filter import filter_logic_files
-from .core.git_diff_analyzer import get_staged_or_modified_files, parse_direct_dependencies
-from .core.token_counter import format_token_display, estimate_tokens
-from .core.patch_applier import apply_patch
+from .core.token_counter import estimate_tokens
 from .core.clipboard import set_clipboard_text
-from .core.code_extractor import extract_and_format_snippets, DEFAULT_MAX_CHARS
+from .core.code_extractor import extract_and_format_snippets
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
 from .core.watcher import watch_project
 from .core.test_runner import run_validation_test, try_handle_cd_command
@@ -40,6 +34,14 @@ from .cli_parser import (
     process_comma_separated_args,
     _normalize_cli_args,
     _process_comma_separated_args,
+)
+from .cli_sync import (
+    resolve_output_dir,
+    run_sync,
+    trigger_auto_sync,
+    _resolve_output_dir,
+    _run_sync,
+    _trigger_auto_sync,
 )
 
 _run_validation_test = run_validation_test
