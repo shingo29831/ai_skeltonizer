@@ -12,8 +12,11 @@ from .config import SkeletonConfig, load_bloat_config_from_meta
 from .core.bloat_detector import (
     detect_bloated_files,
     format_bloat_report,
+    format_top_files_report,
+    scan_project_files,
     DEFAULT_BLOAT_MAX_LINES,
     DEFAULT_BLOAT_MAX_CHARS,
+    DEFAULT_TOP_FILES_COUNT,
 )
 from .core.token_counter import estimate_tokens
 from .core.clipboard import set_clipboard_text
@@ -69,7 +72,7 @@ def main(args: Optional[List[str]] = None) -> int:
             cli_excludes = _process_comma_separated_args(parsed_args.exclude)
             all_excludes = meta_excludes | cli_excludes
 
-            bloated = detect_bloated_files(
+            bloated, all_files = scan_project_files(
                 project_root=project_root,
                 max_lines=max_lines,
                 max_chars=max_chars,
@@ -79,6 +82,12 @@ def main(args: Optional[List[str]] = None) -> int:
             if not bloated:
                 if not getattr(parsed_args, "quiet", False):
                     print(f"✔ 肥大化ファイルは検出されませんでした (基準: 行数 >= {max_lines}, 文字数 >= {max_chars:,})")
+                    top_count = getattr(parsed_args, "top_count", DEFAULT_TOP_FILES_COUNT)
+                    if top_count > 0 and all_files:
+                        all_files.sort(key=lambda x: (x.chars, x.lines), reverse=True)
+                        report = format_top_files_report(all_files[:top_count])
+                        if report:
+                            print(f"\n{report}")
                 return 0
 
             report = format_bloat_report(bloated, max_lines=max_lines, max_chars=max_chars)

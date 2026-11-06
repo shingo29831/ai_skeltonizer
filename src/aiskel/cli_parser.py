@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Set
 
-from .core.bloat_detector import DEFAULT_BLOAT_MAX_CHARS, DEFAULT_BLOAT_MAX_LINES
+from .core.bloat_detector import DEFAULT_BLOAT_MAX_CHARS, DEFAULT_BLOAT_MAX_LINES, DEFAULT_TOP_FILES_COUNT
 from .core.code_extractor import DEFAULT_MAX_CHARS
 
 
@@ -140,6 +140,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     bloat_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
     bloat_parser.add_argument("-l", "--max-lines", type=int, default=None, help=f"肥大化とみなす最大行数 (デフォルト: {DEFAULT_BLOAT_MAX_LINES})")
     bloat_parser.add_argument("-c", "-C", "--max-chars", type=int, default=None, help=f"肥大化とみなす最大文字数 (デフォルト: {DEFAULT_BLOAT_MAX_CHARS:,})")
+    bloat_parser.add_argument("-n", "--top", "--limit", type=int, default=DEFAULT_TOP_FILES_COUNT, dest="top_count", help=f"肥大化ファイル未検出時に表示する上位ファイル数 (デフォルト: {DEFAULT_TOP_FILES_COUNT})")
     bloat_parser.add_argument("-e", "--exclude", action="append", default=[], help="追加で除外するファイルまたはディレクトリパス (カンマ区切り可)")
     bloat_parser.add_argument("--no-clipboard", action="store_true", help="クリップボードへの自動保存を行わず標準出力のみ行います")
     bloat_parser.add_argument("-q", "--quiet", action="store_true", help="肥大化ファイルが検出されなかった場合のメッセージを抑制します")

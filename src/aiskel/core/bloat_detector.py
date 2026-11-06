@@ -2,12 +2,13 @@
 import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from .scanner import get_target_files
 
 DEFAULT_BLOAT_MAX_LINES = 500
 DEFAULT_BLOAT_MAX_CHARS = 25000
+DEFAULT_TOP_FILES_COUNT = 5
 
 
 @dataclass
@@ -60,19 +61,20 @@ def count_file_metrics(file_path: Path) -> Optional[tuple[int, int]]:
     return lines, chars
 
 
-def detect_bloated_files(
+def scan_project_files(
     project_root: Path,
     target_files: Optional[List[Path]] = None,
     max_lines: int = DEFAULT_BLOAT_MAX_LINES,
     max_chars: int = DEFAULT_BLOAT_MAX_CHARS,
     exclude_paths: Optional[Set[str]] = None,
-) -> List[BloatFileInfo]:
-    """設定値以上の行数または文字数を持つ肥大化ファイルを検出する"""
+) -> Tuple[List[BloatFileInfo], List[BloatFileInfo]]:
+    """プロジェクト内ファイルを走査し、(肥大化ファイル一覧, 全ファイル一覧) を返す"""
     if target_files is None:
         target_files = get_target_files(project_root)
 
     excludes = exclude_paths or set()
     bloated: List[BloatFileInfo] = []
+    all_files: List[BloatFileInfo] = []
 
     for f in target_files:
         if is_path_excluded(f, project_root, excludes):
@@ -86,26 +88,63 @@ def detect_bloated_files(
         exceeds_lines = lines >= max_lines
         exceeds_chars = chars >= max_chars
 
-        if exceeds_lines or exceeds_chars:
-            try:
-                rel = f.relative_to(project_root).as_posix()
-            except ValueError:
-                rel = f.as_posix()
+        try:
+            rel = f.relative_to(project_root).as_posix()
+        except ValueError:
+            rel = f.as_posix()
 
-            bloated.append(
-                BloatFileInfo(
-                    path=f,
-                    rel_path=rel,
-                    lines=lines,
-                    chars=chars,
-                    exceeds_lines=exceeds_lines,
-                    exceeds_chars=exceeds_chars,
-                )
-            )
+        info = BloatFileInfo(
+            path=f,
+            rel_path=rel,
+            lines=lines,
+            chars=chars,
+            exceeds_lines=exceeds_lines,
+            exceeds_chars=exceeds_chars,
+        )
+        all_files.append(info)
+
+        if exceeds_lines or exceeds_chars:
+            bloated.append(info)
 
     # なぜ必要か: より重篤な肥大化ファイルから優先して分割対処させるため
     bloated.sort(key=lambda x: (x.lines / max(max_lines, 1) + x.chars / max(max_chars, 1)), reverse=True)
+    return bloated, all_files
+
+
+def detect_bloated_files(
+    project_root: Path,
+    target_files: Optional[List[Path]] = None,
+    max_lines: int = DEFAULT_BLOAT_MAX_LINES,
+    max_chars: int = DEFAULT_BLOAT_MAX_CHARS,
+    exclude_paths: Optional[Set[str]] = None,
+) -> List[BloatFileInfo]:
+    """設定値以上の行数または文字数を持つ肥大化ファイルを検出する"""
+    bloated, _ = scan_project_files(
+        project_root=project_root,
+        target_files=target_files,
+        max_lines=max_lines,
+        max_chars=max_chars,
+        exclude_paths=exclude_paths,
+    )
     return bloated
+
+
+def get_largest_files(
+    project_root: Path,
+    target_files: Optional[List[Path]] = None,
+    limit: int = DEFAULT_TOP_FILES_COUNT,
+    exclude_paths: Optional[Set[str]] = None,
+) -> List[BloatFileInfo]:
+    """ファイルサイズ（文字数順）が大きい上位ファイルを抽出する"""
+    if limit <= 0:
+        return []
+    _, all_files = scan_project_files(
+        project_root=project_root,
+        target_files=target_files,
+        exclude_paths=exclude_paths,
+    )
+    all_files.sort(key=lambda x: (x.chars, x.lines), reverse=True)
+    return all_files[:limit]
 
 
 def format_bloat_report(bloated_files: List[BloatFileInfo], max_lines: int, max_chars: int) -> str:
@@ -128,6 +167,16 @@ def format_bloat_report(bloated_files: List[BloatFileInfo], max_lines: int, max_
         reason_str = "+".join(reasons)
         lines.append(f"- {item.rel_path}: {item.lines} lines, {item.chars:,} chars ({reason_str})")
 
+    return "\n".join(lines)
+
+
+def format_top_files_report(top_files: List[BloatFileInfo]) -> str:
+    """肥大化ファイル未検出時に表示する上位ファイルレポートを生成する"""
+    if not top_files:
+        return ""
+    lines = [f"📊 ファイルサイズ上位 ({len(top_files)}件):"]
+    for i, item in enumerate(top_files, 1):
+        lines.append(f"  {i}. {item.rel_path}: {item.lines} lines, {item.chars:,} chars")
     return "\n".join(lines)
 
 
