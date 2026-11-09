@@ -27,6 +27,7 @@ LANGUAGE_EXTENSIONS = {
     ".rb": "ruby",
     ".php": "php",
     ".cs": "csharp",
+    ".dart": "dart",
     ".html": "html",
     ".css": "css",
     ".scss": "scss",

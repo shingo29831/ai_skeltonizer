@@ -22,7 +22,8 @@ dependencies = [
     "tree-sitter-typescript",
     "tree-sitter-c",
     "tree-sitter-cpp",
-    "tree-sitter-c-sharp"
+    "tree-sitter-c-sharp",
+    "tree-sitter-dart"
 ]
 
 [project.optional-dependencies]

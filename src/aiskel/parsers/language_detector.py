@@ -6,6 +6,7 @@ from .python_parser import PythonParser
 from .javascript_parser import JavascriptParser
 from .cpp_parser import CppParser
 from .csharp_parser import CSharpParser
+from .dart_parser import DartParser
 
 def get_parser_for_file(file_path: Path) -> Optional[BaseParser]:
     ext = file_path.suffix.lower()
@@ -22,6 +23,12 @@ def get_parser_for_file(file_path: Path) -> Optional[BaseParser]:
     elif ext == '.cs':
         try:
             return CSharpParser()
+        except ImportError:
+            # なぜ必要か: 未導入環境での全体クラッシュを防止しフルコード保持へ安全にフォールバック
+            return None
+    elif ext == '.dart':
+        try:
+            return DartParser()
         except ImportError:
             # なぜ必要か: 未導入環境での全体クラッシュを防止しフルコード保持へ安全にフォールバック
             return None
