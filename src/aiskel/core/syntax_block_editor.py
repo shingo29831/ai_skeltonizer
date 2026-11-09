@@ -291,11 +291,11 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
             r'(?:[a-zA-Z0-9_<>\[\],\?\s\*&]+\s+)?' + re.escape(block_name) + r'\s*\([^{;]*\)\s*(?:where\s+[^{]+)?(?:=>|\{|$)'
             r')'
         )
-    elif block_type in ('class', 'interface', 'struct', 'record', 'enum', 'type'):
-        # なぜ必要か: C#/TS等の修飾子(public/internal等)や型種別(interface/struct等)を捕捉
+    elif block_type in ('class', 'interface', 'struct', 'record', 'enum', 'type', 'protocol', 'actor', 'extension'):
+        # なぜ必要か: Swift等のprotocol/actor/extensionや型種別を捕捉
         pattern = re.compile(
             r'^([ \t]*)' + MODIFIER_PREFIX +
-            r'(?:class|interface|struct|record|enum)\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)'
+            r'(?:class|interface|struct|record|enum|protocol|actor|extension)\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)'
         )
     elif block_type in ('constant', 'const', 'var', 'variable'):
         # なぜ必要か: モジュール定数・変数代入(型注釈やJSのexport/const/let/var対応)を確実に捕捉
@@ -393,10 +393,10 @@ def delete_block_from_lines(target_lines: List[str], block_name: str, block_type
     return True, cleaned_lines
 
 def extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
-    # なぜ必要か: C#/TS/Java等の修飾子や型種別(interface/struct等)を網羅的に捕捉
+    # なぜ必要か: C#/TS/Java/Swift等の修飾子や型種別(protocol/actor/extension等)を網羅的に捕捉
     type_regex = re.compile(
         r'^[ \t]*' + MODIFIER_PREFIX +
-        r'(class|interface|struct|record|enum)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)'
+        r'(class|interface|struct|record|enum|protocol|actor|extension)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)'
     )
     func_regex = re.compile(
         r'^[ \t]*' + MODIFIER_PREFIX +

@@ -8,6 +8,7 @@ from .cpp_parser import CppParser
 from .csharp_parser import CSharpParser
 from .dart_parser import DartParser
 from .java_parser import JavaParser
+from .swift_parser import SwiftParser
 
 def get_parser_for_file(file_path: Path) -> Optional[BaseParser]:
     ext = file_path.suffix.lower()
@@ -36,6 +37,12 @@ def get_parser_for_file(file_path: Path) -> Optional[BaseParser]:
     elif ext == '.java':
         try:
             return JavaParser()
+        except ImportError:
+            # なぜ必要か: 未導入環境での全体クラッシュを防止しフルコード保持へ安全にフォールバック
+            return None
+    elif ext == '.swift':
+        try:
+            return SwiftParser()
         except ImportError:
             # なぜ必要か: 未導入環境での全体クラッシュを防止しフルコード保持へ安全にフォールバック
             return None

@@ -13,6 +13,7 @@ tree-sitter-cpp
 tree-sitter-c-sharp
 tree-sitter-dart
 tree-sitter-java
+tree-sitter-swift
 
 # --- 開発・テスト用ライブラリ (品質保証・静的解析用) ---
 # 振る舞いテストの実行
