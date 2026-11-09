@@ -314,18 +314,20 @@ def apply_patch(
                     b_match = BLOCK_PATTERN.match(first_non_empty)
                     if b_match:
                         b_type = b_match.group(1) or 'function'
-                        b_name = b_match.group(2) or b_match.group(3)
-                        content_lines = content.splitlines()
-                        ok, new_lines = delete_block_from_lines(content_lines, b_name, b_type)
-                        if ok:
-                            new_content = "\n".join(new_lines)
-                            if new_content and not new_content.endswith("\n"):
-                                new_content += "\n"
-                            file_contents[current_file] = new_content
-                            print(f"🗑 関数/クラス削除成功: {b_name} ({disp_path})")
-                            success_count += 1
-                            modified_files.add(current_file)
-                            continue
+                        # なぜ必要か: C#等の型修飾子付きメソッド定義(グループ4)の削除失敗・例外を防止
+                        b_name = b_match.group(2) or b_match.group(3) or b_match.group(4)
+                        if b_name:
+                            content_lines = content.splitlines()
+                            ok, new_lines = delete_block_from_lines(content_lines, b_name, b_type)
+                            if ok:
+                                new_content = "\n".join(new_lines)
+                                if new_content and not new_content.endswith("\n"):
+                                    new_content += "\n"
+                                file_contents[current_file] = new_content
+                                print(f"🗑 関数/クラス削除成功: {b_name} ({disp_path})")
+                                success_count += 1
+                                modified_files.add(current_file)
+                                continue
 
                 new_content, error_msg, is_skipped = find_and_replace(content, search_lines, replace_lines, force_replace)
                 if is_skipped:

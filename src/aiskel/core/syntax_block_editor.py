@@ -279,6 +279,10 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
     行リストから指定された関数またはクラスの定義範囲（開始行、終了行）を返す。
     なぜ必要か: f-stringや辞書リテラル内の波括弧をブロック終了と誤認する致命的欠落バグを言語仕様レベルで根本解決
     """
+    # なぜ必要か: None等の不正値によるre.escapeのTypeErrorクラッシュを未然防止
+    if not block_name:
+        return -1, -1
+
     if block_type in ('def', 'function', 'func', 'fn', 'method'):
         pattern = re.compile(
             r'^([ \t]*)' + MODIFIER_PREFIX + r'(?:'
@@ -376,6 +380,8 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
 
 def delete_block_from_lines(target_lines: List[str], block_name: str, block_type: str = 'function') -> Tuple[bool, List[str]]:
     # なぜ必要か: 指定された関数やクラスの全構文範囲（デコレータ含む）を検出し、安全かつ過剰空行を残さず消去するため
+    if not block_name:
+        return False, target_lines
     t_start, t_end = find_block_range(target_lines, block_name, block_type)
     if t_start == -1 and block_type == 'function':
         t_start, t_end = find_block_range(target_lines, block_name, 'class')
