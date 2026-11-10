@@ -148,6 +148,20 @@ def main(args: Optional[List[str]] = None) -> int:
                 return 0
             except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
                 print(f"✖ コピー失敗: {e}", file=sys.stderr)
+                cmd_flag = "-d " if with_deps else ""
+                specs_str = " ".join(copy_specs)
+                error_report = (
+                    f"[aiskel c コード抽出エラー]\n"
+                    f"コマンド: aiskel c {cmd_flag}{specs_str}\n"
+                    f"失敗原因: {e}\n\n"
+                    f"上記エラーを解消するための正しい対象指定（ファイルパスやノード名）を提示してください。"
+                )
+                # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存
+                try:
+                    set_clipboard_text(error_report)
+                    print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
+                except Exception:
+                    pass
                 return 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("docs", "d"):
