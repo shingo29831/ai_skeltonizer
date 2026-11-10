@@ -27,6 +27,8 @@ LANGUAGE_EXTENSIONS = {
     ".rb": "ruby",
     ".php": "php",
     ".cs": "csharp",
+    ".dart": "dart",
+    ".swift": "swift",
     ".html": "html",
     ".css": "css",
     ".scss": "scss",
@@ -148,7 +150,7 @@ def extract_and_format_snippets(
             else:
                 items_text = []
                 for b_type, b_name, s_start, s_end in blocks:
-                    type_name = "class" if b_type == "class" else ("constant" if b_type == "constant" else "function")
+                    type_name = "class" if b_type in ("class", "interface", "struct", "record", "enum", "protocol", "actor", "extension") else ("constant" if b_type == "constant" else "function")
                     items_text.append(f"  - [{type_name}] {b_name} (L{s_start + 1}-L{s_end})")
                 summary_list = "\n".join(items_text)
                 header = f"ファイルパス: {rel_display_path} (定義ノード一覧: {len(blocks)}件)"

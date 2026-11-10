@@ -3,10 +3,21 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Set
 
+MODIFIER_PREFIX = (
+    r'(?:(?:public|private|protected|internal|file|static|abstract|sealed|'
+    r'final|partial|readonly|override|virtual|new|async|unsafe|extern|export|default|inline)\s+)*'
+)
+
+CONTROL_FLOW_KEYWORDS = {
+    'if', 'else', 'for', 'foreach', 'while', 'do', 'switch', 'case', 'catch',
+    'finally', 'using', 'lock', 'fixed', 'return', 'throw', 'new', 'get', 'set'
+}
+
 BLOCK_PATTERN = re.compile(
-    r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
-    r'(def|function|class)\s+([a-zA-Z0-9_]+)|'
-    r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
+    r'^[ \t]*' + MODIFIER_PREFIX + r'(?:'
+    r'(def|function|func|fn|class|interface|struct|record|enum)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)|'
+    r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>|'
+    r'(?:(?:public|private|protected|internal|file|static|abstract|sealed|final|partial|readonly|override|virtual|new|async|unsafe|extern)\s+)+(?:[a-zA-Z0-9_<>\[\],\?\s\*&]+\s+)?([a-zA-Z0-9_]+)\s*\('
     r')'
 )
 
@@ -268,16 +279,24 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
     行リストから指定された関数またはクラスの定義範囲（開始行、終了行）を返す。
     なぜ必要か: f-stringや辞書リテラル内の波括弧をブロック終了と誤認する致命的欠落バグを言語仕様レベルで根本解決
     """
-    if block_type in ('def', 'function'):
+    # なぜ必要か: None等の不正値によるre.escapeのTypeErrorクラッシュを未然防止
+    if not block_name:
+        return -1, -1
+
+    if block_type in ('def', 'function', 'func', 'fn', 'method'):
         pattern = re.compile(
-            r'^([ \t]*)(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
-            r'(?:def|function)\s+' + re.escape(block_name) + r'\s*[\(\{]|'
-            r'(?:const|let|var)\s+' + re.escape(block_name) + r'\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
+            r'^([ \t]*)' + MODIFIER_PREFIX + r'(?:'
+            r'(?:def|function|func|fn)\s+' + re.escape(block_name) + r'\s*[\(\{]|'
+            r'(?:const|let|var)\s+' + re.escape(block_name) + r'\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>|'
+            r'(?:[a-zA-Z0-9_<>\[\],\?\s\*&]+\s+)?' + re.escape(block_name) + r'\s*\([^{;]*\)\s*(?:where\s+[^{]+)?(?:=>|\{|$)'
             r')'
         )
-    elif block_type == 'class':
-        # なぜ必要か: Pythonのコロン(:)や型引数([, <)を含めクラス定義シグネチャを言語横断で確実に捕捉
-        pattern = re.compile(r'^([ \t]*)(?:export\s+)?(?:default\s+)?class\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)')
+    elif block_type in ('class', 'interface', 'struct', 'record', 'enum', 'type', 'protocol', 'actor', 'extension'):
+        # なぜ必要か: Swift等のprotocol/actor/extensionや型種別を捕捉
+        pattern = re.compile(
+            r'^([ \t]*)' + MODIFIER_PREFIX +
+            r'(?:class|interface|struct|record|enum|protocol|actor|extension)\s+' + re.escape(block_name) + r'(?:[\s\(\{:<\[]|$)'
+        )
     elif block_type in ('constant', 'const', 'var', 'variable'):
         # なぜ必要か: モジュール定数・変数代入(型注釈やJSのexport/const/let/var対応)を確実に捕捉
         pattern = re.compile(
@@ -303,7 +322,7 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
     if block_type in ('constant', 'const', 'var', 'variable'):
         return header_idx, find_assignment_end(lines, header_idx)
 
-    # なぜ必要か: デコレータ行(@...)を含めたブロック先頭を特定するため
+    # なぜ必要か: Pythonのデコレータ(@)やC#の属性([Attr])を含めたブロック先頭を特定
     start_idx = header_idx
     while start_idx > 0:
         prev_line = lines[start_idx - 1]
@@ -311,7 +330,8 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
         if not prev_stripped:
             break
         prev_indent = len(prev_line) - len(prev_line.lstrip())
-        if prev_indent == base_indent and prev_stripped.startswith('@'):
+        is_annot = prev_stripped.startswith('@') or (prev_stripped.startswith('[') and prev_stripped.endswith(']'))
+        if prev_indent == base_indent and is_annot:
             start_idx -= 1
         else:
             break
@@ -360,6 +380,8 @@ def find_block_range(lines: List[str], block_name: str, block_type: str) -> Tupl
 
 def delete_block_from_lines(target_lines: List[str], block_name: str, block_type: str = 'function') -> Tuple[bool, List[str]]:
     # なぜ必要か: 指定された関数やクラスの全構文範囲（デコレータ含む）を検出し、安全かつ過剰空行を残さず消去するため
+    if not block_name:
+        return False, target_lines
     t_start, t_end = find_block_range(target_lines, block_name, block_type)
     if t_start == -1 and block_type == 'function':
         t_start, t_end = find_block_range(target_lines, block_name, 'class')
@@ -371,12 +393,22 @@ def delete_block_from_lines(target_lines: List[str], block_name: str, block_type
     return True, cleaned_lines
 
 def extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
-    # なぜ必要か: クラス定義(コロンや型引数)及び関数定義を確実に捕捉する汎用ブロック正規表現
-    block_regex = re.compile(
-        r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:'
-        r'(def|class|function)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)|'
+    # なぜ必要か: C#/TS/Java/Swift等の修飾子や型種別(protocol/actor/extension等)を網羅的に捕捉
+    type_regex = re.compile(
+        r'^[ \t]*' + MODIFIER_PREFIX +
+        r'(class|interface|struct|record|enum|protocol|actor|extension)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)'
+    )
+    func_regex = re.compile(
+        r'^[ \t]*' + MODIFIER_PREFIX +
+        r'(?:'
+        r'(def|function|func|fn)\s+([a-zA-Z0-9_]+)(?:[\s\(\{:<\[]|$)|'
         r'(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>'
         r')'
+    )
+    typed_method_regex = re.compile(
+        r'^[ \t]*(?:(?:public|private|protected|internal|file|static|abstract|sealed|final|partial|readonly|override|virtual|new|async|unsafe|extern)\s+)+'
+        r'(?:[a-zA-Z0-9_<>\[\],\?\s\*&]+\s+)?'
+        r'([a-zA-Z0-9_]+)\s*\([^{;]*\)\s*(?:where\s+[^{]+)?(?:=>|\{|$)'
     )
     const_regex = re.compile(
         r'^([ \t]*)(?:export\s+)?(?:(?:const|let|var|readonly)\s+)?'
@@ -386,17 +418,35 @@ def extract_blocks(lines: List[str]) -> List[Tuple[str, str, int, int]]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        match = block_regex.match(line) or BLOCK_PATTERN.match(line)
-        if match:
-            b_type = match.group(1) or 'function'
-            b_name = match.group(2) or match.group(3)
+        b_type = None
+        b_name = None
+
+        type_match = type_regex.match(line)
+        if type_match:
+            b_type = type_match.group(1)
+            b_name = type_match.group(2)
+        else:
+            func_match = func_regex.match(line)
+            if func_match:
+                b_type = func_match.group(1) or 'function'
+                b_name = func_match.group(2) or func_match.group(3)
+            else:
+                method_match = typed_method_regex.match(line)
+                if method_match:
+                    candidate_name = method_match.group(1)
+                    if candidate_name not in CONTROL_FLOW_KEYWORDS:
+                        b_type = 'function'
+                        b_name = candidate_name
+
+        if b_type and b_name:
             actual_start = i
             while actual_start > 0:
                 prev_line = lines[actual_start - 1]
                 prev_stripped = prev_line.strip()
                 if not prev_stripped:
                     break
-                if prev_stripped.startswith('@'):
+                is_annot = prev_stripped.startswith('@') or (prev_stripped.startswith('[') and prev_stripped.endswith(']'))
+                if is_annot:
                     actual_start -= 1
                 else:
                     break
