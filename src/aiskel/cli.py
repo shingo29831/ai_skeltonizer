@@ -82,28 +82,34 @@ def main(args: Optional[List[str]] = None) -> int:
             )
 
             if not bloated:
-                if not getattr(parsed_args, "quiet", False):
-                    print(f"✔ 肥大化ファイルは検出されませんでした (基準: 行数 >= {max_lines}, 文字数 >= {max_chars:,})")
-                    top_count = getattr(parsed_args, "top_count", DEFAULT_TOP_FILES_COUNT)
-                    if top_count > 0 and all_files:
-                        all_files.sort(key=lambda x: (x.chars, x.lines), reverse=True)
-                        report = format_top_files_report(all_files[:top_count])
-                        if report:
-                            print(f"\n{report}")
-                return 0
+                if getattr(parsed_args, "quiet", False):
+                    return 0
+                print(f"✔ 肥大化ファイルは検出されませんでした (基準: 行数 >= {max_lines}, 文字数 >= {max_chars:,})")
+                top_count = getattr(parsed_args, "top_count", DEFAULT_TOP_FILES_COUNT)
+                report = ""
+                top_files_count = 0
+                if top_count is not None and top_count > 0 and all_files:
+                    all_files.sort(key=lambda x: (x.chars, x.lines), reverse=True)
+                    top_files = all_files[:top_count]
+                    top_files_count = len(top_files)
+                    report = format_top_files_report(top_files)
+                    if report:
+                        print(f"\n{report}")
+                copy_message = f"\n📋 ファイルサイズ上位 ({top_files_count}件) をクリップボードにコピーしました。"
+            else:
+                report = format_bloat_report(bloated, max_lines=max_lines, max_chars=max_chars)
+                print(report)
+                copy_message = f"\n📋 肥大化ファイル一覧 ({len(bloated)}件) をクリップボードにコピーしました (AIチャットにそのままペースト可能)。"
 
-            report = format_bloat_report(bloated, max_lines=max_lines, max_chars=max_chars)
-            print(report)
-
-            if not getattr(parsed_args, "no_clipboard", False):
+            if report and not getattr(parsed_args, "no_clipboard", False):
                 clipboard_ok = False
                 try:
                     set_clipboard_text(report)
                     clipboard_ok = True
-                    print(f"\n📋 肥大化ファイル一覧 ({len(bloated)}件) をクリップボードにコピーしました (AIチャットにそのままペースト可能)。")
+                    print(copy_message)
                 except Exception as e:
                     print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
-                if clipboard_ok and not getattr(parsed_args, "no_focus", False):
+                if bloated and clipboard_ok and not getattr(parsed_args, "no_focus", False):
                     try:
                         if focus_default_browser(interactive_only=True):
                             print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
