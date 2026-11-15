@@ -1,11 +1,13 @@
 """Module: @role: AIパッチの適用・リバート処理、対話式継続適用、テスト検証およびコミット実行を担当する。"""
 import argparse
+import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Optional, Set
+from typing import Callable, List, Optional, Set
 
 from .cli_commit import (
     clear_pending_commit,
@@ -14,10 +16,13 @@ from .cli_commit import (
 )
 from .cli_interaction import (
     extract_commit_message,
+    prompt_user_command,
     prompt_user_confirmation,
     rollback_modified_files,
 )
+from .cli_parser import parse_arguments
 from .cli_sync import ensure_gitignore_updated
+from .core.patch_parser import is_file_deletion_patch
 from .config import ensure_default_config_file, load_test_command_from_meta
 from .core.clipboard import set_clipboard_text
 from .core.patch_applier import apply_patch
@@ -54,9 +59,129 @@ def get_clipboard_text() -> str:
         return ""
 
 
+_COMMANDS_WITH_DIR_OPT = {"apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "copy", "c", "cp"}
+_BLOAT_VALUE_OPTS = {"-l", "--max-lines", "-c", "-C", "--max-chars", "-n", "--top", "--limit", "-e", "--exclude"}
+
+
+def _strip_outer_quotes(text: str) -> str:
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        return text[1:-1]
+    return text
+
+
+def _split_command_args(cmd_str: str) -> Optional[List[str]]:
+    # なぜ必要か: Windowsパスのバックスラッシュがshlexで消失するのを防ぐため
+    is_posix = os.name != "nt"
+    try:
+        tokens = shlex.split(cmd_str, posix=is_posix)
+    except ValueError as e:
+        print(f"⚠ コマンドの構文が不正です: {e}", file=sys.stderr)
+        return None
+    if not is_posix:
+        cleaned = []
+        for tok in tokens:
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'"):
+                cleaned.append(tok[1:-1])
+            elif "=" in tok and tok.startswith("-"):
+                opt, val = tok.split("=", 1)
+                cleaned.append(f"{opt}={_strip_outer_quotes(val)}")
+            else:
+                cleaned.append(tok)
+        return cleaned
+    return tokens
+
+
+def _inject_project_root_if_needed(tokens: List[str], project_root: Path) -> List[str]:
+    if not tokens or project_root == Path(".").resolve():
+        return tokens
+    cmd = tokens[0]
+    if cmd in _COMMANDS_WITH_DIR_OPT:
+        if any(t == "--dir" or t.startswith("--dir=") for t in tokens[1:]):
+            return tokens
+        return [cmd, "--dir", str(project_root)] + tokens[1:]
+    if cmd in ("bloat", "b", "size"):
+        i = 1
+        has_pos = False
+        while i < len(tokens):
+            t = tokens[i]
+            if t in _BLOAT_VALUE_OPTS:
+                i += 2
+            elif t.startswith("-"):
+                i += 1
+            else:
+                has_pos = True
+                break
+        if not has_pos:
+            return tokens + [str(project_root)]
+    return tokens
+
+
+def _execute_subcommand(
+    tokens: List[str],
+    on_run_command: Optional[Callable[[List[str]], int]],
+) -> int:
+    runner = on_run_command
+    if runner is None:
+        from .cli import main as cli_main
+        runner = cli_main
+    try:
+        return runner(tokens)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 1
+
+
+def _has_applicable_patch_content(patch_text: str) -> bool:
+    return bool(patch_text and (re.search(r"<{4,}", patch_text) or is_file_deletion_patch(patch_text)))
+
+
+def _load_patch_text(
+    parsed_args: argparse.Namespace,
+    is_revert: bool,
+    allow_stdin_fallback: bool = True,
+) -> Optional[str]:
+    action_name = "リバート" if is_revert else "適用"
+    if parsed_args.patch_file:
+        patch_file: Path = parsed_args.patch_file.resolve()
+        if not patch_file.exists():
+            print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
+            return None
+        print(f"🚀 AIパッチの{action_name}を開始します (ファイル: {patch_file.name})")
+        return patch_file.read_text(encoding="utf-8")
+    if parsed_args.paste:
+        if not allow_stdin_fallback and not sys.stdin.isatty():
+            print("⚠ パイプ入力後の待機プロンプトでは -p/--paste を使用できません。クリップボード経由で 'aiskel a' を実行してください。", file=sys.stderr)
+            return None
+        print("🚀 AIの出力テキストをペーストしてください。")
+        print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+        patch_text = sys.stdin.read()
+        print(f"\n{action_name}を開始します...")
+        return patch_text
+    if allow_stdin_fallback and not sys.stdin.isatty():
+        return sys.stdin.read()
+
+    patch_text = get_clipboard_text()
+    if not _has_applicable_patch_content(patch_text):
+        if not patch_text:
+            print("⚠ クリップボードが空です。")
+        else:
+            print("⚠ クリップボードに置換ブロック(<<<<)または削除指示が見つかりません。")
+        if not allow_stdin_fallback:
+            print("   修正パッチをコピーしてから再度 'aiskel a' を実行してください。")
+            return None
+        print("🚀 AIの出力テキストをペーストしてください。")
+        print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
+        patch_text = sys.stdin.read()
+        print(f"\n{action_name}を開始します...")
+        return patch_text
+
+    print("🚀 クリップボードからAIの出力テキストを読み込みました。")
+    return patch_text
+
+
 def handle_apply_command(
     parsed_args: argparse.Namespace,
     on_auto_sync: Optional[Callable[[Path, str, bool], None]] = None,
+    on_run_command: Optional[Callable[[List[str]], int]] = None,
 ) -> int:
     is_revert = getattr(parsed_args, "revert", False) or parsed_args.command in ("revert", "r")
     is_dry_run = getattr(parsed_args, "dry_run", False)
@@ -76,36 +201,9 @@ def handle_apply_command(
             rel_cfg = created_cfg
         print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
 
-    if parsed_args.patch_file:
-        patch_file: Path = parsed_args.patch_file.resolve()
-        if not patch_file.exists():
-            print(f"エラー: パッチファイルが見つかりません: {patch_file}", file=sys.stderr)
-            return 1
-        action_name = "リバート" if is_revert else "適用"
-        print(f"🚀 AIパッチの{action_name}を開始します (ファイル: {patch_file.name})")
-        patch_text = patch_file.read_text(encoding="utf-8")
-    elif parsed_args.paste:
-        action_name = "リバート" if is_revert else "適用"
-        print("🚀 AIの出力テキストをペーストしてください。")
-        print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
-        patch_text = sys.stdin.read()
-        print(f"\n{action_name}を開始します...")
-    elif not sys.stdin.isatty():
-        patch_text = sys.stdin.read()
-    else:
-        patch_text = get_clipboard_text()
-        if not patch_text or not re.search(r"<{4,}", patch_text):
-            if not patch_text:
-                print("⚠ クリップボードが空です。")
-            else:
-                print("⚠ クリップボードに置換ブロック(<<<<)が見つかりません。")
-            action_name = "リバート" if is_revert else "適用"
-            print("🚀 AIの出力テキストをペーストしてください。")
-            print("   (ペースト後、Windowsは Ctrl+Z を押してEnter、Mac/Linuxは Ctrl+D を押すと実行されます):")
-            patch_text = sys.stdin.read()
-            print(f"\n{action_name}を開始します...")
-        else:
-            print("🚀 クリップボードからAIの出力テキストを読み込みました。")
+    patch_text = _load_patch_text(parsed_args, is_revert=is_revert, allow_stdin_fallback=True)
+    if patch_text is None:
+        return 1
 
     target_file = parsed_args.target.resolve() if parsed_args.target else None
     initial_commit_msg, patch_text = extract_commit_message(patch_text)
@@ -131,6 +229,7 @@ def handle_apply_command(
     total_skipped = 0
     last_fail = 0
     current_patch = patch_text
+    active_force_replace = getattr(parsed_args, "force_replace", False)
     iteration = 0
 
     while True:
@@ -139,7 +238,7 @@ def handle_apply_command(
             current_patch,
             project_root,
             target_file,
-            force_replace=getattr(parsed_args, "force_replace", False),
+            force_replace=active_force_replace,
             revert=is_revert,
             dry_run=is_dry_run,
         )
@@ -201,29 +300,104 @@ def handle_apply_command(
         if success > 0:
             print(f"\n⚠ 成功した {success} 箇所を変更しました。")
 
-        retry_prompt = "\n修正パッチをコピーして、続けて適用しますか？ [Enter/Space: y, 他: n]: "
-        if not prompt_user_confirmation(retry_prompt, default=False):
-            print("ℹ パッチの継続適用を終了しました。")
-            break
-
-        new_text = get_clipboard_text()
-        while not new_text or not re.search(r"<{4,}", new_text):
-            if not new_text:
-                print("⚠ クリップボードが空です。修正したパッチをコピーしてください。")
-            else:
-                print("⚠ クリップボードに置換ブロック(<<<<)が見つかりません。")
-            if not prompt_user_confirmation("クリップボードを再取得しますか？ [Enter/Space: y, 他: n]: ", default=True):
+        next_patch_ready = False
+        while True:
+            raw_cmd = prompt_user_command(
+                "\nコマンドを入力してください (aiskel c ..., aiskel a [-f], 終了: q / Enter): "
+            )
+            if raw_cmd is None:
                 break
-            new_text = get_clipboard_text()
+            cmd_str = raw_cmd.strip()
+            if not cmd_str or cmd_str.lower() in ("q", "quit", "exit"):
+                print("ℹ パッチの継続待機を終了しました。")
+                break
+            if cmd_str.startswith("```"):
+                continue
 
-        if not new_text or not re.search(r"<{4,}", new_text):
-            print("ℹ パッチの継続適用を終了しました。")
+            tokens = _split_command_args(cmd_str)
+            if not tokens:
+                continue
+            if tokens[0] in ("$", ">"):
+                tokens = tokens[1:]
+            if tokens and tokens[0].lower() == "aiskel":
+                tokens = tokens[1:]
+            if not tokens:
+                continue
+
+            run_tokens = _inject_project_root_if_needed(tokens, project_root)
+            subcmd = run_tokens[0]
+            if subcmd in ("apply", "a"):
+                try:
+                    next_args = parse_arguments(run_tokens)
+                except SystemExit:
+                    continue
+                if getattr(next_args, "revert", False):
+                    print("⚠ 継続待機中は --revert を実行できません。終了(q / Enter)後に実行してください。")
+                    continue
+                if next_args.dir.resolve() != project_root:
+                    print(f"⚠ 待機セッション中は --dir を変更できません (現在: {project_root})。", file=sys.stderr)
+                    continue
+
+                loaded = _load_patch_text(next_args, is_revert=False, allow_stdin_fallback=False)
+                if loaded is None:
+                    continue
+
+                extracted_commit, next_patch_body = extract_commit_message(loaded)
+                if not next_patch_body.strip():
+                    print("⚠ パッチ内容が空です。")
+                    continue
+
+                next_target = next_args.target.resolve() if next_args.target else target_file
+                next_force = getattr(next_args, "force_replace", False) or getattr(parsed_args, "force_replace", False)
+
+                if getattr(next_args, "dry_run", False):
+                    dry_res = apply_patch(
+                        next_patch_body,
+                        project_root,
+                        next_target,
+                        force_replace=next_force,
+                        revert=False,
+                        dry_run=True,
+                    )
+                    print(f"\n=== [DRY-RUN] 適用結果 ===\n✔ 成功: {dry_res[0]} 箇所 / ✖ 失敗: {dry_res[1]} 箇所")
+                    dry_failed = getattr(dry_res, "failed_details", [])
+                    if dry_res[1] > 0 and dry_failed:
+                        print("\n【失敗箇所】")
+                        for d in dry_failed:
+                            d_lines = d.splitlines()
+                            print(f"  - {d_lines[0]}")
+                            for sub_line in d_lines[1:]:
+                                print(f"    {sub_line}")
+                    continue
+
+                if not initial_commit_msg and extracted_commit:
+                    initial_commit_msg = extracted_commit
+                current_patch = next_patch_body
+                target_file = next_target
+                active_force_replace = next_force
+                next_test_opt = getattr(next_args, "test", None) or getattr(next_args, "exec_cmd", None)
+                if next_test_opt is not None:
+                    test_option = next_test_opt
+                if getattr(next_args, "no_test", False):
+                    test_option = None
+                if getattr(next_args, "yes", False):
+                    parsed_args.yes = True
+                if getattr(next_args, "no_sync", False):
+                    parsed_args.no_sync = True
+                if getattr(next_args, "no_bloat", False):
+                    parsed_args.no_bloat = True
+                next_patch_ready = True
+                break
+
+            if subcmd in ("copy", "c", "cp", "test", "t", "bloat", "b", "size", "docs", "d"):
+                _execute_subcommand(run_tokens, on_run_command)
+            elif subcmd in ("revert", "r", "commit", "cm", "ci"):
+                print(f"⚠ 継続待機中は '{subcmd}' を実行できません。終了(q / Enter)後に実行してください。")
+            else:
+                print(f"⚠ 未対応のコマンドです: '{subcmd}' (例: aiskel c ..., aiskel a [-f], 終了: q / Enter)")
+
+        if not next_patch_ready:
             break
-
-        extracted_commit, current_patch = extract_commit_message(new_text)
-        if not initial_commit_msg and extracted_commit:
-            initial_commit_msg = extracted_commit
-        print("🚀 クリップボードから修正パッチを読み込みました。続けて適用します...")
 
     commit_partial = False
     committed_successfully = False

@@ -117,3 +117,34 @@ def rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> bo
     except Exception as e:
         print(f"⚠ ロールバックに失敗しました: {e}", file=sys.stderr)
         return False
+
+
+def prompt_user_command(prompt: str) -> Optional[str]:
+    # なぜ必要か: パイプ入力後でも対話プロンプトを受け付け、擬似stdin(テスト等)のハングも防ぐため
+    try:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+
+        has_fileno = True
+        try:
+            sys.stdin.fileno()
+        except Exception:
+            has_fileno = False
+
+        if sys.stdin.isatty() or not has_fileno:
+            raw_line = sys.stdin.readline()
+        else:
+            tty_path = "CON" if sys.platform == "win32" else "/dev/tty"
+            try:
+                with open(tty_path, "r", encoding="utf-8") as tty:
+                    raw_line = tty.readline()
+            except OSError:
+                return None
+
+        if not raw_line:
+            return None
+        return raw_line.rstrip("\r\n")
+    except (EOFError, KeyboardInterrupt):
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return None

@@ -219,7 +219,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 return 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
-            return handle_apply_command(parsed_args, on_auto_sync=_trigger_auto_sync)
+            return handle_apply_command(parsed_args, on_auto_sync=_trigger_auto_sync, on_run_command=main)
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("commit", "cm", "ci"):
             return handle_commit_command(parsed_args, on_auto_sync=_trigger_auto_sync)
