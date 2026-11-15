@@ -14,7 +14,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         return args
 
     # なぜ必要か: サブコマンド実行時にルートレベルの -c 正規化との競合を防ぐため
-    if args[0] in ("apply", "a", "revert", "r", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size"):
+    if args[0] in ("apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size"):
         return args
 
     cmd_idx = -1
@@ -123,6 +123,17 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     revert_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     revert_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビューを表示します")
     revert_parser.add_argument("--no-sync", action="store_true", help="リバート成功後のスケルトン・バンドル自動同期をスキップします")
+
+    commit_parser = subparsers.add_parser("commit", aliases=["cm", "ci"], help="前回 aiskel apply でコミットしなかった変更を、保持されたコミットメッセージで後からコミットします")
+    commit_parser.add_argument("-m", "--message", type=str, default=None, help="保持されたメッセージを上書きするコミットメッセージ")
+    commit_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    commit_parser.add_argument("-a", "--all", action="store_true", help="保持された対象ファイルだけでなく、リポジトリ内の全変更をステージングしてコミットします")
+    commit_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
+    commit_parser.add_argument("-p", "--push", action="store_true", help="コミット成功後に確認なしで git push を実行します")
+    commit_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="コミット前にテストを実行し、成功時のみコミットを提案します")
+    commit_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にはコミットせず、保持されているメッセージと対象ファイルを確認します")
+    commit_parser.add_argument("--clear", action="store_true", help="保持されているコミット情報を破棄します")
+    commit_parser.add_argument("--no-sync", action="store_true", help="コミット成功後のスケルトン・バンドル自動同期をスキップします")
 
     test_parser = subparsers.add_parser("test", aliases=["t"], help="設定ファイル(ai_meta)または指定されたテスト・検証コマンドを実行します")
     test_parser.add_argument("cmd", nargs="*", default=[], help="実行するテストコマンド (省略時は設定ファイルから取得または自動検出)")

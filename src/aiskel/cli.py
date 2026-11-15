@@ -32,6 +32,7 @@ from .cli_interaction import (
     rollback_modified_files,
 )
 from .cli_apply import handle_apply_command
+from .cli_commit import handle_commit_command
 from .cli_parser import (
     parse_arguments,
     normalize_cli_args,
@@ -205,6 +206,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("apply", "a", "revert", "r"):
             return handle_apply_command(parsed_args, on_auto_sync=_trigger_auto_sync)
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("commit", "cm", "ci"):
+            return handle_commit_command(parsed_args, on_auto_sync=_trigger_auto_sync)
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()

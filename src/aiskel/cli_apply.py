@@ -7,11 +7,17 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Set
 
+from .cli_commit import (
+    clear_pending_commit,
+    execute_git_commit,
+    save_pending_commit,
+)
 from .cli_interaction import (
     extract_commit_message,
     prompt_user_confirmation,
     rollback_modified_files,
 )
+from .cli_sync import ensure_gitignore_updated
 from .config import ensure_default_config_file, load_test_command_from_meta
 from .core.clipboard import set_clipboard_text
 from .core.patch_applier import apply_patch
@@ -60,6 +66,8 @@ def handle_apply_command(
         if load_test_command_from_meta(project_root):
             test_option = "auto"
     output_dir = project_root / "ai_meta"
+    if not is_dry_run:
+        ensure_gitignore_updated(project_root, output_dir)
     created_cfg = ensure_default_config_file(output_dir, project_root)
     if created_cfg:
         try:
@@ -233,14 +241,21 @@ def handle_apply_command(
             rollback_prompt = "これまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
             if prompt_user_confirmation(rollback_prompt, default=False):
                 rollback_modified_files(project_root, total_modified_files)
+                clear_pending_commit(project_root, total_modified_files)
                 total_modified_files.clear()
                 total_success = 0
             else:
+                save_pending_commit(project_root, initial_commit_msg, total_modified_files)
                 print("ℹ コミットをスキップし、適用済みの変更はそのまま保持されています。")
+                if initial_commit_msg:
+                    print("💾 コミットメッセージを保持しました (後から 'aiskel commit' でコミットできます)")
                 print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
 
     if is_dry_run:
         return 0 if last_fail == 0 else 1
+
+    if is_revert and total_success > 0:
+        clear_pending_commit(project_root, total_modified_files)
 
     test_failed = False
     if not is_revert and test_option is not None and total_success > 0 and last_fail == 0:
@@ -271,44 +286,40 @@ def handle_apply_command(
 
             if should_commit:
                 print("コミットを実行します...")
-                try:
-                    for f in total_modified_files:
-                        subprocess.run(["git", "add", str(f)], cwd=project_root, check=True)
-                    # 差分ゼロ時のgit commit失敗(nothing added to commit)を防止
-                    staged_diff = subprocess.check_output(
-                        ["git", "diff", "--cached", "--name-only"], cwd=project_root, encoding="utf-8"
-                    ).strip()
-                    if staged_diff:
-                        subprocess.run(["git", "commit", "-m", commit_msg], cwd=project_root, check=True)
-                        print("✔ コミットが完了しました。")
-                        committed_successfully = True
-                        push_prompt = "リモートリポジトリにプッシュ (git push) しますか？ [Enter/Space: y, 他: n]: "
-                        if prompt_user_confirmation(push_prompt, default=False):
-                            print("プッシュを実行中...")
-                            push_res = subprocess.run(["git", "push"], cwd=project_root)
-                            if push_res.returncode == 0:
-                                print("✔ プッシュが完了しました。")
-                            else:
-                                print("⚠ プッシュに失敗しました（上記のエラーを確認してください）。", file=sys.stderr)
-                        else:
-                            print("ℹ プッシュをスキップしました。")
-                    else:
-                        print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
-                except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                    print(f"⚠ コミットに失敗しました: {e}")
+                committed_successfully, had_diff, commit_err, _ = execute_git_commit(
+                    project_root,
+                    commit_msg,
+                    target_files=total_modified_files,
+                )
+                if committed_successfully:
+                    clear_pending_commit(project_root, total_modified_files)
+                elif commit_err is not None:
+                    print(f"⚠ コミットに失敗しました: {commit_err}")
+                    save_pending_commit(project_root, initial_commit_msg, total_modified_files)
+                    if initial_commit_msg:
+                        print("💾 コミットメッセージを保持しました (修正後に 'aiskel commit' でコミットできます)")
+                elif not had_diff:
+                    print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
+                    clear_pending_commit(project_root, total_modified_files)
             else:
                 print("ℹ コミットを拒否（スキップ）しました。")
                 if test_failed:
                     rollback_prompt = "テストが失敗した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
                     if prompt_user_confirmation(rollback_prompt, default=False):
                         rollback_modified_files(project_root, total_modified_files)
+                        clear_pending_commit(project_root, total_modified_files)
                         total_modified_files.clear()
                         total_success = 0
                         return 1
+                save_pending_commit(project_root, initial_commit_msg, total_modified_files)
                 print("ℹ コードの変更内容はそのまま保持されています。")
+                if initial_commit_msg:
+                    print("💾 コミットメッセージを保持しました (後から 'aiskel commit' でコミットできます)")
                 print("  (変更を取り消す場合は 'aiskel revert' または 'git checkout .' を実行してください)")
                 if test_failed:
                     return 1
+        else:
+            save_pending_commit(project_root, None, total_modified_files)
 
     if total_success > 0 and (last_fail == 0 or commit_partial) and not getattr(parsed_args, "no_sync", False):
         action_name = "リバート" if is_revert else "置換"
