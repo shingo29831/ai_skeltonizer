@@ -96,11 +96,19 @@ def main(args: Optional[List[str]] = None) -> int:
             print(report)
 
             if not getattr(parsed_args, "no_clipboard", False):
+                clipboard_ok = False
                 try:
                     set_clipboard_text(report)
+                    clipboard_ok = True
                     print(f"\n📋 肥大化ファイル一覧 ({len(bloated)}件) をクリップボードにコピーしました (AIチャットにそのままペースト可能)。")
                 except Exception as e:
                     print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
+                if clipboard_ok and not getattr(parsed_args, "no_focus", False):
+                    try:
+                        if focus_default_browser(interactive_only=True):
+                            print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
+                    except Exception as e:
+                        print(f"⚠ ブラウザの最前面表示に失敗しました: {e}", file=sys.stderr)
             return 0
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("test", "t"):

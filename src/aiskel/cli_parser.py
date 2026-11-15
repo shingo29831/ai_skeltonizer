@@ -155,6 +155,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     bloat_parser.add_argument("-n", "--top", "--limit", type=int, default=DEFAULT_TOP_FILES_COUNT, dest="top_count", help=f"肥大化ファイル未検出時に表示する上位ファイル数 (デフォルト: {DEFAULT_TOP_FILES_COUNT})")
     bloat_parser.add_argument("-e", "--exclude", action="append", default=[], help="追加で除外するファイルまたはディレクトリパス (カンマ区切り可)")
     bloat_parser.add_argument("--no-clipboard", action="store_true", help="クリップボードへの自動保存を行わず標準出力のみ行います")
+    bloat_parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
     bloat_parser.add_argument("-q", "--quiet", action="store_true", help="肥大化ファイルが検出されなかった場合のメッセージを抑制します")
 
     docs_parser = subparsers.add_parser("docs", aliases=["d"], help="HTMLドキュメントをAI向けに解析・軽量構造化して出力します")
