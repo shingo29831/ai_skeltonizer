@@ -29,7 +29,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         i = 0
         while i < len(rest):
             token = rest[i]
-            if token in ("-d", "--deps", "--dependencies", "-h", "--help"):
+            if token in ("-d", "--deps", "--dependencies", "--no-focus", "-h", "--help"):
                 options.append(token)
                 i += 1
             elif token in ("--max-chars", "--dir"):
@@ -59,7 +59,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         i = 1
         while i < len(rest):
             token = rest[i]
-            if token in ("-d", "--deps", "--dependencies", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
+            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
                 options.append(token)
                 i += 1
             elif token in ("--max-chars", "-f", "--full-path", "-k", "--keep-func", "--focus", "--only-nodes", "--format", "--policy"):
@@ -133,6 +133,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
     copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
+    copy_parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
     copy_parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"コピーを許可する最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
@@ -177,6 +178,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
     parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
+    parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     raw_args = list(args) if args is not None else sys.argv[1:]
     return parser.parse_args(normalize_cli_args(raw_args))

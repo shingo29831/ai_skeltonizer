@@ -19,6 +19,7 @@ from .core.bloat_detector import (
     DEFAULT_TOP_FILES_COUNT,
 )
 from .core.token_counter import estimate_tokens
+from .core.browser_focus import focus_default_browser
 from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
@@ -145,6 +146,9 @@ def main(args: Optional[List[str]] = None) -> int:
                 print(f"   - 総文字数   : {len(formatted_text):,} 文字")
                 print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
                 print("   AIチャットへそのままペーストしてご利用いただけます。")
+                if not getattr(parsed_args, "no_focus", False):
+                    if focus_default_browser(interactive_only=True):
+                        print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
                 return 0
             except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
                 print(f"✖ コピー失敗: {e}", file=sys.stderr)
