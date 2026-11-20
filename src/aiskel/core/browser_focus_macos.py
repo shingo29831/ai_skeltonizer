@@ -50,20 +50,25 @@ def _resolve_running_macos_bundle_id(target_bundle_id: str) -> Optional[str]:
     return None
 
 
-def focus_macos_default_browser() -> bool:
-    """起動済みのmacOSデフォルトブラウザのみをアクティブ化する。"""
+def focus_macos_default_browser_target() -> Optional[str]:
+    """起動済みのmacOSデフォルトブラウザをアクティブ化し、成功時はBundle IDを返す。"""
     try:
         bundle_id = _get_macos_default_browser_bundle_id()
         if not _VALID_BUNDLE_ID_RE.fullmatch(bundle_id):
-            return False
+            return None
 
         # plist内の小文字表記を吸収しつつ未インストール時の検索ダイアログを抑止する
         resolved_id = _resolve_running_macos_bundle_id(bundle_id)
         if not resolved_id:
-            return False
+            return None
 
         # Apple Events(TCC Automation)権限拒否を回避するため open -b で前面化する
         res = subprocess.run(["open", "-b", resolved_id], capture_output=True, text=True, timeout=3)
-        return res.returncode == 0
+        return resolved_id if res.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
+
+
+def focus_macos_default_browser() -> bool:
+    """起動済みのmacOSデフォルトブラウザのみをアクティブ化する。"""
+    return focus_macos_default_browser_target() is not None

@@ -19,7 +19,8 @@ from .core.bloat_detector import (
     DEFAULT_TOP_FILES_COUNT,
 )
 from .core.token_counter import estimate_tokens
-from .core.browser_focus import focus_default_browser
+from .core.browser_focus import focus_default_browser, focus_default_browser_target
+from .core.browser_paste import paste_to_browser_prompt
 from .core.clipboard import set_clipboard_text
 from .core.code_extractor import extract_and_format_snippets
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
@@ -162,8 +163,18 @@ def main(args: Optional[List[str]] = None) -> int:
                 print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
                 print("   AIチャットへそのままペーストしてご利用いただけます。")
                 if not getattr(parsed_args, "no_focus", False):
-                    if focus_default_browser(interactive_only=True):
+                    target_window = focus_default_browser_target(interactive_only=True)
+                    if target_window is not None:
                         print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
+                        if not getattr(parsed_args, "no_paste", False):
+                            paste_res = paste_to_browser_prompt(
+                                interactive_only=True,
+                                target_window=target_window,
+                            )
+                            if paste_res.success:
+                                print("   📝 プロンプト入力欄に貼り付けて自動入力しました。")
+                            elif paste_res.reason:
+                                print(f"   ℹ 自動貼り付けをスキップしました: {paste_res.reason}")
                 return 0
             except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
                 print(f"✖ コピー失敗: {e}", file=sys.stderr)

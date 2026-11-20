@@ -225,23 +225,23 @@ def _find_target_browser_hwnd(
     return visible_windows[0] if visible_windows else (minimized_windows[0] if minimized_windows else None)
 
 
-def focus_windows_default_browser() -> bool:
-    """起動済みのWindowsデフォルトブラウザをZオーダー優先で探索し、最上位表示・フォーカスする。"""
+def focus_windows_default_browser_hwnd() -> Optional[int]:
+    """起動済みのWindowsデフォルトブラウザを最上位表示し、成功時は対象HWNDを返す。"""
     try:
         exe_names = _get_windows_default_browser_exe_names()
         if not exe_names:
-            return False
+            return None
 
         user32, kernel32, dwmapi, get_window_long, wnd_enum_proc = _init_win32_apis()
         target_hwnd = _find_target_browser_hwnd(
             exe_names, user32, kernel32, dwmapi, get_window_long, wnd_enum_proc
         )
         if not target_hwnd:
-            return False
+            return None
 
         fg_hwnd = user32.GetForegroundWindow()
         if fg_hwnd == target_hwnd:
-            return True
+            return target_hwnd
 
         cur_tid = kernel32.GetCurrentThreadId()
         fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
@@ -275,11 +275,16 @@ def focus_windows_default_browser() -> bool:
                 if not was_topmost:
                     user32.SetWindowPos(target_hwnd, hwnd_notopmost, 0, 0, 0, 0, _SWP_NO_MOVE_SIZE_SHOW)
                 ok = bool(user32.SetForegroundWindow(target_hwnd))
-            return ok
+            return target_hwnd if ok else None
         finally:
             if attached_target:
                 user32.AttachThreadInput(cur_tid, target_tid, 0)
             if attached_fg:
                 user32.AttachThreadInput(cur_tid, fg_tid, 0)
     except OSError:
-        return False
+        return None
+
+
+def focus_windows_default_browser() -> bool:
+    """起動済みのWindowsデフォルトブラウザをZオーダー優先で探索し、最上位表示・フォーカスする。"""
+    return focus_windows_default_browser_hwnd() is not None

@@ -171,14 +171,14 @@ def _to_case_insensitive_ere(text: str) -> str:
     return "".join(parts)
 
 
-def focus_linux_default_browser() -> bool:
-    """起動済みのLinuxデフォルトブラウザウィンドウをwmctrlまたはxdotoolでフォーカスする。"""
+def focus_linux_default_browser_target() -> Optional[str]:
+    """起動済みのLinuxデフォルトブラウザウィンドウをフォーカスし、成功時はウィンドウIDを返す。"""
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        return False
+        return None
 
     hints = _get_linux_browser_wm_hints()
     if not hints:
-        return False
+        return None
 
     try:
         res = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=2)
@@ -193,7 +193,7 @@ def focus_linux_default_browser() -> bool:
                 if any(h in wm_tokens for h in hints):
                     act = subprocess.run(["wmctrl", "-i", "-a", win_id], capture_output=True, timeout=2)
                     if act.returncode == 0:
-                        return True
+                        return win_id
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -209,13 +209,19 @@ def focus_linux_default_browser() -> bool:
                 )
                 win_ids = [w.strip() for w in search.stdout.splitlines() if w.strip()]
                 if win_ids:
-                    act = subprocess.run(["xdotool", "windowactivate", win_ids[-1]], capture_output=True, timeout=2)
+                    target_id = win_ids[-1]
+                    act = subprocess.run(["xdotool", "windowactivate", target_id], capture_output=True, timeout=2)
                     if act.returncode == 0:
-                        return True
+                        return target_id
             except FileNotFoundError:
                 # xdotool未導入環境では残りのヒントに対する不要な起動リトライを行わない
-                return False
+                return None
             except (OSError, subprocess.SubprocessError):
                 break
 
-    return False
+    return None
+
+
+def focus_linux_default_browser() -> bool:
+    """起動済みのLinuxデフォルトブラウザウィンドウをwmctrlまたはxdotoolでフォーカスする。"""
+    return focus_linux_default_browser_target() is not None
