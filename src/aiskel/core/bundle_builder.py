@@ -48,7 +48,7 @@ def _discover_policy_text(project_root: Path, custom_policy_path: Optional[Path]
             except OSError:
                 continue
 
-    return "・冒頭でファイルの役割を明示。UIとロジックは疎結合に。\n・修正時はファイル内のコードを省略せず出力。\n・エラー握り潰し厳禁、根本解決を。"
+    return ""
 
 
 def build_bundle_file(
@@ -62,7 +62,7 @@ def build_bundle_file(
     custom_policy_path: Optional[Path] = None,
     bundle_filename: Optional[str] = None,
 ) -> Path:
-    policy_text = _discover_policy_text(project_root, custom_policy_path)
+    policy_text = _discover_policy_text(project_root, custom_policy_path).strip()
     # なぜ必要か: 基本は.txt固定とし、設定ファイル指定時はその指定名を採用
     filename = bundle_filename.strip() if bundle_filename and bundle_filename.strip() else "architecture_bundle.txt"
     architecture_path = output_dir / filename
@@ -71,14 +71,16 @@ def build_bundle_file(
 
     if bundle_format == "xml" or bundle_format == "txt":
         arch_lines.append("<ai_architecture_bundle>")
-        arch_lines.append("  <policy>\n" + policy_text.strip() + "\n  </policy>")
+        if policy_text:
+            arch_lines.append("  <policy>\n" + policy_text + "\n  </policy>")
         arch_lines.append("  <project_tree>\n" + tree_text.strip() + "\n  </project_tree>")
         arch_lines.append("  <role_architecture_map>\n" + role_map_text.strip() + "\n  </role_architecture_map>")
         arch_lines.append("  <dependency_graph>\n" + dependency_map_text.strip() + "\n  </dependency_graph>")
         arch_lines.append("</ai_architecture_bundle>")
     else:
         arch_lines.append("# Architecture Bundle")
-        arch_lines.append("## Policy\n" + policy_text.strip())
+        if policy_text:
+            arch_lines.append("## Policy\n" + policy_text)
         arch_lines.append("## Tree\n```\n" + tree_text.strip() + "\n```")
         arch_lines.append(role_map_text.strip())
         arch_lines.append(dependency_map_text.strip())
