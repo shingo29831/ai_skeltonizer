@@ -11,6 +11,7 @@ from .core.aistudio_extension import (
     build_userscript_js,
     export_browser_extension,
     get_default_extension_dir,
+    get_firefox_extension_dir,
     load_or_create_bridge_token,
 )
 
@@ -44,6 +45,14 @@ def handle_listen_command(
                 host=host,
                 port=port,
                 token=active_token,
+                browser="chrome",
+            )
+            firefox_dir, firefox_updated = export_browser_extension(
+                get_firefox_extension_dir(extension_dir),
+                host=host,
+                port=port,
+                token=active_token,
+                browser="firefox",
             )
         except OSError as e:
             print(f"エラー: 拡張機能または認証トークンファイルの出力に失敗しました: {e}", file=sys.stderr)
@@ -52,12 +61,19 @@ def handle_listen_command(
             print(f"エラー: ホスト設定が不正です: {e}", file=sys.stderr)
             return 1
 
-        print(f"✔ Chrome拡張機能ファイルを生成しました: {exported_dir}")
-        print("   1. Chrome/Edge で chrome://extensions を開く")
+        print("✔ ブラウザ拡張機能ファイルを生成しました:")
+        print(f"   - Chrome/Edge拡張フォルダ: {exported_dir}")
+        print(f"   - Firefox拡張マニフェスト: {firefox_dir / 'manifest.json'}")
+        print("   [Chrome/Edge]")
+        print("   1. chrome://extensions を開く")
         print("   2. 右上の「デベロッパーモード」をONにする")
-        print("   3.「パッケージ化されていない拡張機能を読み込む」から上記フォルダを選択する")
-        if extension_updated:
-            print("   ※ 既に読み込み済みの場合は chrome://extensions で拡張機能の更新(リロード)をクリックしてください")
+        print("   3.「パッケージ化されていない拡張機能を読み込む」から上記 Chrome/Edge拡張フォルダを選択する")
+        print("   [Firefox]")
+        print("   1. about:debugging#/runtime/this-firefox を開く")
+        print("   2.「一時的なアドオンを読み込む」から上記 Firefox拡張マニフェスト (manifest.json) を選択する")
+        print("      (再起動後も常駐させたい場合は Violentmonkey/Tampermonkey 等で `aiskel listen --print-userscript` を利用してください)")
+        if extension_updated or firefox_updated:
+            print("   ※ 既に読み込み済みの場合は各ブラウザの拡張機能画面で更新(リロード)をクリックしてください")
         return 0
 
     project_root: Path = parsed_args.project_dir.resolve()

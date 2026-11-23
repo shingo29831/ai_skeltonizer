@@ -28,6 +28,7 @@ from .aistudio_extension import (
     export_browser_extension,
     format_host_for_url,
     get_default_extension_dir,
+    get_firefox_extension_dir,
     is_loopback_host,
     load_or_create_bridge_token,
     normalize_bind_host,
@@ -682,6 +683,14 @@ def run_bridge_server(
                 host=bound_host,
                 port=bound_port,
                 token=active_token,
+                browser="chrome",
+            )
+            firefox_dir, firefox_updated = export_browser_extension(
+                get_firefox_extension_dir(extension_dir),
+                host=bound_host,
+                port=bound_port,
+                token=active_token,
+                browser="firefox",
             )
         except OSError as e:
             print(f"エラー: 拡張機能または認証トークンファイルの出力に失敗しました: {e}", file=sys.stderr)
@@ -701,14 +710,17 @@ def run_bridge_server(
 
         print(f"🎧 Google AI Studio 自動実行ブリッジを起動しました: http://{bound_url_host}:{bound_port} (拡張機能連携用API)")
         if client_url_host != bound_url_host:
-            print(f"   - ブラウザ接続先    : http://{client_url_host}:{bound_port}")
+            print(f"   - ブラウザ接続先         : http://{client_url_host}:{bound_port}")
         if not loopback:
             print("   ⚠ ループバック以外のインターフェースで待受中です。認証トークンが有効化されています。")
-        print(f"   - 対象プロジェクト  : {project_root}")
-        print(f"   - Chrome拡張フォルダ: {exported_dir}")
-        if extension_updated:
-            print("   ⚠ 拡張機能設定が更新されました。既に読み込み済みの場合は chrome://extensions で「更新(リロード)」してください。")
-        print("   ※ 初回のみ chrome://extensions から上記拡張フォルダを読み込んでください (Tampermonkey用: aiskel listen --print-userscript)")
+        print(f"   - 対象プロジェクト       : {project_root}")
+        print(f"   - Chrome/Edge拡張フォルダ: {exported_dir}")
+        print(f"   - Firefox拡張マニフェスト: {firefox_dir / 'manifest.json'}")
+        if extension_updated or firefox_updated:
+            print("   ⚠ 拡張機能設定が更新されました。既に読み込み済みの場合はブラウザの拡張機能画面で「更新(リロード)」してください。")
+        print("   ※ Chrome/Edge: chrome://extensions から上記拡張フォルダを読み込み")
+        print("   ※ Firefox    : about:debugging#/runtime/this-firefox の「一時的なアドオンを読み込む」から上記 manifest.json を選択")
+        print("   ※ 常駐利用   : Tampermonkey / Violentmonkey 用スクリプトは `aiskel listen --print-userscript` で出力できます")
         print("   推論完了時の `aiskel c` コマンドを待機中... (終了するには Ctrl+C)")
 
         server.serve_forever(on_ready=on_ready)

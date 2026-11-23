@@ -1,16 +1,19 @@
-"""Module: @role: Google AI Studioの推論完了監視およびローカルブリッジ連携用のChrome拡張機能・Userscript資産を生成する。"""
+"""Module: @role: Google AI Studioの推論完了監視およびローカルブリッジ連携用のブラウザ拡張機能(Chrome/Edge/Firefox)・Userscript資産を生成する。"""
 import ipaddress
 import json
 import os
 import secrets
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .aistudio_monitor_script import build_monitor_core_js
 
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 18765
 EXTENSION_DIR_NAME = "aistudio_bridge"
+FIREFOX_DIR_SUFFIX = "_firefox"
+FIREFOX_GECKO_ID_PREFIX = "aiskel-aistudio-bridge"
+FIREFOX_MIN_VERSION = "109.0"
 TOKEN_FILENAME = ".bridge_token"
 
 
@@ -86,6 +89,14 @@ def get_default_extension_dir(
     return base / ".aiskel" / "extensions" / dir_name
 
 
+def get_firefox_extension_dir(extension_dir: Path) -> Path:
+    """Chrome/Edge用拡張ディレクトリに対応するFirefox用拡張ディレクトリパスを返す。"""
+    resolved = extension_dir.resolve()
+    if not resolved.name:
+        return resolved / "firefox"
+    return resolved.parent / f"{resolved.name}{FIREFOX_DIR_SUFFIX}"
+
+
 def _write_token_file(token_path: Path, token_value: str) -> None:
     content = token_value + "\n"
     if token_path.is_file():
@@ -129,11 +140,25 @@ def load_or_create_bridge_token(
     return generated
 
 
-def build_manifest_json(host: str = DEFAULT_BRIDGE_HOST, port: int = DEFAULT_BRIDGE_PORT) -> str:
-    """Google AI Studio監視用のManifest V3マニフェストを生成する。"""
+def _normalize_browser_target(browser: str) -> str:
+    normalized = (browser or "").strip().lower()
+    if normalized in ("chrome", "chromium", "edge"):
+        return "chrome"
+    if normalized == "firefox":
+        return "firefox"
+    raise ValueError(f"未対応のブラウザ種別です: {browser}")
+
+
+def build_manifest_json(
+    host: str = DEFAULT_BRIDGE_HOST,
+    port: int = DEFAULT_BRIDGE_PORT,
+    browser: str = "chrome",
+) -> str:
+    """Google AI Studio監視用のManifest V3マニフェストをブラウザ種別に応じて生成する。"""
+    target_browser = _normalize_browser_target(browser)
     url_host = format_host_for_url(resolve_client_host(host))
     name_suffix = "" if port == DEFAULT_BRIDGE_PORT else f" (:{port})"
-    manifest = {
+    manifest: Dict[str, Any] = {
         "manifest_version": 3,
         "name": f"aiskel AI Studio Auto-Runner{name_suffix}",
         "version": "1.2.2",
@@ -141,17 +166,38 @@ def build_manifest_json(host: str = DEFAULT_BRIDGE_HOST, port: int = DEFAULT_BRI
         "host_permissions": [
             f"http://{url_host}:{port}/*",
         ],
-        "background": {
-            "service_worker": "background.js",
-        },
-        "content_scripts": [
-            {
-                "matches": ["https://aistudio.google.com/*"],
-                "js": ["content.js"],
-                "run_at": "document_idle",
-            }
-        ],
     }
+    if target_browser == "firefox":
+        addon_id = (
+            f"{FIREFOX_GECKO_ID_PREFIX}@aiskel.local"
+            if port == DEFAULT_BRIDGE_PORT
+            else f"{FIREFOX_GECKO_ID_PREFIX}-{port}@aiskel.local"
+        )
+        # Firefox 140未満のエラー回避のためdata_collection_permissionsは含めず、IDと最小バージョンのみ宣言
+        manifest["browser_specific_settings"] = {
+            "gecko": {
+                "id": addon_id,
+                "strict_min_version": FIREFOX_MIN_VERSION,
+            }
+        }
+        # MV3デフォルトCSPのupgrade-insecure-requestsによるローカルhttp://通信のhttps://昇格を防止
+        manifest["content_security_policy"] = {
+            "extension_pages": "script-src 'self'; object-src 'self';"
+        }
+        manifest["background"] = {
+            "scripts": ["background.js"],
+        }
+    else:
+        manifest["background"] = {
+            "service_worker": "background.js",
+        }
+    manifest["content_scripts"] = [
+        {
+            "matches": ["https://aistudio.google.com/*"],
+            "js": ["content.js"],
+            "run_at": "document_idle",
+        }
+    ]
     return json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -319,12 +365,17 @@ def export_browser_extension(
     host: str = DEFAULT_BRIDGE_HOST,
     port: int = DEFAULT_BRIDGE_PORT,
     token: Optional[str] = None,
+    browser: str = "chrome",
 ) -> Tuple[Path, bool]:
-    """Chrome/Edge用Manifest V3拡張機能一式を出力し、(出力ディレクトリ, 内容変更有無)を返す。"""
+    """指定ブラウザ向けManifest V3拡張機能一式を出力し、(出力ディレクトリ, 内容変更有無)を返す。"""
+    target_browser = _normalize_browser_target(browser)
     resolved_dir = target_dir.resolve()
     resolved_dir.mkdir(parents=True, exist_ok=True)
     changed = False
-    changed |= _write_if_changed(resolved_dir / "manifest.json", build_manifest_json(host=host, port=port))
+    changed |= _write_if_changed(
+        resolved_dir / "manifest.json",
+        build_manifest_json(host=host, port=port, browser=target_browser),
+    )
     changed |= _write_if_changed(resolved_dir / "background.js", build_background_js(host=host, port=port, token=token))
     changed |= _write_if_changed(resolved_dir / "content.js", build_content_js())
     return resolved_dir, changed
