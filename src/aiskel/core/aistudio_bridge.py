@@ -377,17 +377,28 @@ class AiskelBridgeServer:
                 # ChromeのPrivate Network Accessプリフライトを通過させるため付与
                 self.send_header("Access-Control-Allow-Private-Network", "true")
 
-            def _send_json(self, status_code: int, body: Dict[str, object]) -> None:
-                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            def _send_bytes(
+                self,
+                status_code: int,
+                raw: bytes,
+                content_type: str,
+                include_cors: bool = True,
+            ) -> None:
                 try:
                     self.send_response(status_code)
-                    self._send_cors_headers(self.headers.get("Origin"))
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    if include_cors:
+                        self._send_cors_headers(self.headers.get("Origin"))
+                    self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("X-Content-Type-Options", "nosniff")
                     self.end_headers()
                     self.wfile.write(raw)
                 except OSError:
                     return
+
+            def _send_json(self, status_code: int, body: Dict[str, object]) -> None:
+                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                self._send_bytes(status_code, raw, "application/json; charset=utf-8", include_cors=True)
 
             def _verify_access(self) -> bool:
                 origin = self.headers.get("Origin")
@@ -416,6 +427,43 @@ class AiskelBridgeServer:
 
             def do_GET(self) -> None:
                 req_path = urlsplit(self.path).path
+                # コンソール上のURLを直接開いた際に404誤認を防ぐため非機密の案内ページを返す
+                if req_path == "/":
+                    accept = (self.headers.get("Accept") or "").lower()
+                    if "text/html" in accept:
+                        html_body = (
+                            "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
+                            "<title>aiskel AI Studio Local Bridge</title>"
+                            "<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1e293b;}"
+                            "code{background:#f1f5f9;padding:2px 6px;border-radius:4px;}"
+                            ".card{border:1px solid #e2e8f0;border-radius:10px;padding:20px;background:#f8fafc;}"
+                            "a{color:#2563eb;}</style></head><body>"
+                            "<div class='card'>"
+                            "<h2>🎧 aiskel AI Studio ローカルブリッジ稼働中</h2>"
+                            "<p>このローカルサーバーは Chrome 拡張機能 / Userscript からの通知を受信する専用APIです（Web画面ではありません）。</p>"
+                            "<p>👉 <a href='https://aistudio.google.com/' target='_blank' rel='noopener noreferrer'>Google AI Studio (https://aistudio.google.com/)</a> を開いてご利用ください。</p>"
+                            "<p>API エンドポイント: <code>GET /api/health</code> / <code>POST /api/execute</code></p>"
+                            "</div></body></html>"
+                        ).encode("utf-8")
+                        self._send_bytes(int(HTTPStatus.OK), html_body, "text/html; charset=utf-8", include_cors=False)
+                    else:
+                        self._send_json(
+                            int(HTTPStatus.OK),
+                            {
+                                "ok": True,
+                                "service": "aiskel-aistudio-bridge",
+                                "message": "aiskel AI Studio ローカルブリッジは稼働中です。https://aistudio.google.com/ から拡張機能経由で利用してください。",
+                                "endpoints": {"health": "/api/health", "execute": "/api/execute"},
+                            },
+                        )
+                    return
+                if req_path == "/favicon.ico":
+                    try:
+                        self.send_response(int(HTTPStatus.NO_CONTENT))
+                        self.end_headers()
+                    except OSError:
+                        return
+                    return
                 if req_path != "/api/health":
                     self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
                     return
@@ -651,7 +699,7 @@ def run_bridge_server(
             print(f"エラー: ホスト設定が不正です: {e}", file=sys.stderr)
             return 1
 
-        print(f"🎧 Google AI Studio 自動実行ブリッジを起動しました: http://{bound_url_host}:{bound_port}")
+        print(f"🎧 Google AI Studio 自動実行ブリッジを起動しました: http://{bound_url_host}:{bound_port} (拡張機能連携用API)")
         if client_url_host != bound_url_host:
             print(f"   - ブラウザ接続先    : http://{client_url_host}:{bound_port}")
         if not loopback:
