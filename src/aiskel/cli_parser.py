@@ -1,31 +1,26 @@
 """Module: @role: CLI引数の正規化、各種サブコマンドの引数定義およびパース処理を担当する。"""
 import argparse
+import functools
 import sys
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import AbstractSet, FrozenSet, List, Optional, Set, Tuple
 
 from .core.aistudio_extension import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 from .core.bloat_detector import DEFAULT_BLOAT_MAX_CHARS, DEFAULT_BLOAT_MAX_LINES, DEFAULT_TOP_FILES_COUNT
 from .core.code_extractor import DEFAULT_MAX_CHARS
 
 
-def normalize_cli_args(args: List[str]) -> List[str]:
+def normalize_cli_args(
+    args: List[str],
+    subcommand_names: Optional[AbstractSet[str]] = None,
+) -> List[str]:
     # 可変長位置引数の途中にオプションが混在した場合でも順序を再構成して解析エラーを防止
     if not args:
         return args
 
-    # なぜ必要か: サブコマンド実行時にルートレベルの -c 正規化との競合を防ぐため
-    if args[0] in ("apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size", "listen", "l"):
-        return args
-
-    cmd_idx = -1
-    for i, a in enumerate(args):
-        if a in ("copy", "c", "cp"):
-            cmd_idx = i
-            break
-
-    if cmd_idx != -1:
-        prefix, rest = args[: cmd_idx + 1], args[cmd_idx + 1 :]
+    # なぜ必要か: サブコマンド判定と整合させるため copy/c/cp の位置引数再構成は先頭指定時のみ適用する
+    if args[0] in ("copy", "c", "cp"):
+        prefix, rest = args[:1], args[1:]
         options, positionals = [], []
         i = 0
         while i < len(rest):
@@ -47,6 +42,11 @@ def normalize_cli_args(args: List[str]) -> List[str]:
                 positionals.append(token)
                 i += 1
         return prefix + options + positionals
+
+    # なぜ必要か: サブコマンド実行時にルートレベルの -c 正規化との競合を防ぐため
+    known_subcommands = subcommand_names if subcommand_names is not None else _get_registered_subcommand_names()
+    if args[0] in known_subcommands:
+        return args
 
     c_idx = -1
     for i, a in enumerate(args):
@@ -91,7 +91,47 @@ def process_comma_separated_args(arg_list: List[str]) -> Set[str]:
     return result
 
 
-def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
+class _TrackFormatAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: Optional[str] = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_explicit_format", True)
+
+
+def _add_root_arguments(target_parser: argparse.ArgumentParser) -> None:
+    target_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
+    target_parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
+    target_parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
+    target_parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装を削除せず保持する関数やメソッド名")
+    target_parser.add_argument("--focus", action="append", default=[], help="指定したファイルまたはディレクトリのみを処理対象とする")
+    target_parser.add_argument("--focus-deps", action="store_true", help="--focusで指定したファイルの直接依存ファイルも自動的に対象に含める")
+    target_parser.add_argument("--only-nodes", action="append", default=[], help="指定したクラスや関数のみを抽出し、それ以外を完全に削除する")
+    target_parser.add_argument("--no-bundle", action="store_true", help="単一ファイル・バンドルの出力を行わない")
+    target_parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", help="単一バンドルファイルの出力フォーマット")
+    target_parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
+    target_parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
+    target_parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
+    target_parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
+    target_parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
+    target_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
+    target_parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
+    target_parser.add_argument("--no-paste", action="store_true", help="ブラウザ最前面化後のプロンプト入力欄への自動貼り付けをスキップします")
+    target_parser.add_argument("--no-error-clipboard", action="store_true", help="コード抽出失敗時にエラー詳細でクリップボードを上書きする処理をスキップします")
+    target_parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
+
+
+@functools.lru_cache(maxsize=1)
+def _get_registered_subcommand_names() -> FrozenSet[str]:
+    _, subcommand_names = _create_subcommand_parser()
+    return subcommand_names
+
+
+def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]]:
     parser = argparse.ArgumentParser(
         prog="aiskel",
         description="多言語プロジェクトのAIコンテキスト抽出、およびAI出力の自動適用ツール",
@@ -189,27 +229,57 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     listen_parser.add_argument("--export-extension", action="store_true", help="Chrome拡張機能ファイルのみ出力して終了します")
     listen_parser.add_argument("--print-userscript", action="store_true", help="Tampermonkey/Violentmonkey用の監視スクリプトを標準出力に表示して終了します")
 
-    parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
-    parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
-    parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
-    parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装を削除せず保持する関数やメソッド名")
-    parser.add_argument("--focus", action="append", default=[], help="指定したファイルまたはディレクトリのみを処理対象とする")
-    parser.add_argument("--focus-deps", action="store_true", help="--focusで指定したファイルの直接依存ファイルも自動的に対象に含める")
-    parser.add_argument("--only-nodes", action="append", default=[], help="指定したクラスや関数のみを抽出し、それ以外を完全に削除する")
-    parser.add_argument("--no-bundle", action="store_true", help="単一ファイル・バンドルの出力を行わない")
-    parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", help="単一バンドルファイルの出力フォーマット")
-    parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
-    parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
-    parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
-    parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
-    parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
-    parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
-    parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
-    parser.add_argument("--no-paste", action="store_true", help="ブラウザ最前面化後のプロンプト入力欄への自動貼り付けをスキップします")
-    parser.add_argument("--no-error-clipboard", action="store_true", help="コード抽出失敗時にエラー詳細でクリップボードを上書きする処理をスキップします")
-    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
+    start_parser = subparsers.add_parser("start", aliases=["s"], help="プロジェクトを同期してバンドルを準備し、AI Studioをブラウザで開いて監視を開始します")
+    start_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="対象プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    start_parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン・バンドルを出力する先のパス")
+    start_parser.add_argument("--no-sync", action="store_true", help="開始時のスケルトン・バンドル同期をスキップします")
+    start_parser.add_argument("--no-clipboard", action="store_true", help="バンドル内容のクリップボード自動コピーをスキップします")
+    start_parser.add_argument("--no-browser", action="store_true", help="デフォルトブラウザでAI Studioを開く処理をスキップします")
+    start_parser.add_argument("--url", type=str, default="https://aistudio.google.com/", help="起動時にブラウザで開くURL (デフォルト: https://aistudio.google.com/)")
+    start_parser.add_argument("--host", type=str, default=DEFAULT_BRIDGE_HOST, help=f"待受ホスト (デフォルト: {DEFAULT_BRIDGE_HOST})")
+    start_parser.add_argument("--port", type=int, default=DEFAULT_BRIDGE_PORT, help=f"待受ポート (デフォルト: {DEFAULT_BRIDGE_PORT})")
+    start_parser.add_argument("--token", type=str, default=None, help="任意の認証トークン (未指定時は拡張ディレクトリへ自動生成・永続化)")
+    start_parser.add_argument("--no-focus", action="store_true", help="起動時および自動実行時のブラウザ最前面表示を行わない")
+    start_parser.add_argument("--no-start-focus", action="store_true", help="起動時のブラウザ最前面表示のみを行わない")
+    start_parser.add_argument("--no-auto-focus", action="store_true", help="推論完了後の自動実行時のブラウザ最前面表示のみを行わない")
+    start_parser.add_argument("--no-paste", action="store_true", help="自動実行時にプロンプト入力欄への自動貼り付けを行わない")
+    start_parser.add_argument("--extension-dir", type=Path, default=None, help="Chrome拡張機能ファイルの出力先ディレクトリ")
+    start_parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
+    start_parser.add_argument("-k", "--keep-func", action="append", default=[], help="内部実装を削除せず保持する関数やメソッド名")
+    start_parser.add_argument("--focus", action="append", default=[], help="指定したファイルまたはディレクトリのみを処理対象とする")
+    start_parser.add_argument("--focus-deps", action="store_true", help="--focusで指定したファイルの直接依存ファイルも自動的に対象に含める")
+    start_parser.add_argument("--only-nodes", action="append", default=[], help="指定したクラスや関数のみを抽出し、それ以外を完全に削除する")
+    start_parser.add_argument("--no-bundle", action="store_true", help="単一ファイル・バンドルの出力を行わない")
+    start_parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", action=_TrackFormatAction, help="単一バンドルファイルの出力フォーマット")
+    start_parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
+    start_parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
+    start_parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
+    start_parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
+
+    return parser, frozenset(subparsers.choices.keys())
+
+
+def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
+    parser, subcommand_names = _create_subcommand_parser()
     raw_args = list(args) if args is not None else sys.argv[1:]
-    return parser.parse_args(normalize_cli_args(raw_args))
+    normalized = normalize_cli_args(raw_args, subcommand_names=subcommand_names)
+
+    # なぜ必要か: サブコマンド時の余剰引数が親のnargs='?'位置引数へ吸い込まれて黙殺されるのを防ぐため
+    if normalized and normalized[0] in subcommand_names:
+        return parser.parse_args(normalized)
+
+    if "-h" in normalized or "--help" in normalized:
+        _add_root_arguments(parser)
+        return parser.parse_args(normalized)
+
+    root_parser = argparse.ArgumentParser(
+        prog="aiskel",
+        description="多言語プロジェクトのAIコンテキスト抽出、およびAI出力の自動適用ツール",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    root_parser.set_defaults(command=None)
+    _add_root_arguments(root_parser)
+    return root_parser.parse_args(normalized)
 
 
 _normalize_cli_args = normalize_cli_args

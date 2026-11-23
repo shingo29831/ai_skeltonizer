@@ -35,6 +35,7 @@ from .cli_interaction import (
 from .cli_apply import handle_apply_command
 from .cli_commit import handle_commit_command
 from .cli_listen import handle_listen_command
+from .cli_start import handle_start_command
 from .cli_parser import (
     parse_arguments,
     normalize_cli_args,
@@ -239,6 +240,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("listen", "l"):
             return handle_listen_command(parsed_args, on_run_command=main)
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("start", "s"):
+            return handle_start_command(parsed_args, on_run_command=main)
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()

@@ -25,7 +25,13 @@ from .aistudio_command import (
 from .aistudio_extension import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
+    export_browser_extension,
+    format_host_for_url,
+    get_default_extension_dir,
+    is_loopback_host,
+    load_or_create_bridge_token,
     normalize_bind_host,
+    resolve_client_host,
 )
 
 MAX_PAYLOAD_BYTES = 65536
@@ -159,7 +165,8 @@ class AiskelBridgeServer:
         self.command_runner = command_runner
         self.host = host
         self.port = port
-        self.token = token.strip() if token and token.strip() else None
+        self._token: Optional[str] = None
+        self.token = token
         self.no_focus = no_focus
         self.no_paste = no_paste
         self._exec_lock = threading.Lock()
@@ -171,6 +178,21 @@ class AiskelBridgeServer:
         self._stop_event = threading.Event()
         self._use_main_thread_queue = False
         self._shutting_down = False
+
+    @staticmethod
+    def _normalize_token(token: Optional[str]) -> Optional[str]:
+        if token is None:
+            return None
+        cleaned = token.strip()
+        return cleaned if cleaned else None
+
+    @property
+    def token(self) -> Optional[str]:
+        return self._token
+
+    @token.setter
+    def token(self, value: Optional[str]) -> None:
+        self._token = self._normalize_token(value)
 
     @property
     def server_address(self) -> Tuple[str, int]:
@@ -464,6 +486,8 @@ class AiskelBridgeServer:
 
     def bind(self) -> Tuple[str, int]:
         """ソケットをバインドしてサーバーインスタンスを初期化する(IPv4/IPv6対応)。"""
+        if not isinstance(self.port, int) or isinstance(self.port, bool) or not (0 <= self.port <= 65535):
+            raise ValueError(f"ポート番号は 0〜65535 の範囲で指定してください: {self.port}")
         if self._httpd is None:
             handler_cls = self._build_handler_class()
             bind_host = normalize_bind_host(self.host)
@@ -472,8 +496,8 @@ class AiskelBridgeServer:
             self._httpd.daemon_threads = True
         return self.server_address
 
-    def serve_forever(self) -> None:
-        """HTTP待受を専用スレッドで稼働させ、コマンド実行はCOM/UI安全なメインスレッドで処理する。"""
+    def serve_forever(self, on_ready: Optional[Callable[[threading.Event], None]] = None) -> None:
+        """HTTP待受を専用スレッドで稼働させ、起動後処理とコマンド実行はCOM/UI安全なメインスレッドで処理する。"""
         self.bind()
         assert self._httpd is not None
         self._stop_event.clear()
@@ -491,6 +515,13 @@ class AiskelBridgeServer:
         self._http_thread.start()
 
         try:
+            # なぜ必要か: UI/COM操作を含む起動後処理をメインスレッド上で安全に実行し、ログ混線と終了時競合を防ぐため
+            if on_ready is not None:
+                try:
+                    on_ready(self._stop_event)
+                except Exception as e:
+                    print(f"⚠ ブリッジ起動後処理でエラーが発生しました: {e}", file=sys.stderr, flush=True)
+
             while not self._stop_event.is_set():
                 try:
                     job = self._job_queue.get(timeout=0.2)
@@ -525,6 +556,7 @@ class AiskelBridgeServer:
                 finally:
                     job.done_event.set()
         finally:
+            self._stop_event.set()
             with self._queue_state_lock:
                 self._shutting_down = True
                 self._use_main_thread_queue = False
@@ -537,10 +569,106 @@ class AiskelBridgeServer:
             self._shutting_down = True
             self._use_main_thread_queue = False
             self._drain_pending_jobs_locked()
-        if self._httpd is not None:
-            self._httpd.shutdown()
-            self._httpd.server_close()
-            self._httpd = None
-        if self._http_thread is not None and self._http_thread.is_alive():
-            self._http_thread.join(timeout=2.0)
+        httpd = self._httpd
+        http_thread = self._http_thread
+        if httpd is not None and http_thread is not None and http_thread.is_alive():
+            # なぜ必要か: HTTP待受スレッド未起動時にshutdown()を呼ぶとBaseServer内で永久待機するため
+            httpd.shutdown()
+        if http_thread is not None and http_thread.is_alive():
+            http_thread.join(timeout=2.0)
+        if httpd is not None:
+            # なぜ必要か: 待受スレッド終了後にソケットを閉じて参照競合を防ぐため
+            httpd.server_close()
+        self._httpd = None
         self._http_thread = None
+
+
+def run_bridge_server(
+    project_root: Path,
+    on_run_command: Callable[[List[str]], int],
+    host: str = DEFAULT_BRIDGE_HOST,
+    port: int = DEFAULT_BRIDGE_PORT,
+    explicit_token: Optional[str] = None,
+    extension_dir_arg: Optional[Path] = None,
+    no_focus: bool = False,
+    no_paste: bool = False,
+    on_ready: Optional[Callable[[threading.Event], None]] = None,
+) -> int:
+    """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
+    if not project_root.exists() or not project_root.is_dir():
+        print(f"エラー: 指定されたプロジェクトディレクトリが存在しません: {project_root}", file=sys.stderr)
+        return 1
+
+    if not isinstance(port, int) or isinstance(port, bool) or not (0 <= port <= 65535):
+        print(f"エラー: ポート番号は 0〜65535 の範囲で指定してください: {port}", file=sys.stderr)
+        return 1
+
+    server = AiskelBridgeServer(
+        project_root=project_root,
+        command_runner=on_run_command,
+        host=host,
+        port=port,
+        token=None,
+        no_focus=no_focus,
+        no_paste=no_paste,
+    )
+
+    # --port 0(動的割当)でも実ポートを拡張機能へ反映させるため先にbindを実行
+    try:
+        bound_host, bound_port = server.bind()
+    except (OSError, ValueError, OverflowError) as e:
+        print(f"エラー: ブリッジサーバーの起動に失敗しました ({host}:{port}): {e}", file=sys.stderr)
+        return 1
+
+    try:
+        try:
+            extension_dir = (
+                extension_dir_arg.resolve()
+                if extension_dir_arg is not None
+                else get_default_extension_dir(port=bound_port)
+            )
+            active_token = load_or_create_bridge_token(extension_dir, explicit_token=explicit_token)
+            server.token = active_token
+            exported_dir, extension_updated = export_browser_extension(
+                extension_dir,
+                host=bound_host,
+                port=bound_port,
+                token=active_token,
+            )
+        except OSError as e:
+            print(f"エラー: 拡張機能または認証トークンファイルの出力に失敗しました: {e}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"エラー: 拡張機能またはホスト設定が不正です: {e}", file=sys.stderr)
+            return 1
+
+        try:
+            client_host = resolve_client_host(bound_host)
+            bound_url_host = format_host_for_url(bound_host)
+            client_url_host = format_host_for_url(client_host)
+            loopback = is_loopback_host(bound_host)
+        except ValueError as e:
+            print(f"エラー: ホスト設定が不正です: {e}", file=sys.stderr)
+            return 1
+
+        print(f"🎧 Google AI Studio 自動実行ブリッジを起動しました: http://{bound_url_host}:{bound_port}")
+        if client_url_host != bound_url_host:
+            print(f"   - ブラウザ接続先    : http://{client_url_host}:{bound_port}")
+        if not loopback:
+            print("   ⚠ ループバック以外のインターフェースで待受中です。認証トークンが有効化されています。")
+        print(f"   - 対象プロジェクト  : {project_root}")
+        print(f"   - Chrome拡張フォルダ: {exported_dir}")
+        if extension_updated:
+            print("   ⚠ 拡張機能設定が更新されました。既に読み込み済みの場合は chrome://extensions で「更新(リロード)」してください。")
+        print("   ※ 初回のみ chrome://extensions から上記拡張フォルダを読み込んでください (Tampermonkey用: aiskel listen --print-userscript)")
+        print("   推論完了時の `aiskel c` コマンドを待機中... (終了するには Ctrl+C)")
+
+        server.serve_forever(on_ready=on_ready)
+    except (OSError, ValueError) as e:
+        print(f"エラー: ブリッジサーバーの実行中にエラーが発生しました: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\n⏹ ブリッジサーバーを終了しました。")
+    finally:
+        server.shutdown()
+    return 0
