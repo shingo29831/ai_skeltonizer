@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Set
 
+from .core.aistudio_extension import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 from .core.bloat_detector import DEFAULT_BLOAT_MAX_CHARS, DEFAULT_BLOAT_MAX_LINES, DEFAULT_TOP_FILES_COUNT
 from .core.code_extractor import DEFAULT_MAX_CHARS
 
@@ -14,7 +15,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         return args
 
     # なぜ必要か: サブコマンド実行時にルートレベルの -c 正規化との競合を防ぐため
-    if args[0] in ("apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size"):
+    if args[0] in ("apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "docs", "d", "watch", "w", "bloat", "b", "size", "listen", "l"):
         return args
 
     cmd_idx = -1
@@ -29,7 +30,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         i = 0
         while i < len(rest):
             token = rest[i]
-            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "-h", "--help"):
+            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "--no-error-clipboard", "-h", "--help"):
                 options.append(token)
                 i += 1
             elif token in ("--max-chars", "--dir"):
@@ -59,7 +60,7 @@ def normalize_cli_args(args: List[str]) -> List[str]:
         i = 1
         while i < len(rest):
             token = rest[i]
-            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
+            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "--no-error-clipboard", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
                 options.append(token)
                 i += 1
             elif token in ("--max-chars", "-f", "--full-path", "-k", "--keep-func", "--focus", "--only-nodes", "--format", "--policy"):
@@ -146,6 +147,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
     copy_parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
     copy_parser.add_argument("--no-paste", action="store_true", help="ブラウザ最前面化後のプロンプト入力欄への自動貼り付けをスキップします")
+    copy_parser.add_argument("--no-error-clipboard", action="store_true", help="コード抽出失敗時にエラー詳細でクリップボードを上書きする処理をスキップします")
     copy_parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"コピーを許可する最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     copy_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ")
 
@@ -176,6 +178,17 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     watch_parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
     watch_parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
 
+    listen_parser = subparsers.add_parser("listen", aliases=["l"], help="Google AI Studioの推論完了を監視し、応答内の aiskel c コマンドを自動実行するローカルブリッジを起動します")
+    listen_parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="対象プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    listen_parser.add_argument("--host", type=str, default=DEFAULT_BRIDGE_HOST, help=f"待受ホスト (デフォルト: {DEFAULT_BRIDGE_HOST})")
+    listen_parser.add_argument("--port", type=int, default=DEFAULT_BRIDGE_PORT, help=f"待受ポート (デフォルト: {DEFAULT_BRIDGE_PORT})")
+    listen_parser.add_argument("--token", type=str, default=None, help="任意の認証トークン (未指定時は拡張ディレクトリへ自動生成・永続化)")
+    listen_parser.add_argument("--no-focus", action="store_true", help="自動実行時にブラウザ最前面表示を行わない")
+    listen_parser.add_argument("--no-paste", action="store_true", help="自動実行時にプロンプト入力欄への自動貼り付けを行わない")
+    listen_parser.add_argument("--extension-dir", type=Path, default=None, help="Chrome拡張機能ファイルの出力先ディレクトリ")
+    listen_parser.add_argument("--export-extension", action="store_true", help="Chrome拡張機能ファイルのみ出力して終了します")
+    listen_parser.add_argument("--print-userscript", action="store_true", help="Tampermonkey/Violentmonkey用の監視スクリプトを標準出力に表示して終了します")
+
     parser.add_argument("project_dir", type=Path, nargs="?", default=Path("."), help="解析対象のプロジェクトルートディレクトリのパス")
     parser.add_argument("output_dir", type=Path, nargs="?", default=None, help="スケルトン化したファイルを出力する先のパス")
     parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")
@@ -193,6 +206,7 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
     parser.add_argument("--no-focus", action="store_true", help="コピー後にデフォルトブラウザを最前面に表示する処理をスキップします")
     parser.add_argument("--no-paste", action="store_true", help="ブラウザ最前面化後のプロンプト入力欄への自動貼り付けをスキップします")
+    parser.add_argument("--no-error-clipboard", action="store_true", help="コード抽出失敗時にエラー詳細でクリップボードを上書きする処理をスキップします")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS, help=f"クリップボードコピー時の最大文字数 (デフォルト: {DEFAULT_MAX_CHARS:,})")
     raw_args = list(args) if args is not None else sys.argv[1:]
     return parser.parse_args(normalize_cli_args(raw_args))

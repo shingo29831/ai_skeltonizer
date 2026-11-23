@@ -1,0 +1,546 @@
+"""Module: @role: ブラウザ監視クライアントからの通知を受信し、検証済みaiskelコマンドをメインスレッド上で安全に自動実行するローカルHTTPブリッジを提供する。"""
+import contextlib
+import hmac
+import io
+import ipaddress
+import json
+import queue
+import socket
+import sys
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Callable, Deque, Dict, List, Optional, TextIO, Tuple
+from urllib.parse import urlsplit
+
+from .aistudio_command import (
+    CommandValidationError,
+    build_safe_copy_argv,
+    extract_aiskel_copy_commands,
+)
+from .aistudio_extension import (
+    DEFAULT_BRIDGE_HOST,
+    DEFAULT_BRIDGE_PORT,
+    normalize_bind_host,
+)
+
+MAX_PAYLOAD_BYTES = 65536
+MAX_DEDUP_HISTORY = 100
+EXECUTION_WAIT_TIMEOUT_SEC = 120.0
+SOCKET_TIMEOUT_SEC = 10.0
+MAX_ERROR_DETAIL_CHARS = 240
+ALLOWED_EXTENSION_SCHEMES = frozenset({"chrome-extension", "moz-extension", "edge-extension"})
+
+
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _is_ipv6_literal(host: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True)
+class BridgeExecutionResult:
+    """ブリッジ経由コマンド実行の結果を保持する。"""
+
+    ok: bool
+    exit_code: int
+    command: str
+    argv: Tuple[str, ...]
+    message: str
+    skipped: bool = False
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "ok": self.ok,
+            "exit_code": self.exit_code,
+            "command": self.command,
+            "message": self.message,
+            "skipped": self.skipped,
+        }
+
+
+@dataclass
+class _ExecutionJob:
+    payload: Dict[str, object]
+    done_event: threading.Event = field(default_factory=threading.Event)
+    status_code: int = int(HTTPStatus.INTERNAL_SERVER_ERROR)
+    result: Optional[BridgeExecutionResult] = None
+    error: Optional[BaseException] = None
+
+
+class _TeeTextIO:
+    """元のstderrへリアルタイム出力しつつ、ブラウザ通知用にエラー内容を同時捕捉するストリーム。"""
+
+    def __init__(self, wrapped: TextIO) -> None:
+        self._wrapped = wrapped
+        self._buffer = io.StringIO()
+
+    def write(self, text: str) -> int:
+        self._buffer.write(text)
+        return self._wrapped.write(text)
+
+    def flush(self) -> None:
+        self._wrapped.flush()
+
+    def isatty(self) -> bool:
+        return getattr(self._wrapped, "isatty", lambda: False)()
+
+    def getvalue(self) -> str:
+        return self._buffer.getvalue()
+
+
+def _normalize_system_exit_code(exc: SystemExit) -> int:
+    if exc.code is None:
+        return 0
+    if isinstance(exc.code, int):
+        return int(exc.code)
+    return 1
+
+
+def _extract_error_detail(stderr_text: str) -> str:
+    lines: List[str] = []
+    for raw in stderr_text.splitlines():
+        cleaned = raw.strip()
+        if not cleaned or cleaned.startswith("📋"):
+            continue
+        lines.append(cleaned)
+    detail = " / ".join(lines)
+    if len(detail) > MAX_ERROR_DETAIL_CHARS:
+        return detail[: MAX_ERROR_DETAIL_CHARS - 3] + "..."
+    return detail
+
+
+def is_allowed_origin(origin: Optional[str], allow_missing: bool = False) -> bool:
+    """OriginヘッダがGoogle AI Studioまたはブラウザ拡張機能に厳密一致するか判定する。"""
+    normalized = (origin or "").strip()
+    # Userscript等のサンドボックス環境から送られるOrigin: nullはトークン認証済み時のみ許可
+    if not normalized or normalized.lower() == "null":
+        return allow_missing
+
+    parsed = urlsplit(normalized)
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return False
+
+    scheme = parsed.scheme.lower()
+    if scheme == "https":
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        return (parsed.hostname or "").lower() == "aistudio.google.com" and parsed.port in (None, 443)
+
+    if scheme in ALLOWED_EXTENSION_SCHEMES:
+        return bool(parsed.netloc)
+
+    return False
+
+
+class AiskelBridgeServer:
+    """Google AI Studio監視クライアントからの通知を受理し、メインスレッドでaiskel cを自動実行するHTTPサーバー。"""
+
+    def __init__(
+        self,
+        project_root: Path,
+        command_runner: Callable[[List[str]], int],
+        host: str = DEFAULT_BRIDGE_HOST,
+        port: int = DEFAULT_BRIDGE_PORT,
+        token: Optional[str] = None,
+        no_focus: bool = False,
+        no_paste: bool = False,
+    ) -> None:
+        self.project_root = project_root.resolve()
+        self.command_runner = command_runner
+        self.host = host
+        self.port = port
+        self.token = token.strip() if token and token.strip() else None
+        self.no_focus = no_focus
+        self.no_paste = no_paste
+        self._exec_lock = threading.Lock()
+        self._queue_state_lock = threading.Lock()
+        self._recent_keys: Deque[str] = deque(maxlen=MAX_DEDUP_HISTORY)
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._http_thread: Optional[threading.Thread] = None
+        self._job_queue: "queue.Queue[_ExecutionJob]" = queue.Queue()
+        self._stop_event = threading.Event()
+        self._use_main_thread_queue = False
+        self._shutting_down = False
+
+    @property
+    def server_address(self) -> Tuple[str, int]:
+        if self._httpd is not None:
+            addr = self._httpd.server_address
+            return str(addr[0]), int(addr[1])
+        return normalize_bind_host(self.host), self.port
+
+    def _normalize_incoming_commands(self, payload: Dict[str, object]) -> List[str]:
+        raw_commands = payload.get("commands")
+        extracted: List[str] = []
+        if isinstance(raw_commands, list):
+            for item in raw_commands:
+                if isinstance(item, str):
+                    extracted.extend(extract_aiskel_copy_commands(item))
+        elif isinstance(payload.get("command"), str):
+            extracted.extend(extract_aiskel_copy_commands(str(payload["command"])))
+        elif isinstance(payload.get("response_text"), str):
+            extracted.extend(extract_aiskel_copy_commands(str(payload["response_text"])))
+        return extracted
+
+    def handle_execute_payload(self, payload: Dict[str, object]) -> Tuple[int, BridgeExecutionResult]:
+        """受信JSONペイロードを検証し、安全なaiskel cコマンドを排他実行する。"""
+        commands = self._normalize_incoming_commands(payload)
+        if not commands:
+            return int(HTTPStatus.BAD_REQUEST), BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command="",
+                argv=(),
+                message="実行可能な aiskel c コマンドが含まれていません",
+            )
+
+        # 別ウィンドウ作業中のフォーカス奪取・誤ペースト・クリップボード破壊を防ぐため非フォーカス時は自動無効化
+        page_focused = payload.get("page_focused")
+        effective_no_focus = self.no_focus or (page_focused is False)
+        effective_no_paste = self.no_paste or (page_focused is False)
+        # --no-focus起動時でもフォーカス中ならエラー詳細のクリップボード保存を維持するため非フォーカス時のみ抑止
+        effective_no_error_clipboard = page_focused is False
+
+        try:
+            argv, display_cmd = build_safe_copy_argv(
+                commands,
+                project_root=self.project_root,
+                no_focus=effective_no_focus,
+                no_paste=effective_no_paste,
+                no_error_clipboard=effective_no_error_clipboard,
+            )
+        except CommandValidationError as e:
+            return int(HTTPStatus.BAD_REQUEST), BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command=" ; ".join(commands),
+                argv=(),
+                message=str(e),
+            )
+
+        turn_id = str(payload.get("turn_id") or "").strip()
+        dedup_key = f"{turn_id}::{display_cmd}" if turn_id else ""
+
+        with self._exec_lock:
+            if dedup_key and dedup_key in self._recent_keys:
+                return int(HTTPStatus.OK), BridgeExecutionResult(
+                    ok=True,
+                    exit_code=0,
+                    command=display_cmd,
+                    argv=tuple(argv),
+                    message="同一ターンのコマンドは実行済みのためスキップしました",
+                    skipped=True,
+                )
+
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(f"\n[{timestamp}] 🤖 AI Studio 推論完了を検知 -> 自動実行: {display_cmd}", flush=True)
+
+            tee_stderr = _TeeTextIO(sys.stderr)
+            system_exit_note = ""
+            with contextlib.redirect_stderr(tee_stderr):
+                try:
+                    exit_code = int(self.command_runner(argv))
+                except SystemExit as e:
+                    # argparse等のSystemExitでブリッジワーカーループが崩壊するのを防止
+                    exit_code = _normalize_system_exit_code(e)
+                    if isinstance(e.code, str) and e.code.strip():
+                        system_exit_note = e.code.strip()
+
+            if exit_code == 0 and dedup_key:
+                self._recent_keys.append(dedup_key)
+
+            if exit_code == 0:
+                status_msg = "コマンドを実行しました"
+            else:
+                detail = _extract_error_detail(tee_stderr.getvalue()) or system_exit_note
+                status_msg = (
+                    f"コマンドが終了コード {exit_code} で失敗しました: {detail}"
+                    if detail
+                    else f"コマンドが終了コード {exit_code} で失敗しました"
+                )
+
+            return int(HTTPStatus.OK), BridgeExecutionResult(
+                ok=(exit_code == 0),
+                exit_code=exit_code,
+                command=display_cmd,
+                argv=tuple(argv),
+                message=status_msg,
+            )
+
+    def _dispatch_execute_payload(self, payload: Dict[str, object]) -> Tuple[int, BridgeExecutionResult]:
+        # シャットダウン時のキュー取り残し競合を防ぐため状態確認と投入をロック内で原子化
+        with self._queue_state_lock:
+            if self._shutting_down:
+                return int(HTTPStatus.SERVICE_UNAVAILABLE), BridgeExecutionResult(
+                    ok=False,
+                    exit_code=1,
+                    command="",
+                    argv=(),
+                    message="ブリッジサーバー終了のため実行を中止しました",
+                )
+            if not self._use_main_thread_queue:
+                run_inline = True
+                job: Optional[_ExecutionJob] = None
+            else:
+                run_inline = False
+                job = _ExecutionJob(payload=payload)
+                self._job_queue.put(job)
+
+        if run_inline or job is None:
+            return self.handle_execute_payload(payload)
+
+        if not job.done_event.wait(timeout=EXECUTION_WAIT_TIMEOUT_SEC):
+            return int(HTTPStatus.GATEWAY_TIMEOUT), BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command="",
+                argv=(),
+                message="コマンド実行がタイムアウトしました",
+            )
+        if job.error is not None:
+            raise job.error
+        if job.result is None:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command="",
+                argv=(),
+                message="コマンド実行結果を取得できませんでした",
+            )
+        return job.status_code, job.result
+
+    def _drain_pending_jobs_locked(self) -> None:
+        while True:
+            try:
+                job = self._job_queue.get_nowait()
+            except queue.Empty:
+                break
+            job.status_code = int(HTTPStatus.SERVICE_UNAVAILABLE)
+            job.result = BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command="",
+                argv=(),
+                message="ブリッジサーバー終了のため実行を中止しました",
+            )
+            job.done_event.set()
+
+    def _build_handler_class(self):
+        bridge = self
+
+        class _BridgeRequestHandler(BaseHTTPRequestHandler):
+            # 不完全ボディ送信によるrfile.read永久ブロックを防止
+            timeout = SOCKET_TIMEOUT_SEC
+
+            def log_message(self, format: str, *args) -> None:
+                return
+
+            def _send_cors_headers(self, origin: Optional[str]) -> None:
+                normalized_origin = (origin or "").strip()
+                if normalized_origin and normalized_origin.lower() != "null" and is_allowed_origin(normalized_origin, allow_missing=False):
+                    self.send_header("Access-Control-Allow-Origin", normalized_origin)
+                    self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Aiskel-Token")
+                # ChromeのPrivate Network Accessプリフライトを通過させるため付与
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+
+            def _send_json(self, status_code: int, body: Dict[str, object]) -> None:
+                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                try:
+                    self.send_response(status_code)
+                    self._send_cors_headers(self.headers.get("Origin"))
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except OSError:
+                    return
+
+            def _verify_access(self) -> bool:
+                origin = self.headers.get("Origin")
+                token_verified = False
+                if bridge.token:
+                    provided = (self.headers.get("X-Aiskel-Token") or "").strip()
+                    if not provided or not hmac.compare_digest(provided, bridge.token):
+                        self._send_json(int(HTTPStatus.UNAUTHORIZED), {"ok": False, "message": "認証トークンが一致しません"})
+                        return False
+                    token_verified = True
+
+                # トークン未設定時はOrigin欠落・Origin: nullによる無認証ローカル実行を防止
+                if not is_allowed_origin(origin, allow_missing=token_verified):
+                    self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
+                    return False
+                return True
+
+            def do_OPTIONS(self) -> None:
+                origin = self.headers.get("Origin")
+                if not is_allowed_origin(origin, allow_missing=False):
+                    self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
+                    return
+                self.send_response(int(HTTPStatus.NO_CONTENT))
+                self._send_cors_headers(origin)
+                self.end_headers()
+
+            def do_GET(self) -> None:
+                req_path = urlsplit(self.path).path
+                if req_path != "/api/health":
+                    self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
+                    return
+                if not self._verify_access():
+                    return
+                self._send_json(
+                    int(HTTPStatus.OK),
+                    {
+                        "ok": True,
+                        "project_root": str(bridge.project_root),
+                    },
+                )
+
+            def do_POST(self) -> None:
+                req_path = urlsplit(self.path).path
+                if req_path != "/api/execute":
+                    self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
+                    return
+                if not self._verify_access():
+                    return
+
+                content_length_raw = self.headers.get("Content-Length")
+                if content_length_raw is None:
+                    self._send_json(int(HTTPStatus.LENGTH_REQUIRED), {"ok": False, "message": "Content-Lengthヘッダが必要です"})
+                    return
+                try:
+                    content_length = int(content_length_raw)
+                except ValueError:
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "不正なContent-Lengthです"})
+                    return
+
+                if content_length <= 0:
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが空です"})
+                    return
+                if content_length > MAX_PAYLOAD_BYTES:
+                    self._send_json(int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), {"ok": False, "message": "ペイロードサイズが上限を超えています"})
+                    return
+
+                try:
+                    raw_body = self.rfile.read(content_length)
+                except (socket.timeout, TimeoutError):
+                    self._send_json(int(HTTPStatus.REQUEST_TIMEOUT), {"ok": False, "message": "リクエストボディの受信がタイムアウトしました"})
+                    return
+                except OSError:
+                    return
+
+                if len(raw_body) != content_length:
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが不完全です"})
+                    return
+                try:
+                    payload = json.loads(raw_body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONの解析に失敗しました"})
+                    return
+
+                if not isinstance(payload, dict):
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONオブジェクトを指定してください"})
+                    return
+
+                try:
+                    status_code, result = bridge._dispatch_execute_payload(payload)
+                    self._send_json(status_code, result.to_dict())
+                except Exception as e:
+                    print(f"✖ ブリッジ実行中に予期しないエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+
+        return _BridgeRequestHandler
+
+    def bind(self) -> Tuple[str, int]:
+        """ソケットをバインドしてサーバーインスタンスを初期化する(IPv4/IPv6対応)。"""
+        if self._httpd is None:
+            handler_cls = self._build_handler_class()
+            bind_host = normalize_bind_host(self.host)
+            server_cls = _IPv6ThreadingHTTPServer if _is_ipv6_literal(bind_host) else ThreadingHTTPServer
+            self._httpd = server_cls((bind_host, self.port), handler_cls)
+            self._httpd.daemon_threads = True
+        return self.server_address
+
+    def serve_forever(self) -> None:
+        """HTTP待受を専用スレッドで稼働させ、コマンド実行はCOM/UI安全なメインスレッドで処理する。"""
+        self.bind()
+        assert self._httpd is not None
+        self._stop_event.clear()
+        with self._queue_state_lock:
+            self._shutting_down = False
+            self._use_main_thread_queue = True
+
+        httpd = self._httpd
+        self._http_thread = threading.Thread(
+            target=httpd.serve_forever,
+            kwargs={"poll_interval": 0.2},
+            daemon=True,
+            name="aiskel-bridge-http",
+        )
+        self._http_thread.start()
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    job = self._job_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                try:
+                    status_code, result = self.handle_execute_payload(job.payload)
+                    job.status_code = status_code
+                    job.result = result
+                except KeyboardInterrupt:
+                    job.status_code = int(HTTPStatus.SERVICE_UNAVAILABLE)
+                    job.result = BridgeExecutionResult(
+                        ok=False,
+                        exit_code=1,
+                        command="",
+                        argv=(),
+                        message="ブリッジサーバー終了のため実行を中止しました",
+                    )
+                    raise
+                except SystemExit as e:
+                    exit_code = _normalize_system_exit_code(e)
+                    job.status_code = int(HTTPStatus.OK)
+                    job.result = BridgeExecutionResult(
+                        ok=(exit_code == 0),
+                        exit_code=exit_code,
+                        command="",
+                        argv=(),
+                        message=f"コマンドが終了コード {exit_code} で終了しました",
+                    )
+                except BaseException as e:
+                    job.error = e
+                finally:
+                    job.done_event.set()
+        finally:
+            with self._queue_state_lock:
+                self._shutting_down = True
+                self._use_main_thread_queue = False
+                self._drain_pending_jobs_locked()
+
+    def shutdown(self) -> None:
+        """起動中サーバーを安全に停止・クローズする。"""
+        self._stop_event.set()
+        with self._queue_state_lock:
+            self._shutting_down = True
+            self._use_main_thread_queue = False
+            self._drain_pending_jobs_locked()
+        if self._httpd is not None:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+            self._httpd = None
+        if self._http_thread is not None and self._http_thread.is_alive():
+            self._http_thread.join(timeout=2.0)
+        self._http_thread = None

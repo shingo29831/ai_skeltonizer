@@ -34,6 +34,7 @@ from .cli_interaction import (
 )
 from .cli_apply import handle_apply_command
 from .cli_commit import handle_commit_command
+from .cli_listen import handle_listen_command
 from .cli_parser import (
     parse_arguments,
     normalize_cli_args,
@@ -186,12 +187,13 @@ def main(args: Optional[List[str]] = None) -> int:
                     f"失敗原因: {e}\n\n"
                     f"上記エラーを解消するための正しい対象指定（ファイルパスやノード名）を提示してください。"
                 )
-                # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存
-                try:
-                    set_clipboard_text(error_report)
-                    print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
-                except Exception:
-                    pass
+                # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存(非フォーカス時等はスキップ)
+                if not getattr(parsed_args, "no_error_clipboard", False):
+                    try:
+                        set_clipboard_text(error_report)
+                        print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
+                    except Exception:
+                        pass
                 return 1
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("docs", "d"):
@@ -234,6 +236,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("commit", "cm", "ci"):
             return handle_commit_command(parsed_args, on_auto_sync=_trigger_auto_sync)
+
+        if hasattr(parsed_args, "command") and parsed_args.command in ("listen", "l"):
+            return handle_listen_command(parsed_args, on_run_command=main)
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()
