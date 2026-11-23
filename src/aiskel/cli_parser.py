@@ -268,9 +268,12 @@ def parse_arguments(args: Optional[List[str]] = None) -> argparse.Namespace:
     if normalized and normalized[0] in subcommand_names:
         return parser.parse_args(normalized)
 
-    if "-h" in normalized or "--help" in normalized:
+    args_before_dd = normalized[: normalized.index("--")] if "--" in normalized else normalized
+    if "-h" in args_before_dd or "--help" in args_before_dd:
         _add_root_arguments(parser)
-        return parser.parse_args(normalized)
+        # なぜ必要か: 位置引数がsubparsersへ誤解釈されるのを防ぐため
+        help_flag = "--help" if "--help" in args_before_dd else "-h"
+        return parser.parse_args([help_flag])
 
     root_parser = argparse.ArgumentParser(
         prog="aiskel",
