@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
 from .browser_focus_windows import _get_windows_default_browser_exe_names
+from .browser_paste_types import PasteErrorKind, PasteOutcome, is_login_or_auth_title
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _COINIT_APARTMENTTHREADED = 0x2
@@ -148,6 +149,10 @@ def _init_paste_win32_apis() -> Tuple[Any, Any, Any, Any]:
 
     user32.GetForegroundWindow.argtypes = []
     user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.IsWindow.argtypes = [ctypes.c_void_p]
+    user32.IsWindow.restype = ctypes.c_int
+    user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.IsWindowVisible.restype = ctypes.c_int
     user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
     user32.GetWindowThreadProcessId.restype = ctypes.c_uint32
     user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
@@ -461,6 +466,7 @@ def _find_best_prompt_element(
     root_el: ctypes.c_void_p,
     oleaut32: Any,
     labels: Sequence[str],
+    quick_probe: bool = False,
 ) -> Tuple[Optional[ctypes.c_void_p], str, str]:
     labels_lower = [lbl.strip().lower() for lbl in labels if lbl.strip()]
     edit_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_EditControlTypeId)
@@ -482,12 +488,15 @@ def _find_best_prompt_element(
 
     try:
         doc_el: Optional[ctypes.c_void_p] = None
+        max_attempts = 4 if quick_probe else 12
+        sleep_sec = 0.06 if quick_probe else 0.08
+        early_dom_attempt = 2 if quick_probe else 3
         try:
-            for attempt in range(12):
+            for attempt in range(max_attempts):
                 if doc_el is None:
                     doc_el = _find_visible_active_document(p_uia, root_el, oleaut32)
                 if doc_el is None:
-                    time.sleep(0.08)
+                    time.sleep(sleep_sec)
                     continue
 
                 candidates = _uia_find_all(doc_el, input_cond)
@@ -526,14 +535,14 @@ def _find_best_prompt_element(
                     return best_el, best_label, ""
 
                 # アクティブDocumentのDOMが展開済みかつ数回試して見つからない場合は早期終了する
-                if attempt >= 3 and true_cond is not None:
+                if attempt >= early_dom_attempt and true_cond is not None:
                     any_child = _uia_find_first(doc_el, true_cond)
                     has_dom = any_child is not None
                     _com_release(any_child)
                     if has_dom:
                         return None, "", "ページ内に対象のプロンプト入力欄が見つかりませんでした"
 
-                time.sleep(0.08)
+                time.sleep(sleep_sec)
 
             return None, "", "プロンプト入力欄の検出がタイムアウトしました"
         finally:
@@ -628,32 +637,84 @@ def paste_windows_browser_prompt(
     target_hwnd: Optional[int] = None,
     allowed_title_keywords: Sequence[str] = (),
     allow_non_empty: bool = False,
-) -> Tuple[bool, str]:
+    quick_probe: bool = False,
+) -> PasteOutcome:
     """Windowsブラウザの対象プロンプト入力欄を検出し、フォーカスしてCtrl+Vを送信する。"""
     exe_names = set(_get_windows_default_browser_exe_names())
     if not exe_names:
-        return False, "デフォルトブラウザの実行ファイルが特定できませんでした"
+        return PasteOutcome(False, "デフォルトブラウザの実行ファイルが特定できませんでした", False, PasteErrorKind.UNSUPPORTED)
 
     user32, kernel32, ole32, oleaut32 = _init_paste_win32_apis()
-    fg_hwnd = user32.GetForegroundWindow()
-    hwnd = target_hwnd or (int(fg_hwnd) if fg_hwnd else 0)
-    if not hwnd or not fg_hwnd or int(fg_hwnd) != hwnd:
-        return False, "対象ブラウザが最前面にありません"
+    fg_hwnd_ptr = user32.GetForegroundWindow()
+    fg_hwnd = int(fg_hwnd_ptr) if fg_hwnd_ptr else 0
+    if not fg_hwnd:
+        # ウィンドウ遷移直後の一時的なフォーカス喪失時のみリトライを許容する
+        return PasteOutcome(False, "対象ブラウザが最前面にありません", True, PasteErrorKind.WINDOW_LOST)
 
-    fg_exe = _get_hwnd_process_exe_name(hwnd, user32, kernel32)
+    fg_exe = _get_hwnd_process_exe_name(fg_hwnd, user32, kernel32)
+    if target_hwnd:
+        if fg_hwnd == target_hwnd:
+            hwnd = target_hwnd
+        elif not user32.IsWindow(ctypes.c_void_p(target_hwnd)) or not user32.IsWindowVisible(ctypes.c_void_p(target_hwnd)):
+            # 一時ウィンドウ終了後に新ブラウザウィンドウへ遷移した場合のみ追従し、非ブラウザ復帰時は奪取しない
+            if fg_exe in exe_names:
+                hwnd = fg_hwnd
+            else:
+                return PasteOutcome(
+                    False,
+                    "対象ブラウザウィンドウが閉じられ別アプリへ切り替わったため中断しました",
+                    False,
+                    PasteErrorKind.USER_ABORTED,
+                )
+        elif fg_exe in exe_names:
+            return PasteOutcome(
+                False,
+                "別のブラウザウィンドウが最前面になったため中断しました",
+                False,
+                PasteErrorKind.USER_ABORTED,
+            )
+        else:
+            return PasteOutcome(
+                False,
+                "別アプリへ切り替わったため自動貼り付けを中断しました",
+                False,
+                PasteErrorKind.USER_ABORTED,
+            )
+    else:
+        hwnd = fg_hwnd
+
     if fg_exe not in exe_names:
-        return False, f"最前面ウィンドウ ({fg_exe}) がデフォルトブラウザではありません"
+        return PasteOutcome(
+            False,
+            f"最前面ウィンドウ ({fg_exe}) がデフォルトブラウザではありません",
+            False,
+            PasteErrorKind.USER_ABORTED,
+        )
 
     title = _get_window_title(hwnd, user32)
+    if is_login_or_auth_title(title):
+        return PasteOutcome(
+            False,
+            f"認証・ログイン画面のため自動貼り付けを中断しました (title: {title})",
+            False,
+            PasteErrorKind.LOGIN_REQUIRED,
+            target_window=hwnd,
+        )
     if allowed_title_keywords:
         title_lower = title.lower()
         if not any(kw in title_lower for kw in allowed_title_keywords):
-            return False, f"許可対象外のページのため自動貼り付けをスキップしました (title: {title})"
+            return PasteOutcome(
+                False,
+                f"許可対象外のページのため自動貼り付けをスキップしました (title: {title})",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=hwnd,
+            )
 
     hr_co = ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED)
     should_uninit = hr_co in (0, 1)
     if hr_co < 0 and hr_co != _RPC_E_CHANGED_MODE:
-        return False, f"COM初期化に失敗しました (HRESULT={hr_co:#x})"
+        return PasteOutcome(False, f"COM初期化に失敗しました (HRESULT={hr_co:#x})", False, PasteErrorKind.FAILED, target_window=hwnd)
 
     p_uia = ctypes.c_void_p()
     root_el = ctypes.c_void_p()
@@ -667,23 +728,38 @@ def paste_windows_browser_prompt(
             ctypes.byref(p_uia),
         )
         if hr_create < 0 or not p_uia.value:
-            return False, f"UI Automationの初期化に失敗しました (HRESULT={hr_create:#x})"
+            return PasteOutcome(False, f"UI Automationの初期化に失敗しました (HRESULT={hr_create:#x})", False, PasteErrorKind.FAILED, target_window=hwnd)
 
         hr_el = _com_call(
             p_uia, 6, ctypes.c_long, (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
             ctypes.c_void_p(hwnd), ctypes.byref(root_el),
         )
         if hr_el < 0 or not root_el.value:
-            return False, f"ブラウザウィンドウのUIA要素取得に失敗しました (HRESULT={hr_el:#x})"
+            return PasteOutcome(False, f"ブラウザウィンドウのUIA要素取得に失敗しました (HRESULT={hr_el:#x})", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
 
-        target_el, matched_lbl, err_reason = _find_best_prompt_element(p_uia, root_el, oleaut32, prompt_labels)
+        target_el, matched_lbl, err_reason = _find_best_prompt_element(
+            p_uia, root_el, oleaut32, prompt_labels, quick_probe=quick_probe
+        )
         if target_el is None:
-            return False, err_reason
+            is_cond_err = "検索条件の生成" in err_reason
+            return PasteOutcome(
+                False,
+                err_reason,
+                not is_cond_err,
+                PasteErrorKind.FAILED if is_cond_err else PasteErrorKind.TRANSIENT,
+                target_window=hwnd,
+            )
 
         if not allow_non_empty:
             existing_val = _uia_get_prop_str(target_el, oleaut32, _UIA_ValueValuePropertyId).strip()
             if existing_val and existing_val.lower() != matched_lbl:
-                return False, "入力欄に既存テキストが存在するため自動貼り付けをスキップしました"
+                return PasteOutcome(
+                    False,
+                    "入力欄に既存テキストが存在するため自動貼り付けをスキップしました",
+                    False,
+                    PasteErrorKind.USER_ABORTED,
+                    target_window=hwnd,
+                )
 
         # 物理カーソル移動やオーバーレイ誤爆を避けるためUIA SetFocusを最優先する
         _com_call(target_el, 3, ctypes.c_long, ())
@@ -691,17 +767,42 @@ def paste_windows_browser_prompt(
         has_focus = _uia_get_prop_bool(target_el, oleaut32, _UIA_HasKeyboardFocusPropertyId, default=False)
         if not has_focus:
             if not _click_safe_region_preserving_cursor(user32, target_el, oleaut32):
-                return False, "プロンプト入力欄へのフォーカス設定に失敗しました"
+                return PasteOutcome(False, "プロンプト入力欄へのフォーカス設定に失敗しました", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
             time.sleep(0.05)
 
-        cur_fg = user32.GetForegroundWindow()
-        if not cur_fg or int(cur_fg) != hwnd:
-            return False, "貼り付け直前に別ウィンドウへ切り替わったため中断しました"
+        cur_fg_ptr = user32.GetForegroundWindow()
+        cur_fg = int(cur_fg_ptr) if cur_fg_ptr else 0
+        if not cur_fg or cur_fg != hwnd:
+            if not cur_fg:
+                return PasteOutcome(
+                    False,
+                    "貼り付け直前にフォアグラウンドウィンドウが失われたため再試行します",
+                    True,
+                    PasteErrorKind.WINDOW_LOST,
+                )
+            cur_fg_exe = _get_hwnd_process_exe_name(cur_fg, user32, kernel32)
+            if (
+                cur_fg_exe in exe_names
+                and (not user32.IsWindow(ctypes.c_void_p(hwnd)) or not user32.IsWindowVisible(ctypes.c_void_p(hwnd)))
+            ):
+                return PasteOutcome(
+                    False,
+                    "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+                    True,
+                    PasteErrorKind.TRANSIENT,
+                    target_window=cur_fg,
+                )
+            return PasteOutcome(
+                False,
+                "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
+                False,
+                PasteErrorKind.USER_ABORTED,
+            )
 
         if not _send_ctrl_v_clean(user32):
-            return False, "Ctrl+Vキーイベントの送信に失敗しました"
+            return PasteOutcome(False, "Ctrl+Vキーイベントの送信に失敗しました", False, PasteErrorKind.FAILED, target_window=hwnd)
 
-        return True, ""
+        return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=hwnd)
     finally:
         _com_release(target_el)
         _com_release(root_el)

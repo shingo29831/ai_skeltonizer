@@ -4,6 +4,7 @@ import subprocess
 from typing import Optional, Sequence, Tuple
 
 from .browser_focus_macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
+from .browser_paste_types import LOGIN_TITLE_REGEX_PATTERN, PasteErrorKind, PasteOutcome
 
 _MACOS_FOCUS_AND_PASTE_JXA = r"""
 function run(argv) {
@@ -11,21 +12,27 @@ function run(argv) {
     var bundleId = payload.bundleId;
     var labels = payload.labels;
     var titleKeywords = payload.titleKeywords;
+    var loginRegex = payload.loginRegex || "";
     var allowNonEmpty = payload.allowNonEmpty;
+    var quickProbe = !!payload.quickProbe;
+    var frontmostWaitMs = quickProbe ? 700 : 1000;
+    var webAreaWaitMs = quickProbe ? 400 : 1200;
+    var findPromptTimeoutMs = quickProbe ? 800 : 1500;
 
     var se = Application("System Events");
     var procs = se.applicationProcesses.whose({bundleIdentifier: bundleId});
     if (procs.length === 0) {
-        return JSON.stringify({ok: false, reason: "対象ブラウザプロセスが見つかりません"});
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "対象ブラウザプロセスが見つかりません"});
     }
     var appProc = procs[0];
 
-    var deadline = Date.now() + 1000;
+    var deadline = Date.now() + frontmostWaitMs;
     while (!appProc.frontmost() && Date.now() < deadline) {
         delay(0.05);
     }
     if (!appProc.frontmost()) {
-        return JSON.stringify({ok: false, reason: "対象ブラウザが最前面になりませんでした"});
+        // Space切替アニメーション等で最前面化が遅れた場合は再フォーカス付きリトライへ委ねる
+        return JSON.stringify({ok: false, retryable: true, errorKind: "window_lost", reason: "対象ブラウザが最前面にないため再試行します"});
     }
 
     // Chromium/Safari/Firefoxのアクセシビリティツリー公開を有効化する
@@ -34,16 +41,25 @@ function run(argv) {
 
     var wins = appProc.windows;
     if (wins.length === 0) {
-        return JSON.stringify({ok: false, reason: "ブラウザウィンドウが存在しません"});
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ブラウザウィンドウが存在しません"});
     }
     var frontWin = wins[0];
     var winTitle = "";
     try { winTitle = String(frontWin.name() || ""); } catch (e) {}
+    if (winTitle && loginRegex) {
+        var loginRe = new RegExp(loginRegex, "i");
+        if (loginRe.test(winTitle)) {
+            return JSON.stringify({ok: false, retryable: false, errorKind: "login_required", reason: "認証・ログイン画面のため自動貼り付けを中断しました (title: " + winTitle + ")"});
+        }
+    }
     if (titleKeywords.length > 0) {
         var titleLower = winTitle.toLowerCase();
-        var allowed = titleKeywords.some(function(kw) { return titleLower.indexOf(kw) !== -1; });
+        var allowed = titleKeywords.some(function(kw) {
+            var k = String(kw || "").trim().toLowerCase();
+            return k && titleLower.indexOf(k) !== -1;
+        });
         if (!allowed) {
-            return JSON.stringify({ok: false, reason: "許可対象外のページのため自動貼り付けをスキップしました (title: " + winTitle + ")"});
+            return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "許可対象外のページのため自動貼り付けをスキップしました (title: " + winTitle + ")"});
         }
     }
 
@@ -62,13 +78,13 @@ function run(argv) {
     }
 
     var webArea = null;
-    var waitWebDeadline = Date.now() + 1200;
+    var waitWebDeadline = Date.now() + webAreaWaitMs;
     while (!webArea && Date.now() < waitWebDeadline) {
         webArea = findWebArea(frontWin, 0);
-        if (!webArea) delay(0.08);
+        if (!webArea) delay(0.06);
     }
     if (!webArea) {
-        return JSON.stringify({ok: false, reason: "Webコンテンツ領域(AXWebArea)が検出できませんでした"});
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "Webコンテンツ領域(AXWebArea)が検出できませんでした"});
     }
 
     function collectTexts(el) {
@@ -118,7 +134,7 @@ function run(argv) {
     var startTime = Date.now();
     var bestMatch = null;
     function findPrompt(node, depth) {
-        if (depth > 48 || (Date.now() - startTime) > 1500) return;
+        if (depth > 48 || (Date.now() - startTime) > findPromptTimeoutMs) return;
         var role = "";
         try { role = node.role(); } catch (e) { return; }
 
@@ -152,7 +168,7 @@ function run(argv) {
 
     findPrompt(webArea, 0);
     if (!bestMatch) {
-        return JSON.stringify({ok: false, reason: "ページ内に対象のプロンプト入力欄が見つかりませんでした"});
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ページ内に対象のプロンプト入力欄が見つかりませんでした"});
     }
 
     var promptEl = bestMatch.el;
@@ -160,7 +176,7 @@ function run(argv) {
         try {
             var curVal = String(promptEl.value() || "").trim();
             if (curVal && curVal.toLowerCase() !== bestMatch.label) {
-                return JSON.stringify({ok: false, reason: "入力欄に既存テキストが存在するため自動貼り付けをスキップしました"});
+                return JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: "入力欄に既存テキストが存在するため自動貼り付けをスキップしました"});
             }
         } catch (e) {}
     }
@@ -171,18 +187,27 @@ function run(argv) {
         try {
             promptEl.actions.byName("AXPress").perform();
         } catch (e2) {
-            return JSON.stringify({ok: false, reason: "プロンプト入力欄へのフォーカス設定に失敗しました"});
+            return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "プロンプト入力欄へのフォーカス設定に失敗しました"});
         }
     }
 
     delay(0.05);
     if (!appProc.frontmost()) {
-        return JSON.stringify({ok: false, reason: "貼り付け直前に別アプリへ切り替わったため中断しました"});
+        return JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: "貼り付け直前に別アプリへ切り替わったため中断しました"});
     }
     se.keystroke("v", {using: "command down"});
-    return JSON.stringify({ok: true, reason: ""});
+    return JSON.stringify({ok: true, retryable: false, errorKind: "none", reason: ""});
 }
 """
+
+
+def _parse_macos_error_kind(raw_kind: object, ok: bool) -> PasteErrorKind:
+    if ok:
+        return PasteErrorKind.NONE
+    try:
+        return PasteErrorKind(str(raw_kind))
+    except ValueError:
+        return PasteErrorKind.FAILED
 
 
 def paste_macos_browser_prompt(
@@ -190,47 +215,55 @@ def paste_macos_browser_prompt(
     target_bundle_id: Optional[str] = None,
     allowed_title_keywords: Sequence[str] = (),
     allow_non_empty: bool = False,
-) -> Tuple[bool, str]:
+    quick_probe: bool = False,
+) -> PasteOutcome:
     """最前面のmacOSデフォルトブラウザでプロンプト入力欄を探してフォーカスし、Cmd+Vを送信する。"""
     if not prompt_labels:
-        return False, "プロンプトラベルが指定されていません"
+        return PasteOutcome(False, "プロンプトラベルが指定されていません", False, PasteErrorKind.FAILED)
 
     resolved_id = target_bundle_id
     if not resolved_id:
         bundle_id = _get_macos_default_browser_bundle_id()
         resolved_id = _resolve_running_macos_bundle_id(bundle_id)
     if not resolved_id:
-        return False, "起動中のデフォルトブラウザが特定できませんでした"
+        return PasteOutcome(False, "起動中のデフォルトブラウザが特定できませんでした", True, PasteErrorKind.TRANSIENT)
 
     payload = json.dumps(
         {
             "bundleId": resolved_id,
             "labels": list(prompt_labels),
             "titleKeywords": list(allowed_title_keywords),
+            "loginRegex": LOGIN_TITLE_REGEX_PATTERN,
             "allowNonEmpty": allow_non_empty,
+            "quickProbe": bool(quick_probe),
         }
     )
 
     try:
+        # JXA待機＋AXツリー探索負荷によるTimeoutExpired誤爆を防ぐため6秒確保する
         res = subprocess.run(
             ["osascript", "-l", "JavaScript", "-", payload],
             input=_MACOS_FOCUS_AND_PASTE_JXA,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=6,
         )
         if res.returncode != 0:
             err_msg = (res.stderr or "").strip()
             if "assistive" in err_msg.lower() or "-25211" in err_msg or "-1719" in err_msg:
-                return False, "macOSのアクセシビリティ権限が許可されていません"
-            return False, f"osascript実行に失敗しました: {err_msg or f'code={res.returncode}'}"
+                return PasteOutcome(False, "macOSのアクセシビリティ権限が許可されていません", False, PasteErrorKind.UNSUPPORTED)
+            return PasteOutcome(False, f"osascript実行に失敗しました: {err_msg or f'code={res.returncode}'}", False, PasteErrorKind.FAILED)
 
         out = (res.stdout or "").strip()
         if not out:
-            return False, "osascriptから応答がありませんでした"
+            return PasteOutcome(False, "osascriptから応答がありませんでした", False, PasteErrorKind.FAILED)
         parsed = json.loads(out)
-        return bool(parsed.get("ok")), str(parsed.get("reason", ""))
+        ok = bool(parsed.get("ok"))
+        reason = str(parsed.get("reason", ""))
+        retryable = bool(parsed.get("retryable", False)) if not ok else False
+        error_kind = _parse_macos_error_kind(parsed.get("errorKind"), ok)
+        return PasteOutcome(ok, reason, retryable, error_kind, target_window=resolved_id)
     except subprocess.TimeoutExpired:
-        return False, "ブラウザUI探索がタイムアウトしました"
+        return PasteOutcome(False, "ブラウザUI探索がタイムアウトしました", True, PasteErrorKind.TRANSIENT, target_window=resolved_id)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
-        return False, f"macOSブラウザ操作エラー: {e}"
+        return PasteOutcome(False, f"macOSブラウザ操作エラー: {e}", False, PasteErrorKind.FAILED)
