@@ -1,12 +1,18 @@
 """Module: @role: Google AI StudioのDOM推論完了監視およびコマンド抽出を行うクライアントJavaScriptコードを生成する。"""
 
+from .aistudio_handoff_script import build_patch_handoff_js
 from .aistudio_monitor_dom import build_monitor_dom_helpers_js
 from .aistudio_tab_ui_script import build_tab_binding_ui_js
 
 
-def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = "") -> str:
+def build_monitor_core_js(
+    send_snippet: str,
+    binding_transport_snippet: str = "",
+    handoff_transport_snippet: str = "",
+) -> str:
     """Chrome拡張機能・Userscript共通のDOM監視およびコマンド送信スクリプトを生成する。"""
     dom_helpers_js = build_monitor_dom_helpers_js()
+    handoff_js = build_patch_handoff_js()
     tab_ui_js = build_tab_binding_ui_js() if binding_transport_snippet else ""
     return (
         "(function () {\n"
@@ -28,9 +34,9 @@ def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = ""
         "  const MAX_CONSECUTIVE_AUTO_RUNS = 5;\n"
         "  const COMMAND_PREFIX_RE = /^(?:aiskel|skelify)\\s+(?:c|copy|cp|-c|--copy)(?:\\s+|$)/i;\n"
         "  const ALLOWED_BOOL_FLAGS = new Set(['-d', '--deps', '--dependencies', '--no-focus', '--no-paste', '--no-error-clipboard']);\n"
-        "  const PATCH_START_RE = /^\\s*<{4,}(?:\\s.*)?$/;\n"
-        "  const PATCH_MID_RE = /^\\s*={4,}(?:\\s.*)?$/;\n"
-        "  const PATCH_END_RE = /^\\s*>{4,}(?:\\s.*)?$/;\n"
+        "  const PATCH_START_RE = /^[ \\t]*<{4,}\\s*$/;\n"
+        "  const PATCH_MID_RE = /^[ \\t]*={4,}\\s*$/;\n"
+        "  const PATCH_END_RE = /^[ \\t]*>{4,}\\s*$/;\n"
         "  const RESPONSE_CONTENT_SELECTOR = 'ms-text-chunk, ms-code-block pre, ms-code-block code, code, .inline-code';\n"
         "  const RESPONSE_CONTAINER_SELECTOR = 'ms-text-chunk, ms-code-block, code, .inline-code';\n"
         "  const IGNORED_SUBTREE_SELECTOR = [\n"
@@ -74,6 +80,7 @@ def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = ""
         "  const executedKeys = new Set();\n"
         "  const inFlightKeys = new Set();\n"
         f"{binding_transport_snippet}"
+        f"{handoff_transport_snippet}"
         "  const hasBindingTransport = typeof bindingTransport !== 'undefined' && bindingTransport !== null;\n"
         "  let monitoringBound = !hasBindingTransport;\n"
         "  let bindingState = {\n"
@@ -101,6 +108,7 @@ def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = ""
         "    return autoRunUserOverride !== null ? autoRunUserOverride : autoRunServerDefault;\n"
         "  }\n\n"
         f"{dom_helpers_js}"
+        f"{handoff_js}"
         "  function hasTurnDomChanged(ctx) {\n"
         "    if (ctx.modelTurns.length !== preInferenceModelTurns.length) return true;\n"
         "    for (let i = 0; i < ctx.modelTurns.length; i += 1) {\n"
@@ -298,6 +306,10 @@ def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = ""
         "      return;\n"
         "    }\n"
         "    if (!ctx.modelTurns.length || !currentSig || !hadChange) return;\n"
+        "    if (hasHandoffTransport && hasPatchBlockInTurns(ctx.modelTurns)) {\n"
+        "      triggerPatchHandoff(ctx, finishedRunSeq);\n"
+        "      return;\n"
+        "    }\n"
         "    const commands = extractLatestCommands(ctx.modelTurns);\n"
         "    if (!commands.length) return;\n"
         "    const turnId = buildTurnIdentifier(ctx, finishedRunSeq);\n"
@@ -696,6 +708,9 @@ def build_monitor_core_js(send_snippet: str, binding_transport_snippet: str = ""
         "    document.addEventListener('visibilitychange', () => {\n"
         "      if (document.visibilityState === 'visible') refreshBindingStatus();\n"
         "    });\n"
+        "  }\n"
+        "  if (typeof runPendingHandoffPasteOnLoad === 'function') {\n"
+        "    runPendingHandoffPasteOnLoad();\n"
         "  }\n"
         "  evaluateState();\n"
         "})();\n"

@@ -7,15 +7,50 @@ from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
 
+def _find_patch_block_spans(patch_text: str) -> List[Tuple[int, int]]:
+    """パッチの置換ブロック(<<<< 〜 >>>>)が占める文字オフセット範囲一覧を返す。"""
+    start_re = re.compile(r"^[ \t]*<{4,}\s*$")
+    mid_re = re.compile(r"^[ \t]*={4,}\s*$")
+    end_re = re.compile(r"^[ \t]*>{4,}\s*$")
+    spans: List[Tuple[int, int]] = []
+    offset = 0
+    block_start: Optional[int] = None
+    has_mid = False
+    for line in patch_text.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if block_start is None:
+            if start_re.match(stripped):
+                block_start = offset
+                has_mid = False
+        else:
+            if not has_mid and mid_re.match(stripped):
+                has_mid = True
+            elif has_mid and end_re.match(stripped):
+                spans.append((block_start, offset + len(line)))
+                block_start = None
+                has_mid = False
+        offset += len(line)
+    return spans
+
+
 def extract_commit_message(patch_text: str) -> Tuple[Optional[str], str]:
-    # ソースコード内の正規表現リテラルに誤マッチしないようタグ文字列を分割定義
+    # コード内の単発開始タグが末尾閉じタグまでパッチ本体を飲み込むのを防ぐためタグ分割＋非横断マッチを使用
     tag_start = "<" + "commit>"
     tag_end = "</" + "commit>"
-    pattern = re.compile(re.escape(tag_start) + r'\s*(.*?)\s*' + re.escape(tag_end), re.DOTALL | re.IGNORECASE)
+    inner_pattern = r"((?:(?!" + re.escape(tag_start) + r").)*?)"
+    pattern = re.compile(
+        re.escape(tag_start) + r"\s*" + inner_pattern + r"\s*" + re.escape(tag_end),
+        re.DOTALL | re.IGNORECASE,
+    )
 
-    matches = list(pattern.finditer(patch_text))
-    if matches:
-        last_match = matches[-1]
+    block_spans = _find_patch_block_spans(patch_text)
+    valid_matches = [
+        m
+        for m in pattern.finditer(patch_text)
+        if not any(m.start() < span_end and m.end() > span_start for span_start, span_end in block_spans)
+    ]
+    if valid_matches:
+        last_match = valid_matches[-1]
         msg = last_match.group(1).strip()
         msg = re.sub(r'^`{1,5}[a-zA-Z]*\s*', '', msg)
         msg = re.sub(r'\s*`{1,5}$', '', msg).strip()

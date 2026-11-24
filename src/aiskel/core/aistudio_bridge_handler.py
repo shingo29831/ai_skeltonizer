@@ -31,6 +31,7 @@ def build_bridge_request_handler_class(
     max_payload_bytes: int,
     socket_timeout_sec: float,
     is_allowed_origin_fn: Callable[[Optional[str], bool], bool],
+    max_handoff_payload_bytes: int = 4 * 1024 * 1024,
 ) -> type[BaseHTTPRequestHandler]:
     """認証・タブ紐づけ・コマンド実行APIを提供するHTTPリクエストハンドラクラスを生成する。"""
 
@@ -90,7 +91,12 @@ def build_bridge_request_handler_class(
                 return False
             return True
 
-        def _read_json_body(self, allow_empty: bool = False) -> Optional[Dict[str, object]]:
+        def _read_json_body(
+            self,
+            allow_empty: bool = False,
+            max_bytes: Optional[int] = None,
+        ) -> Optional[Dict[str, object]]:
+            limit_bytes = max_bytes if max_bytes is not None else max_payload_bytes
             content_length_raw = self.headers.get("Content-Length")
             if content_length_raw is None:
                 if allow_empty:
@@ -108,7 +114,7 @@ def build_bridge_request_handler_class(
             if content_length <= 0:
                 self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが空です"})
                 return None
-            if content_length > max_payload_bytes:
+            if content_length > limit_bytes:
                 self._send_json(int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), {"ok": False, "message": "ペイロードサイズが上限を超えています"})
                 return None
 
@@ -207,12 +213,22 @@ def build_bridge_request_handler_class(
                 if not isinstance(raw_tab_id, str):
                     self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "tab_id を文字列で指定してください"})
                     return
+                raw_handoff_id = payload.get("handoff_id")
+                handoff_id = raw_handoff_id.strip() if isinstance(raw_handoff_id, str) and raw_handoff_id.strip() else None
                 try:
-                    info = bridge.bind_tab(
-                        tab_id=raw_tab_id,
-                        tab_title=str(payload.get("tab_title") or ""),
-                        tab_url=str(payload.get("tab_url") or ""),
-                    )
+                    if handoff_id is not None:
+                        info = bridge.bind_tab(
+                            tab_id=raw_tab_id,
+                            tab_title=str(payload.get("tab_title") or ""),
+                            tab_url=str(payload.get("tab_url") or ""),
+                            handoff_id=handoff_id,
+                        )
+                    else:
+                        info = bridge.bind_tab(
+                            tab_id=raw_tab_id,
+                            tab_title=str(payload.get("tab_title") or ""),
+                            tab_url=str(payload.get("tab_url") or ""),
+                        )
                 except ValueError as e:
                     self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": str(e)})
                     return
@@ -242,6 +258,40 @@ def build_bridge_request_handler_class(
                 if changed:
                     print("\n🔓 ブラウザタブの紐づけを解除しました。", flush=True)
                 self._send_json(int(HTTPStatus.OK), info)
+                return
+
+            if req_path == "/api/handoff":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False, max_bytes=max_handoff_payload_bytes)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_handoff_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ パッチ引き継ぎ処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/handoff/claim":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                status_code, body = bridge.handle_handoff_claim(payload)
+                self._send_json(status_code, body)
+                return
+
+            if req_path == "/api/handoff/ack":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                status_code, body = bridge.handle_handoff_ack(payload)
+                self._send_json(status_code, body)
                 return
 
             if req_path != "/api/execute":

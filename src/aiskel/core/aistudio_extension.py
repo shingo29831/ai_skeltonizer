@@ -8,9 +8,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from .aistudio_extension_ui import (
     build_extension_binding_transport_js,
+    build_extension_handoff_transport_js,
     build_popup_html,
     build_popup_js,
     build_userscript_binding_transport_js,
+    build_userscript_handoff_transport_js,
 )
 from .aistudio_monitor_script import build_monitor_core_js
 
@@ -180,6 +182,8 @@ def build_manifest_json(
         },
     }
     if target_browser == "firefox":
+        # Firefoxでtabs.create({ cookieStoreId })を維持するためcookies権限を付与
+        manifest["permissions"] = ["tabs", "cookies"]
         addon_id = (
             f"{FIREFOX_GECKO_ID_PREFIX}@aiskel.local"
             if port == DEFAULT_BRIDGE_PORT
@@ -227,7 +231,44 @@ def build_background_js(
         "'use strict';\n\n"
         f"const BRIDGE_BASE_URL = {base_url_literal};\n"
         f"const BRIDGE_TOKEN = {token_literal};\n"
-        "const AISTUDIO_TAB_PATTERNS = ['https://aistudio.google.com/*'];\n\n"
+        "const AISTUDIO_TAB_PATTERNS = ['https://aistudio.google.com/*'];\n"
+        "const pendingHandoffsByTab = new Map();\n\n"
+        "function appendHandoffHash(urlStr, handoffId) {\n"
+        "  try {\n"
+        "    const u = new URL(urlStr);\n"
+        "    const raw = (u.hash || '').replace(/^#/, '');\n"
+        "    const parts = raw ? raw.split('&').filter((p) => p && !p.startsWith('aiskel_handoff=')) : [];\n"
+        "    parts.push('aiskel_handoff=' + encodeURIComponent(handoffId));\n"
+        "    u.hash = parts.join('&');\n"
+        "    return u.toString();\n"
+        "  } catch (_e) {\n"
+        "    const sep = urlStr.indexOf('#') === -1 ? '#' : '&';\n"
+        "    return urlStr + sep + 'aiskel_handoff=' + encodeURIComponent(handoffId);\n"
+        "  }\n"
+        "}\n\n"
+        "function createTabPreservingContext(baseProps, senderTab, cb) {\n"
+        "  const fullProps = Object.assign({}, baseProps);\n"
+        "  if (senderTab) {\n"
+        "    if (senderTab.windowId != null) fullProps.windowId = senderTab.windowId;\n"
+        "    if (typeof senderTab.index === 'number') fullProps.index = senderTab.index + 1;\n"
+        "    if (senderTab.id != null) fullProps.openerTabId = senderTab.id;\n"
+        "    if (senderTab.cookieStoreId) fullProps.cookieStoreId = senderTab.cookieStoreId;\n"
+        "  }\n"
+        "  chrome.tabs.create(fullProps, (tab) => {\n"
+        "    if (!chrome.runtime.lastError && tab && tab.id != null) {\n"
+        "      cb(tab);\n"
+        "      return;\n"
+        "    }\n"
+        "    // cookieStoreId/openerTabId非対応や権限制約時は基本プロパティでフォールバック\n"
+        "    chrome.tabs.create(baseProps, (fallbackTab) => {\n"
+        "      if (chrome.runtime.lastError || !fallbackTab || fallbackTab.id == null) {\n"
+        "        cb(null);\n"
+        "        return;\n"
+        "      }\n"
+        "      cb(fallbackTab);\n"
+        "    });\n"
+        "  });\n"
+        "}\n\n"
         "function formatTabId(tabId) {\n"
         "  return 'chrome-tab:' + String(tabId);\n"
         "}\n\n"
@@ -301,6 +342,7 @@ def build_background_js(
         "}\n\n"
         "chrome.tabs.onRemoved.addListener((tabId) => {\n"
         "  if (tabId == null) return;\n"
+        "  pendingHandoffsByTab.delete(formatTabId(tabId));\n"
         "  bridgeRequest('/api/unbind', 'POST', { tab_id: formatTabId(tabId) })\n"
         "    .then((res) => {\n"
         "      if (res.connected && res.data) {\n"
@@ -434,6 +476,97 @@ def build_background_js(
         "    });\n"
         "    return true;\n"
         "  }\n"
+        "  if (message.type === 'AISKEL_PATCH_HANDOFF') {\n"
+        "    const payload = Object.assign({}, message.payload || {});\n"
+        "    const senderTabId = getSenderTabId(sender);\n"
+        "    if (senderTabId) payload.tab_id = senderTabId;\n"
+        "    bridgeRequest('/api/handoff', 'POST', payload)\n"
+        "      .then((res) => {\n"
+        "        const data = res.data || {};\n"
+        "        if (!res.connected || !data.ok || data.skipped || !data.handoff_id) {\n"
+        "          sendResponse(res);\n"
+        "          return;\n"
+        "        }\n"
+        "        const baseUrl = data.new_chat_url || payload.new_chat_url || 'https://aistudio.google.com/prompts/new_chat';\n"
+        "        const targetUrl = appendHandoffHash(baseUrl, data.handoff_id);\n"
+        "        createTabPreservingContext({ url: targetUrl, active: true }, sender && sender.tab ? sender.tab : null, (newTab) => {\n"
+        "          if (!newTab || newTab.id == null) {\n"
+        "            sendResponse({ reachable: true, connected: false, status: 500, data: { ok: false, message: '新しいタブの生成に失敗しました' }, error: '新しいタブの生成に失敗しました' });\n"
+        "            return;\n"
+        "          }\n"
+        "          const newTabIdStr = formatTabId(newTab.id);\n"
+        "          // 新規タブ側の早期AISKEL_TAKE_HANDOFFが/api/bind完了を待機できるよう先にPromiseを登録\n"
+        "          const bindPromise = bridgeRequest('/api/bind', 'POST', {\n"
+        "            tab_id: newTabIdStr,\n"
+        "            tab_title: newTab.title || 'Google AI Studio',\n"
+        "            tab_url: newTab.url || newTab.pendingUrl || targetUrl,\n"
+        "            handoff_id: data.handoff_id,\n"
+        "          });\n"
+        "          pendingHandoffsByTab.set(newTabIdStr, { handoffId: data.handoff_id, bindPromise });\n"
+        "          bindPromise\n"
+        "            .then((bindRes) => {\n"
+        "              if (!bindRes || !bindRes.connected) {\n"
+        "                pendingHandoffsByTab.delete(newTabIdStr);\n"
+        "                sendResponse({\n"
+        "                  reachable: Boolean(bindRes && bindRes.reachable),\n"
+        "                  connected: false,\n"
+        "                  status: (bindRes && bindRes.status) || 500,\n"
+        "                  data: { ok: false, message: (bindRes && bindRes.error) || '新規タブの紐づけに失敗しました' },\n"
+        "                  error: (bindRes && bindRes.error) || '新規タブの紐づけに失敗しました',\n"
+        "                });\n"
+        "                return;\n"
+        "              }\n"
+        "              if (bindRes.data) {\n"
+        "                broadcastBindingUpdated(bindRes.data);\n"
+        "              }\n"
+        "              sendResponse({\n"
+        "                reachable: true,\n"
+        "                connected: true,\n"
+        "                status: 200,\n"
+        "                data: Object.assign({}, data, { new_tab_id: newTabIdStr, binding: bindRes.data || {} }),\n"
+        "              });\n"
+        "            })\n"
+        "            .catch((err) => {\n"
+        "              pendingHandoffsByTab.delete(newTabIdStr);\n"
+        "              sendResponse({ reachable: false, connected: false, status: 0, data: { ok: false, message: String(err) }, error: String(err) });\n"
+        "            });\n"
+        "        });\n"
+        "      })\n"
+        "      .catch((err) => sendResponse({ reachable: false, connected: false, status: 0, data: {}, error: String(err) }));\n"
+        "    return true;\n"
+        "  }\n"
+        "  if (message.type === 'AISKEL_TAKE_HANDOFF') {\n"
+        "    const senderTabId = getSenderTabId(sender);\n"
+        "    if (!senderTabId) {\n"
+        "      sendResponse({ reachable: true, connected: true, status: 200, data: { ok: true, found: false } });\n"
+        "      return false;\n"
+        "    }\n"
+        "    (async () => {\n"
+        "      const pending = pendingHandoffsByTab.get(senderTabId);\n"
+        "      let handoffId = message.handoff_id || '';\n"
+        "      if (pending) {\n"
+        "        if (!handoffId && pending.handoffId) handoffId = pending.handoffId;\n"
+        "        await pending.bindPromise.catch(() => null);\n"
+        "      }\n"
+        "      const claimPayload = {\n"
+        "        tab_id: senderTabId,\n"
+        "        handoff_id: handoffId,\n"
+        "        tab_title: message.tab_title || (sender && sender.tab ? sender.tab.title : '') || '',\n"
+        "        tab_url: message.tab_url || (sender && sender.tab ? sender.tab.url : '') || '',\n"
+        "      };\n"
+        "      const res = await bridgeRequest('/api/handoff/claim', 'POST', claimPayload);\n"
+        "      sendResponse(res);\n"
+        "    })().catch((err) => sendResponse({ reachable: false, connected: false, status: 0, data: {}, error: String(err) }));\n"
+        "    return true;\n"
+        "  }\n"
+        "  if (message.type === 'AISKEL_ACK_HANDOFF') {\n"
+        "    const senderTabId = getSenderTabId(sender);\n"
+        "    if (senderTabId) pendingHandoffsByTab.delete(senderTabId);\n"
+        "    bridgeRequest('/api/handoff/ack', 'POST', { tab_id: senderTabId, handoff_id: message.handoff_id || '' })\n"
+        "      .then((res) => sendResponse(res))\n"
+        "      .catch((err) => sendResponse({ reachable: false, connected: false, status: 0, data: {}, error: String(err) }));\n"
+        "    return true;\n"
+        "  }\n"
         "  return false;\n"
         "});\n"
     )
@@ -474,7 +607,11 @@ def build_content_js() -> str:
         "      finish(false, null);\n"
         "    }\n"
     )
-    return build_monitor_core_js(send_snippet, binding_transport_snippet=build_extension_binding_transport_js())
+    return build_monitor_core_js(
+        send_snippet,
+        binding_transport_snippet=build_extension_binding_transport_js(),
+        handoff_transport_snippet=build_extension_handoff_transport_js(),
+    )
 
 
 def build_userscript_js(
@@ -496,6 +633,7 @@ def build_userscript_js(
         "// @description  Google AI Studio推論完了時に応答内の aiskel c コマンドを自動実行 (Tampermonkey/Violentmonkey専用)\n"
         "// @match        https://aistudio.google.com/*\n"
         "// @grant        GM_xmlhttpRequest\n"
+        "// @grant        GM_openInTab\n"
         # Tampermonkey等の@connectは裸のドメイン・IPを要求するため角括弧なしのclient_hostを指定
         f"// @connect      {client_host}\n"
         "// ==/UserScript==\n\n"
@@ -558,6 +696,7 @@ def build_userscript_js(
     return header + build_monitor_core_js(
         send_snippet,
         binding_transport_snippet=build_userscript_binding_transport_js(base_url=base_url, token=token),
+        handoff_transport_snippet=build_userscript_handoff_transport_js(),
     )
 
 

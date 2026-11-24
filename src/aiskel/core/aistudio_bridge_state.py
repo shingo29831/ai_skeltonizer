@@ -50,6 +50,11 @@ class TabBindingManager:
             raise ValueError("tab_id に制御文字を含めることはできません")
         return cleaned
 
+    @classmethod
+    def validate_tab_id(cls, raw_tab_id: Optional[str]) -> str:
+        """外部から渡されたtab_idを正規化・検証し、不正時はValueErrorを送出する。"""
+        return cls._normalize_tab_id(raw_tab_id)
+
     def _build_info_locked(self) -> Dict[str, object]:
         binding = self._binding
         return {
