@@ -171,6 +171,31 @@ def _to_case_insensitive_ere(text: str) -> str:
     return "".join(parts)
 
 
+def focus_linux_window_id(window_id: str) -> Optional[str]:
+    """指定されたLinuxウィンドウIDをwmctrlまたはxdotoolでフォーカスする。"""
+    if not window_id or (not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
+        return None
+    if window_id == "atspi-focused":
+        return focus_linux_default_browser_target()
+    try:
+        act = subprocess.run(["wmctrl", "-i", "-a", window_id], capture_output=True, timeout=2)
+        if act.returncode == 0:
+            return window_id
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        decimal_id = str(int(window_id, 0))
+    except ValueError:
+        decimal_id = window_id
+    try:
+        act = subprocess.run(["xdotool", "windowactivate", decimal_id], capture_output=True, timeout=2)
+        if act.returncode == 0:
+            return window_id
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def focus_linux_default_browser_target() -> Optional[str]:
     """起動済みのLinuxデフォルトブラウザウィンドウをフォーカスし、成功時はウィンドウIDを返す。"""
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):

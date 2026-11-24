@@ -5,9 +5,9 @@ import subprocess
 import sys
 from typing import Optional, Union
 
-from .browser_focus_linux import focus_linux_default_browser_target
-from .browser_focus_macos import focus_macos_default_browser_target
-from .browser_focus_windows import focus_windows_default_browser_hwnd
+from .browser_focus_linux import focus_linux_default_browser_target, focus_linux_window_id
+from .browser_focus_macos import focus_macos_bundle_id, focus_macos_default_browser_target
+from .browser_focus_windows import focus_windows_default_browser_hwnd, focus_windows_hwnd
 
 
 def focus_default_browser_target(interactive_only: bool = False) -> Optional[Union[int, str]]:
@@ -24,6 +24,29 @@ def focus_default_browser_target(interactive_only: bool = False) -> Optional[Uni
             return focus_macos_default_browser_target()
         if system == "Linux":
             return focus_linux_default_browser_target()
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def focus_browser_target(
+    target_window: Optional[Union[int, str]],
+    interactive_only: bool = False,
+) -> Optional[Union[int, str]]:
+    """指定されたウィンドウ識別子に対応する起動済みブラウザを再フォーカスする。"""
+    if target_window is None or isinstance(target_window, bool):
+        return None
+    if interactive_only and (not (sys.stdout is not None and sys.stdout.isatty()) or bool(os.environ.get("CI"))):
+        return None
+
+    system = platform.system()
+    try:
+        if system == "Windows" and isinstance(target_window, int):
+            return focus_windows_hwnd(target_window)
+        if system == "Darwin" and isinstance(target_window, str):
+            return focus_macos_bundle_id(target_window)
+        if system == "Linux" and isinstance(target_window, str):
+            return focus_linux_window_id(target_window)
         return None
     except (OSError, subprocess.SubprocessError):
         return None

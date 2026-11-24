@@ -160,15 +160,15 @@ def _init_win32_apis() -> Tuple[Any, Any, Any, Any, Any]:
     return user32, kernel32, dwmapi, get_window_long, wnd_enum_proc
 
 
-def _find_target_browser_hwnd(
+def _find_target_browser_hwnds(
     exe_names: List[str],
     user32: Any,
     kernel32: Any,
     dwmapi: Any,
     get_window_long: Any,
     wnd_enum_proc: Any,
-) -> Optional[int]:
-    """Zオーダー優先で可視・最小化ウィンドウを探索し、対象ブラウザのHWNDを返す。"""
+) -> Tuple[List[int], List[int]]:
+    """Zオーダー優先で対象ブラウザの (可視HWNDリスト, 最小化HWNDリスト) を返す。"""
     target_set = set(exe_names)
     visible_windows: List[int] = []
     minimized_windows: List[int] = []
@@ -222,7 +222,87 @@ def _find_target_browser_hwnd(
 
     enum_proc = wnd_enum_proc(_enum_callback)
     user32.EnumWindows(enum_proc, 0)
+    return visible_windows, minimized_windows
+
+
+def _find_target_browser_hwnd(
+    exe_names: List[str],
+    user32: Any,
+    kernel32: Any,
+    dwmapi: Any,
+    get_window_long: Any,
+    wnd_enum_proc: Any,
+) -> Optional[int]:
+    """Zオーダー優先で可視・最小化ウィンドウを探索し、対象ブラウザのHWNDを返す。"""
+    visible_windows, minimized_windows = _find_target_browser_hwnds(
+        exe_names, user32, kernel32, dwmapi, get_window_long, wnd_enum_proc
+    )
     return visible_windows[0] if visible_windows else (minimized_windows[0] if minimized_windows else None)
+
+
+def _focus_windows_hwnd_with_apis(
+    target_hwnd: int,
+    user32: Any,
+    kernel32: Any,
+    get_window_long: Any,
+) -> Optional[int]:
+    """取得済みWin32 APIハンドルを用いて指定HWNDを最上位表示・フォーカスする。"""
+    if not target_hwnd:
+        return None
+
+    fg_hwnd = user32.GetForegroundWindow()
+    if fg_hwnd == target_hwnd:
+        return target_hwnd
+
+    cur_tid = kernel32.GetCurrentThreadId()
+    fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+    target_tid = user32.GetWindowThreadProcessId(target_hwnd, None)
+
+    user32.AllowSetForegroundWindow(_ASFW_ANY)
+
+    attached_fg = False
+    attached_target = False
+    if fg_tid and fg_tid != cur_tid:
+        attached_fg = bool(user32.AttachThreadInput(cur_tid, fg_tid, 1))
+    if target_tid and target_tid != cur_tid and target_tid != fg_tid:
+        attached_target = bool(user32.AttachThreadInput(cur_tid, target_tid, 1))
+
+    try:
+        # 最大化状態を維持するため最小化時のみ SW_RESTORE を呼ぶ
+        if user32.IsIconic(target_hwnd):
+            user32.ShowWindow(target_hwnd, _SW_RESTORE)
+        else:
+            user32.ShowWindow(target_hwnd, _SW_SHOW)
+
+        user32.BringWindowToTop(target_hwnd)
+        ok = bool(user32.SetForegroundWindow(target_hwnd))
+
+        if not ok or user32.GetForegroundWindow() != target_hwnd:
+            was_topmost = bool(get_window_long(target_hwnd, _GWL_EXSTYLE) & _WS_EX_TOPMOST)
+            hwnd_topmost = ctypes.c_void_p(-1)
+            hwnd_notopmost = ctypes.c_void_p(-2)
+            user32.SetWindowPos(target_hwnd, hwnd_topmost, 0, 0, 0, 0, _SWP_NO_MOVE_SIZE_SHOW)
+            # 元々最前面固定のウィンドウは NOTOPMOST で固定状態を解除しない
+            if not was_topmost:
+                user32.SetWindowPos(target_hwnd, hwnd_notopmost, 0, 0, 0, 0, _SWP_NO_MOVE_SIZE_SHOW)
+            ok = bool(user32.SetForegroundWindow(target_hwnd))
+        return target_hwnd if ok else None
+    finally:
+        if attached_target:
+            user32.AttachThreadInput(cur_tid, target_tid, 0)
+        if attached_fg:
+            user32.AttachThreadInput(cur_tid, fg_tid, 0)
+
+
+def focus_windows_hwnd(target_hwnd: int) -> Optional[int]:
+    """指定HWNDのブラウザウィンドウを最上位表示し、成功時はそのHWNDを返す。"""
+    if not target_hwnd:
+        return None
+    try:
+        user32, kernel32, _, get_window_long, _ = _init_win32_apis()
+        return _focus_windows_hwnd_with_apis(target_hwnd, user32, kernel32, get_window_long)
+    except OSError:
+        return None
 
 
 def focus_windows_default_browser_hwnd() -> Optional[int]:
@@ -238,49 +318,7 @@ def focus_windows_default_browser_hwnd() -> Optional[int]:
         )
         if not target_hwnd:
             return None
-
-        fg_hwnd = user32.GetForegroundWindow()
-        if fg_hwnd == target_hwnd:
-            return target_hwnd
-
-        cur_tid = kernel32.GetCurrentThreadId()
-        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
-        target_tid = user32.GetWindowThreadProcessId(target_hwnd, None)
-
-        user32.AllowSetForegroundWindow(_ASFW_ANY)
-
-        attached_fg = False
-        attached_target = False
-        if fg_tid and fg_tid != cur_tid:
-            attached_fg = bool(user32.AttachThreadInput(cur_tid, fg_tid, 1))
-        if target_tid and target_tid != cur_tid and target_tid != fg_tid:
-            attached_target = bool(user32.AttachThreadInput(cur_tid, target_tid, 1))
-
-        try:
-            # 最大化状態を維持するため最小化時のみ SW_RESTORE を呼ぶ
-            if user32.IsIconic(target_hwnd):
-                user32.ShowWindow(target_hwnd, _SW_RESTORE)
-            else:
-                user32.ShowWindow(target_hwnd, _SW_SHOW)
-
-            user32.BringWindowToTop(target_hwnd)
-            ok = bool(user32.SetForegroundWindow(target_hwnd))
-
-            if not ok or user32.GetForegroundWindow() != target_hwnd:
-                was_topmost = bool(get_window_long(target_hwnd, _GWL_EXSTYLE) & _WS_EX_TOPMOST)
-                hwnd_topmost = ctypes.c_void_p(-1)
-                hwnd_notopmost = ctypes.c_void_p(-2)
-                user32.SetWindowPos(target_hwnd, hwnd_topmost, 0, 0, 0, 0, _SWP_NO_MOVE_SIZE_SHOW)
-                # 元々最前面固定のウィンドウは NOTOPMOST で固定状態を解除しない
-                if not was_topmost:
-                    user32.SetWindowPos(target_hwnd, hwnd_notopmost, 0, 0, 0, 0, _SWP_NO_MOVE_SIZE_SHOW)
-                ok = bool(user32.SetForegroundWindow(target_hwnd))
-            return target_hwnd if ok else None
-        finally:
-            if attached_target:
-                user32.AttachThreadInput(cur_tid, target_tid, 0)
-            if attached_fg:
-                user32.AttachThreadInput(cur_tid, fg_tid, 0)
+        return _focus_windows_hwnd_with_apis(target_hwnd, user32, kernel32, get_window_long)
     except OSError:
         return None
 

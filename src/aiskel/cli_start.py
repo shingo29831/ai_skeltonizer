@@ -15,8 +15,10 @@ from .cli_sync import resolve_output_dir, run_sync
 from .config import SkeletonConfig, load_bundle_filename_from_meta
 from .core.aistudio_bridge import run_bridge_server
 from .core.aistudio_extension import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
-from .core.browser_focus import focus_default_browser, focus_default_browser_target
+from .core.browser_focus import focus_browser_target, focus_default_browser, focus_default_browser_target
 from .core.browser_paste import PasteErrorKind, PasteResult, paste_to_browser_prompt
+from .core.browser_tab_reuse import focus_existing_empty_chat_tab
+from .core.browser_tab_reuse_types import is_new_chat_target_url
 from .core.clipboard import set_clipboard_text
 from .core.token_counter import estimate_tokens
 
@@ -34,6 +36,7 @@ SUPPORTED_PASTE_DOMAIN_TITLE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
 }
 SUPPORTED_PASTE_DOMAINS: Tuple[str, ...] = tuple(SUPPORTED_PASTE_DOMAIN_TITLE_KEYWORDS.keys())
 _ORIG_FOCUS_DEFAULT_BROWSER = focus_default_browser
+_ORIG_FOCUS_DEFAULT_BROWSER_TARGET = focus_default_browser_target
 DEFAULT_BUNDLE_FILENAMES: Tuple[str, ...] = (
     "architecture_bundle.txt",
     "architecture_bundle.md",
@@ -291,6 +294,7 @@ def handle_start_command(
     paste_retry_delays: Sequence[float] = DEFAULT_PASTE_RETRY_DELAYS,
     paste_settle_delay: float = DEFAULT_PASTE_SETTLE_DELAY,
     paste_timeout_sec: float = DEFAULT_PASTE_TIMEOUT_SEC,
+    existing_tab_focuser: Optional[Callable[..., Optional[Union[bool, int, str]]]] = None,
 ) -> int:
     """プロジェクト同期・バンドルコピー・ブラウザ起動・AI Studio監視ブリッジ待機を一括開始する。"""
     project_root: Path = parsed_args.project_dir.resolve()
@@ -409,32 +413,76 @@ def handle_start_command(
         )
     )
 
+    is_new_chat_url = is_new_chat_target_url(target_url) if not no_browser else False
+    has_custom_focus_monkeypatch = (
+        focus_default_browser is not _ORIG_FOCUS_DEFAULT_BROWSER
+        or focus_default_browser_target is not _ORIG_FOCUS_DEFAULT_BROWSER_TARGET
+    )
+
     def _on_bridge_ready(stop_event: threading.Event) -> None:
         if stop_event.is_set():
             return
 
         opened = False
-        if browser_opener is None and not is_interactive_environment():
-            print("ℹ 非対話環境（非TTYまたはCI）のためブラウザの自動起動をスキップしました。", flush=True)
-        else:
+        reused_existing_tab = False
+        focus_result: Optional[Union[bool, int, str]] = None
+
+        # ブラウザ起動・フォーカスがモック注入されていない実制御時のみ実ブラウザの空タブ再利用を行う
+        can_probe_real_empty_tab = (
+            existing_tab_focuser is None
+            and browser_opener is None
+            and browser_focuser is None
+            and not has_custom_focus_monkeypatch
+            and is_interactive_environment()
+        )
+        if (
+            should_focus_on_start
+            and supported_paste_url
+            and is_new_chat_url
+            and (existing_tab_focuser is not None or can_probe_real_empty_tab)
+        ):
             try:
-                opened = bool(opener(target_url))
+                reused_focus = (
+                    existing_tab_focuser(target_url, allowed_title_keywords)
+                    if existing_tab_focuser is not None
+                    else focus_existing_empty_chat_tab(
+                        target_url=target_url,
+                        allowed_title_keywords=allowed_title_keywords,
+                        interactive_only=True,
+                    )
+                )
                 if stop_event.is_set():
                     return
-                if opened:
-                    print(f"🌐 ブラウザで開きました: {target_url}", flush=True)
-                else:
-                    print(f"⚠ ブラウザでURLを開けませんでした: {target_url}", file=sys.stderr, flush=True)
+                if _is_focus_success(reused_focus):
+                    reused_existing_tab = True
+                    opened = True
+                    focus_result = reused_focus
+                    print("🌐 起動済みの空チャットタブを検出し、最前面に表示しました。", flush=True)
             except Exception as e:
                 if not stop_event.is_set():
-                    print(f"⚠ ブラウザの起動に失敗しました: {e}", file=sys.stderr, flush=True)
+                    print(f"⚠ 起動済み空チャットタブの検出に失敗しました: {e}", file=sys.stderr, flush=True)
+
+        if not reused_existing_tab:
+            if browser_opener is None and not is_interactive_environment():
+                print("ℹ 非対話環境（非TTYまたはCI）のためブラウザの自動起動をスキップしました。", flush=True)
+            else:
+                try:
+                    opened = bool(opener(target_url))
+                    if stop_event.is_set():
+                        return
+                    if opened:
+                        print(f"🌐 ブラウザで開きました: {target_url}", flush=True)
+                    else:
+                        print(f"⚠ ブラウザでURLを開けませんでした: {target_url}", file=sys.stderr, flush=True)
+                except Exception as e:
+                    if not stop_event.is_set():
+                        print(f"⚠ ブラウザの起動に失敗しました: {e}", file=sys.stderr, flush=True)
 
         if stop_event.is_set():
             return
 
         # ブラウザ起動に成功した場合のみ最前面表示を行い、未起動時や失敗時の誤フォーカスを防ぐ
-        focus_result: Optional[Union[bool, int, str]] = None
-        if should_focus_on_start and opened:
+        if not reused_existing_tab and should_focus_on_start and opened:
             if browser_focuser is None and not is_interactive_environment():
                 print("ℹ 非対話環境（非TTYまたはCI）のためブラウザの最前面表示をスキップしました。", flush=True)
             else:
@@ -450,7 +498,7 @@ def handle_start_command(
                 except Exception as e:
                     if not stop_event.is_set():
                         print(f"⚠ ブラウザの最前面表示に失敗しました: {e}", file=sys.stderr, flush=True)
-        elif paste_requested_on_start and opened and supported_paste_url and (no_focus or no_start_focus):
+        elif not reused_existing_tab and paste_requested_on_start and opened and supported_paste_url and (no_focus or no_start_focus):
             print("ℹ --no-focus / --no-start-focus が指定されているため、起動時の自動貼り付けもスキップしました。", flush=True)
 
         if stop_event.is_set():
@@ -464,19 +512,28 @@ def handle_start_command(
                 print("ℹ 非対話環境（非TTYまたはCI）のため自動貼り付けをスキップしました。", flush=True)
             else:
                 try:
-                    # フォーカス確定後からタブ遷移・SPA描画完了まで待機し、既存タブへの誤貼り付けを防ぐ
-                    if paste_settle_delay > 0 and stop_event.wait(paste_settle_delay):
+                    # 新規タブ遷移時のみSPA描画完了まで待機し、既存空タブ再利用時は即座に貼り付ける
+                    if not reused_existing_tab and paste_settle_delay > 0 and stop_event.wait(paste_settle_delay):
                         return
 
                     # Pythonのboolはint継承のためTrueをHWNDとして渡さないよう除外する
                     target_window = None if isinstance(focus_result, bool) else focus_result
+                    if reused_existing_tab and target_window is not None and browser_focuser is None:
+                        refocus_fn: Callable[[], Union[bool, int, str, None]] = lambda: focus_browser_target(
+                            target_window, interactive_only=True
+                        )
+                    elif reused_existing_tab and existing_tab_focuser is not None and browser_focuser is None:
+                        refocus_fn = lambda: existing_tab_focuser(target_url, allowed_title_keywords)
+                    else:
+                        refocus_fn = focuser
+
                     paste_res = _paste_with_retry(
                         paster,
                         target_window=target_window,
                         retry_delays=paste_retry_delays,
                         stop_event=stop_event,
                         timeout_sec=paste_timeout_sec,
-                        refocus_fn=focuser,
+                        refocus_fn=refocus_fn,
                     )
                     if stop_event.is_set():
                         return
