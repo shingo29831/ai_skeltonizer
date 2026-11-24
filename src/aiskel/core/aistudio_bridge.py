@@ -1,9 +1,7 @@
 """Module: @role: ブラウザ監視クライアントからの通知を受信し、検証済みaiskelコマンドをメインスレッド上で安全に自動実行するローカルHTTPブリッジを提供する。"""
 import contextlib
-import hmac
 import io
 import ipaddress
-import json
 import queue
 import socket
 import sys
@@ -12,11 +10,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, TextIO, Tuple
 from urllib.parse import urlsplit
 
+from .aistudio_bridge_handler import build_bridge_request_handler_class
+from .aistudio_bridge_state import TabBindingManager
 from .aistudio_command import (
     CommandValidationError,
     build_safe_copy_argv,
@@ -161,6 +161,7 @@ class AiskelBridgeServer:
         token: Optional[str] = None,
         no_focus: bool = False,
         no_paste: bool = False,
+        require_tab_binding: bool = False,
     ) -> None:
         self.project_root = project_root.resolve()
         self.command_runner = command_runner
@@ -170,6 +171,7 @@ class AiskelBridgeServer:
         self.token = token
         self.no_focus = no_focus
         self.no_paste = no_paste
+        self._binding_manager = TabBindingManager(self.project_root, require_binding=require_tab_binding)
         self._exec_lock = threading.Lock()
         self._queue_state_lock = threading.Lock()
         self._recent_keys: Deque[str] = deque(maxlen=MAX_DEDUP_HISTORY)
@@ -202,6 +204,18 @@ class AiskelBridgeServer:
             return str(addr[0]), int(addr[1])
         return normalize_bind_host(self.host), self.port
 
+    def get_binding_info(self) -> Dict[str, object]:
+        """現在のブラウザタブ紐づけ状態を返す。"""
+        return self._binding_manager.get_info()
+
+    def bind_tab(self, tab_id: str, tab_title: str = "", tab_url: str = "") -> Dict[str, object]:
+        """指定されたブラウザタブをこのブリッジへ紐づける。"""
+        return self._binding_manager.bind(tab_id=tab_id, tab_title=tab_title, tab_url=tab_url)
+
+    def unbind_tab(self, tab_id: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
+        """現在のブラウザタブ紐づけを解除する。"""
+        return self._binding_manager.unbind(tab_id=tab_id)
+
     def _normalize_incoming_commands(self, payload: Dict[str, object]) -> List[str]:
         raw_commands = payload.get("commands")
         extracted: List[str] = []
@@ -217,6 +231,17 @@ class AiskelBridgeServer:
 
     def handle_execute_payload(self, payload: Dict[str, object]) -> Tuple[int, BridgeExecutionResult]:
         """受信JSONペイロードを検証し、安全なaiskel cコマンドを排他実行する。"""
+        tab_error = self._binding_manager.validate_execute_payload(payload)
+        if tab_error is not None:
+            return int(HTTPStatus.CONFLICT), BridgeExecutionResult(
+                ok=False,
+                exit_code=1,
+                command="",
+                argv=(),
+                message=tab_error,
+                skipped=True,
+            )
+
         commands = self._normalize_incoming_commands(payload)
         if not commands:
             return int(HTTPStatus.BAD_REQUEST), BridgeExecutionResult(
@@ -252,7 +277,10 @@ class AiskelBridgeServer:
             )
 
         turn_id = str(payload.get("turn_id") or "").strip()
-        dedup_key = f"{turn_id}::{display_cmd}" if turn_id else ""
+        raw_tab_id = payload.get("tab_id")
+        req_tab_id = raw_tab_id.strip() if isinstance(raw_tab_id, str) else ""
+        # タブ切替直後の同一ターン位置・同一コマンドの誤スキップを防ぐためtab_idで重複キーを分離
+        dedup_key = f"{req_tab_id}::{turn_id}::{display_cmd}" if turn_id else ""
 
         with self._exec_lock:
             if dedup_key and dedup_key in self._recent_keys:
@@ -359,179 +387,12 @@ class AiskelBridgeServer:
             job.done_event.set()
 
     def _build_handler_class(self):
-        bridge = self
-
-        class _BridgeRequestHandler(BaseHTTPRequestHandler):
-            # 不完全ボディ送信によるrfile.read永久ブロックを防止
-            timeout = SOCKET_TIMEOUT_SEC
-
-            def log_message(self, format: str, *args) -> None:
-                return
-
-            def _send_cors_headers(self, origin: Optional[str]) -> None:
-                normalized_origin = (origin or "").strip()
-                if normalized_origin and normalized_origin.lower() != "null" and is_allowed_origin(normalized_origin, allow_missing=False):
-                    self.send_header("Access-Control-Allow-Origin", normalized_origin)
-                    self.send_header("Vary", "Origin")
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Aiskel-Token")
-                # ChromeのPrivate Network Accessプリフライトを通過させるため付与
-                self.send_header("Access-Control-Allow-Private-Network", "true")
-
-            def _send_bytes(
-                self,
-                status_code: int,
-                raw: bytes,
-                content_type: str,
-                include_cors: bool = True,
-            ) -> None:
-                try:
-                    self.send_response(status_code)
-                    if include_cors:
-                        self._send_cors_headers(self.headers.get("Origin"))
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(len(raw)))
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.end_headers()
-                    self.wfile.write(raw)
-                except OSError:
-                    return
-
-            def _send_json(self, status_code: int, body: Dict[str, object]) -> None:
-                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                self._send_bytes(status_code, raw, "application/json; charset=utf-8", include_cors=True)
-
-            def _verify_access(self) -> bool:
-                origin = self.headers.get("Origin")
-                token_verified = False
-                if bridge.token:
-                    provided = (self.headers.get("X-Aiskel-Token") or "").strip()
-                    if not provided or not hmac.compare_digest(provided, bridge.token):
-                        self._send_json(int(HTTPStatus.UNAUTHORIZED), {"ok": False, "message": "認証トークンが一致しません"})
-                        return False
-                    token_verified = True
-
-                # トークン未設定時はOrigin欠落・Origin: nullによる無認証ローカル実行を防止
-                if not is_allowed_origin(origin, allow_missing=token_verified):
-                    self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
-                    return False
-                return True
-
-            def do_OPTIONS(self) -> None:
-                origin = self.headers.get("Origin")
-                if not is_allowed_origin(origin, allow_missing=False):
-                    self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
-                    return
-                self.send_response(int(HTTPStatus.NO_CONTENT))
-                self._send_cors_headers(origin)
-                self.end_headers()
-
-            def do_GET(self) -> None:
-                req_path = urlsplit(self.path).path
-                # コンソール上のURLを直接開いた際に404誤認を防ぐため非機密の案内ページを返す
-                if req_path == "/":
-                    accept = (self.headers.get("Accept") or "").lower()
-                    if "text/html" in accept:
-                        html_body = (
-                            "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
-                            "<title>aiskel AI Studio Local Bridge</title>"
-                            "<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1e293b;}"
-                            "code{background:#f1f5f9;padding:2px 6px;border-radius:4px;}"
-                            ".card{border:1px solid #e2e8f0;border-radius:10px;padding:20px;background:#f8fafc;}"
-                            "a{color:#2563eb;}</style></head><body>"
-                            "<div class='card'>"
-                            "<h2>🎧 aiskel AI Studio ローカルブリッジ稼働中</h2>"
-                            "<p>このローカルサーバーは Chrome 拡張機能 / Userscript からの通知を受信する専用APIです（Web画面ではありません）。</p>"
-                            "<p>👉 <a href='https://aistudio.google.com/' target='_blank' rel='noopener noreferrer'>Google AI Studio (https://aistudio.google.com/)</a> を開いてご利用ください。</p>"
-                            "<p>API エンドポイント: <code>GET /api/health</code> / <code>POST /api/execute</code></p>"
-                            "</div></body></html>"
-                        ).encode("utf-8")
-                        self._send_bytes(int(HTTPStatus.OK), html_body, "text/html; charset=utf-8", include_cors=False)
-                    else:
-                        self._send_json(
-                            int(HTTPStatus.OK),
-                            {
-                                "ok": True,
-                                "service": "aiskel-aistudio-bridge",
-                                "message": "aiskel AI Studio ローカルブリッジは稼働中です。https://aistudio.google.com/ から拡張機能経由で利用してください。",
-                                "endpoints": {"health": "/api/health", "execute": "/api/execute"},
-                            },
-                        )
-                    return
-                if req_path == "/favicon.ico":
-                    try:
-                        self.send_response(int(HTTPStatus.NO_CONTENT))
-                        self.end_headers()
-                    except OSError:
-                        return
-                    return
-                if req_path != "/api/health":
-                    self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
-                    return
-                if not self._verify_access():
-                    return
-                self._send_json(
-                    int(HTTPStatus.OK),
-                    {
-                        "ok": True,
-                        "project_root": str(bridge.project_root),
-                    },
-                )
-
-            def do_POST(self) -> None:
-                req_path = urlsplit(self.path).path
-                if req_path != "/api/execute":
-                    self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
-                    return
-                if not self._verify_access():
-                    return
-
-                content_length_raw = self.headers.get("Content-Length")
-                if content_length_raw is None:
-                    self._send_json(int(HTTPStatus.LENGTH_REQUIRED), {"ok": False, "message": "Content-Lengthヘッダが必要です"})
-                    return
-                try:
-                    content_length = int(content_length_raw)
-                except ValueError:
-                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "不正なContent-Lengthです"})
-                    return
-
-                if content_length <= 0:
-                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが空です"})
-                    return
-                if content_length > MAX_PAYLOAD_BYTES:
-                    self._send_json(int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), {"ok": False, "message": "ペイロードサイズが上限を超えています"})
-                    return
-
-                try:
-                    raw_body = self.rfile.read(content_length)
-                except (socket.timeout, TimeoutError):
-                    self._send_json(int(HTTPStatus.REQUEST_TIMEOUT), {"ok": False, "message": "リクエストボディの受信がタイムアウトしました"})
-                    return
-                except OSError:
-                    return
-
-                if len(raw_body) != content_length:
-                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが不完全です"})
-                    return
-                try:
-                    payload = json.loads(raw_body.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONの解析に失敗しました"})
-                    return
-
-                if not isinstance(payload, dict):
-                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONオブジェクトを指定してください"})
-                    return
-
-                try:
-                    status_code, result = bridge._dispatch_execute_payload(payload)
-                    self._send_json(status_code, result.to_dict())
-                except Exception as e:
-                    print(f"✖ ブリッジ実行中に予期しないエラーが発生しました: {e}", file=sys.stderr, flush=True)
-                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
-
-        return _BridgeRequestHandler
+        return build_bridge_request_handler_class(
+            bridge=self,
+            max_payload_bytes=MAX_PAYLOAD_BYTES,
+            socket_timeout_sec=SOCKET_TIMEOUT_SEC,
+            is_allowed_origin_fn=is_allowed_origin,
+        )
 
     def bind(self) -> Tuple[str, int]:
         """ソケットをバインドしてサーバーインスタンスを初期化する(IPv4/IPv6対応)。"""
@@ -642,6 +503,7 @@ def run_bridge_server(
     no_focus: bool = False,
     no_paste: bool = False,
     on_ready: Optional[Callable[[threading.Event], None]] = None,
+    require_tab_binding: bool = True,
 ) -> int:
     """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
     if not project_root.exists() or not project_root.is_dir():
@@ -660,6 +522,7 @@ def run_bridge_server(
         token=None,
         no_focus=no_focus,
         no_paste=no_paste,
+        require_tab_binding=require_tab_binding,
     )
 
     # --port 0(動的割当)でも実ポートを拡張機能へ反映させるため先にbindを実行
@@ -721,6 +584,7 @@ def run_bridge_server(
         print("   ※ Chrome/Edge: chrome://extensions から上記拡張フォルダを読み込み")
         print("   ※ Firefox    : about:debugging#/runtime/this-firefox の「一時的なアドオンを読み込む」から上記 manifest.json を選択")
         print("   ※ 常駐利用   : Tampermonkey / Violentmonkey 用スクリプトは `aiskel listen --print-userscript` で出力できます")
+        print("   ※ タブ紐づけ : 開いたタブ上の「VSCodeと紐づける」ボタン、または拡張機能アイコンから対象タブを選択してください")
         print("   推論完了時の `aiskel c` コマンドを待機中... (終了するには Ctrl+C)")
 
         server.serve_forever(on_ready=on_ready)

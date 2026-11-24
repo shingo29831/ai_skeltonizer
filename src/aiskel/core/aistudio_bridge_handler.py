@@ -1,0 +1,264 @@
+"""Module: @role: ローカルブリッジHTTPサーバーのCORS・認証・タブ紐づけおよび実行APIハンドラを生成する。"""
+import hmac
+import json
+import socket
+import sys
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler
+from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlsplit
+
+from .aistudio_bridge_state import sanitize_console_text
+
+_BRIDGE_LANDING_HTML = (
+    "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
+    "<title>aiskel AI Studio Local Bridge</title>"
+    "<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1e293b;}"
+    "code{background:#f1f5f9;padding:2px 6px;border-radius:4px;}"
+    ".card{border:1px solid #e2e8f0;border-radius:10px;padding:20px;background:#f8fafc;}"
+    "a{color:#2563eb;}</style></head><body>"
+    "<div class='card'>"
+    "<h2>🎧 aiskel AI Studio ローカルブリッジ稼働中</h2>"
+    "<p>このローカルサーバーは Chrome 拡張機能 / Userscript からの通知を受信する専用APIです（Web画面ではありません）。</p>"
+    "<p>👉 <a href='https://aistudio.google.com/' target='_blank' rel='noopener noreferrer'>Google AI Studio (https://aistudio.google.com/)</a> を開いてご利用ください。</p>"
+    "<p>API: <code>GET /api/health</code> / <code>GET /api/binding</code> / <code>POST /api/bind</code> / <code>POST /api/execute</code></p>"
+    "</div></body></html>"
+).encode("utf-8")
+
+
+def build_bridge_request_handler_class(
+    bridge: Any,
+    max_payload_bytes: int,
+    socket_timeout_sec: float,
+    is_allowed_origin_fn: Callable[[Optional[str], bool], bool],
+) -> type[BaseHTTPRequestHandler]:
+    """認証・タブ紐づけ・コマンド実行APIを提供するHTTPリクエストハンドラクラスを生成する。"""
+
+    class _BridgeRequestHandler(BaseHTTPRequestHandler):
+        # 不完全ボディ送信によるrfile.read永久ブロックを防止
+        timeout = socket_timeout_sec
+
+        def log_message(self, format: str, *args) -> None:
+            return
+
+        def _send_cors_headers(self, origin: Optional[str]) -> None:
+            normalized_origin = (origin or "").strip()
+            if normalized_origin and normalized_origin.lower() != "null" and is_allowed_origin_fn(normalized_origin, False):
+                self.send_header("Access-Control-Allow-Origin", normalized_origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Aiskel-Token")
+            # ChromeのPrivate Network Accessプリフライトを通過させるため付与
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+
+        def _send_bytes(
+            self,
+            status_code: int,
+            raw: bytes,
+            content_type: str,
+            include_cors: bool = True,
+        ) -> None:
+            try:
+                self.send_response(status_code)
+                if include_cors:
+                    self._send_cors_headers(self.headers.get("Origin"))
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(raw)
+            except OSError:
+                return
+
+        def _send_json(self, status_code: int, body: Dict[str, object]) -> None:
+            raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self._send_bytes(status_code, raw, "application/json; charset=utf-8", include_cors=True)
+
+        def _verify_access(self) -> bool:
+            origin = self.headers.get("Origin")
+            token_verified = False
+            if bridge.token:
+                provided = (self.headers.get("X-Aiskel-Token") or "").strip()
+                if not provided or not hmac.compare_digest(provided, bridge.token):
+                    self._send_json(int(HTTPStatus.UNAUTHORIZED), {"ok": False, "message": "認証トークンが一致しません"})
+                    return False
+                token_verified = True
+
+            # トークン未設定時はOrigin欠落・Origin: nullによる無認証ローカル実行を防止
+            if not is_allowed_origin_fn(origin, token_verified):
+                self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
+                return False
+            return True
+
+        def _read_json_body(self, allow_empty: bool = False) -> Optional[Dict[str, object]]:
+            content_length_raw = self.headers.get("Content-Length")
+            if content_length_raw is None:
+                if allow_empty:
+                    return {}
+                self._send_json(int(HTTPStatus.LENGTH_REQUIRED), {"ok": False, "message": "Content-Lengthヘッダが必要です"})
+                return None
+            try:
+                content_length = int(content_length_raw)
+            except ValueError:
+                self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "不正なContent-Lengthです"})
+                return None
+
+            if content_length == 0 and allow_empty:
+                return {}
+            if content_length <= 0:
+                self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが空です"})
+                return None
+            if content_length > max_payload_bytes:
+                self._send_json(int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), {"ok": False, "message": "ペイロードサイズが上限を超えています"})
+                return None
+
+            try:
+                raw_body = self.rfile.read(content_length)
+            except (socket.timeout, TimeoutError):
+                self._send_json(int(HTTPStatus.REQUEST_TIMEOUT), {"ok": False, "message": "リクエストボディの受信がタイムアウトしました"})
+                return None
+            except OSError:
+                return None
+
+            if len(raw_body) != content_length:
+                self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "リクエストボディが不完全です"})
+                return None
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONの解析に失敗しました"})
+                return None
+
+            if not isinstance(payload, dict):
+                self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "JSONオブジェクトを指定してください"})
+                return None
+            return payload
+
+        def do_OPTIONS(self) -> None:
+            origin = self.headers.get("Origin")
+            if not is_allowed_origin_fn(origin, False):
+                self._send_json(int(HTTPStatus.FORBIDDEN), {"ok": False, "message": "許可されていないOriginです"})
+                return
+            self.send_response(int(HTTPStatus.NO_CONTENT))
+            self._send_cors_headers(origin)
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            req_path = urlsplit(self.path).path
+            # コンソール上のURLを直接開いた際に404誤認を防ぐため非機密の案内ページを返す
+            if req_path == "/":
+                accept = (self.headers.get("Accept") or "").lower()
+                if "text/html" in accept:
+                    self._send_bytes(int(HTTPStatus.OK), _BRIDGE_LANDING_HTML, "text/html; charset=utf-8", include_cors=False)
+                else:
+                    self._send_json(
+                        int(HTTPStatus.OK),
+                        {
+                            "ok": True,
+                            "service": "aiskel-aistudio-bridge",
+                            "message": "aiskel AI Studio ローカルブリッジは稼働中です。https://aistudio.google.com/ から拡張機能経由で利用してください。",
+                            "endpoints": {
+                                "health": "/api/health",
+                                "binding": "/api/binding",
+                                "bind": "/api/bind",
+                                "unbind": "/api/unbind",
+                                "execute": "/api/execute",
+                            },
+                        },
+                    )
+                return
+            if req_path == "/favicon.ico":
+                try:
+                    self.send_response(int(HTTPStatus.NO_CONTENT))
+                    self.end_headers()
+                except OSError:
+                    return
+                return
+            if req_path == "/api/binding":
+                if not self._verify_access():
+                    return
+                self._send_json(int(HTTPStatus.OK), bridge.get_binding_info())
+                return
+            if req_path != "/api/health":
+                self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
+                return
+            if not self._verify_access():
+                return
+            binding_info = bridge.get_binding_info()
+            self._send_json(
+                int(HTTPStatus.OK),
+                {
+                    "ok": True,
+                    "project_root": str(bridge.project_root),
+                    "project_name": bridge.project_root.name,
+                    "binding": binding_info,
+                },
+            )
+
+        def do_POST(self) -> None:
+            req_path = urlsplit(self.path).path
+            if req_path == "/api/bind":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False)
+                if payload is None:
+                    return
+                raw_tab_id = payload.get("tab_id")
+                if not isinstance(raw_tab_id, str):
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "tab_id を文字列で指定してください"})
+                    return
+                try:
+                    info = bridge.bind_tab(
+                        tab_id=raw_tab_id,
+                        tab_title=str(payload.get("tab_title") or ""),
+                        tab_url=str(payload.get("tab_url") or ""),
+                    )
+                except ValueError as e:
+                    self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": str(e)})
+                    return
+                label = sanitize_console_text(str(info.get("tab_title") or info.get("tab_url") or info.get("tab_id")))
+                print(f"\n🔗 ブラウザタブをVSCodeプロジェクトと紐づけました: {label}", flush=True)
+                self._send_json(int(HTTPStatus.OK), info)
+                return
+
+            if req_path == "/api/unbind":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                if "tab_id" in payload:
+                    raw_tab_id = payload.get("tab_id")
+                    if not isinstance(raw_tab_id, str):
+                        self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "tab_id を文字列で指定してください"})
+                        return
+                    try:
+                        changed, info = bridge.unbind_tab(tab_id=raw_tab_id)
+                    except ValueError as e:
+                        self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": str(e)})
+                        return
+                else:
+                    changed, info = bridge.unbind_tab(tab_id=None)
+                if changed:
+                    print("\n🔓 ブラウザタブの紐づけを解除しました。", flush=True)
+                self._send_json(int(HTTPStatus.OK), info)
+                return
+
+            if req_path != "/api/execute":
+                self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
+                return
+            if not self._verify_access():
+                return
+
+            payload = self._read_json_body(allow_empty=False)
+            if payload is None:
+                return
+
+            try:
+                status_code, result = bridge._dispatch_execute_payload(payload)
+                self._send_json(status_code, result.to_dict())
+            except Exception as e:
+                print(f"✖ ブリッジ実行中に予期しないエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+
+    return _BridgeRequestHandler
