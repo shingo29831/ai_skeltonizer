@@ -28,6 +28,7 @@ from .aistudio_handoff import (
     has_patch_delimiters_in_text,
     load_project_summary_text,
 )
+from .aistudio_prompts import PromptPattern, list_prompt_patterns, load_prompt_for_pattern
 from .clipboard import set_clipboard_text
 from .aistudio_extension import (
     DEFAULT_BRIDGE_HOST,
@@ -238,6 +239,24 @@ class AiskelBridgeServer:
         enriched["auto_run_default"] = self._auto_run_mode == "enabled"
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
         return enriched
+
+    def get_prompt_payload(self, pattern: str = PromptPattern.DEFAULT.value) -> Tuple[int, Dict[str, object]]:
+        """指定パターンに対応する自動貼り付け用プロンプト文字列を返す。"""
+        try:
+            prompt_text = load_prompt_for_pattern(self.project_root, pattern)
+        except ValueError as e:
+            return int(HTTPStatus.BAD_REQUEST), {
+                "ok": False,
+                "message": str(e),
+                "available_patterns": list(list_prompt_patterns()),
+            }
+        normalized = (pattern or "").strip().lower() or PromptPattern.DEFAULT.value
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "pattern": normalized,
+            "prompt": prompt_text,
+            "available_patterns": list(list_prompt_patterns()),
+        }
 
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
@@ -488,11 +507,13 @@ class AiskelBridgeServer:
             except Exception as e:
                 print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
 
+            review_prompt = load_prompt_for_pattern(self.project_root, PromptPattern.PATCH_REVIEW)
             handoff = self._handoff_manager.create(
                 source_tab_id=req_tab_id,
                 new_chat_url=new_chat_url,
                 response_text=response_text,
                 summary_text=summary_text,
+                review_prompt=review_prompt,
             )
             if dedup_key:
                 self._recent_keys.append(dedup_key)

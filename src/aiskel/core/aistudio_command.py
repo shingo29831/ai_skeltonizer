@@ -137,6 +137,10 @@ def _has_copy_target_argument(command_line: str) -> bool:
         if tok.startswith("-"):
             i += 1
             continue
+        # プロンプト説明文中の省略記号・プレースホルダー引用(<path>:<func>等)による誤抽出を除外
+        if tok in ("...", "…") or (tok.startswith("<") and ">" in tok):
+            i += 1
+            continue
         return True
     return False
 
@@ -182,7 +186,7 @@ def _validate_spec_within_root(spec: str, project_root: Path) -> str:
         raise CommandValidationError(f"不正な対象指定です: {spec} ({e})") from e
 
     cleaned_file = file_part.strip()
-    if not cleaned_file or cleaned_file in (".", "./", ".\\"):
+    if not cleaned_file or cleaned_file in (".", "./", ".\\", "...", "…"):
         raise CommandValidationError(f"ファイルパスが空または無効です: {spec}")
 
     resolved_root = project_root.resolve()

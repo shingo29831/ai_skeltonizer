@@ -78,13 +78,38 @@ def has_patch_delimiters_in_text(text: str) -> bool:
     return False
 
 
-def format_handoff_prompt_text(response_text: str, summary_text: str) -> str:
-    """コピーしたAI応答と要約バンドルを新規タブ貼り付け用テキストへ統合する。"""
+def _wrap_proposed_implementation(resp: str) -> str:
+    # 応答内の同名閉じタグによる境界破壊を防ぐため衝突時は動的タグ名へ切り替える
+    tag = "proposed_implementation"
+    if re.search(rf"</?{tag}\b", resp, re.IGNORECASE):
+        idx = 1
+        while re.search(rf"</?{tag}_{idx}\b", resp, re.IGNORECASE):
+            idx += 1
+        tag = f"{tag}_{idx}"
+    return f"<{tag}>\n{resp}\n</{tag}>"
+
+
+def format_handoff_prompt_text(
+    response_text: str,
+    summary_text: str,
+    review_prompt: Optional[str] = None,
+) -> str:
+    """コピーしたAI応答・要約バンドル・任意のレビュー指示を新規タブ貼り付け用テキストへ統合する。"""
     resp = (response_text or "").strip()
     summary = (summary_text or "").strip()
-    if resp and summary:
-        return f"{resp}\n\n{summary}"
-    return resp or summary
+    if not resp and not summary:
+        return ""
+    prompt = (review_prompt or "").strip()
+    if not prompt:
+        if resp and summary:
+            return f"{resp}\n\n{summary}"
+        return resp or summary
+    sections = [prompt]
+    if resp:
+        sections.append(_wrap_proposed_implementation(resp))
+    if summary:
+        sections.append(summary)
+    return "\n\n".join(sections)
 
 
 def _find_existing_bundle_file(project_root: Path, output_dir: Path) -> Optional[Path]:
@@ -169,11 +194,12 @@ class PatchHandoffManager:
         new_chat_url: str,
         response_text: str,
         summary_text: str,
+        review_prompt: Optional[str] = None,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
         handoff_id = secrets.token_urlsafe(16)
-        combined = format_handoff_prompt_text(response_text, summary_text)
+        combined = format_handoff_prompt_text(response_text, summary_text, review_prompt=review_prompt)
         item = TabHandoffPayload(
             handoff_id=handoff_id,
             source_tab_id=source_tab_id,

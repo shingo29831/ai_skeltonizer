@@ -6,7 +6,7 @@ import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Dict, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .aistudio_bridge_state import sanitize_console_text
 
@@ -168,6 +168,7 @@ def build_bridge_request_handler_class(
                                 "binding": "/api/binding",
                                 "bind": "/api/bind",
                                 "unbind": "/api/unbind",
+                                "prompt": "/api/prompt",
                                 "execute": "/api/execute",
                             },
                         },
@@ -184,6 +185,18 @@ def build_bridge_request_handler_class(
                 if not self._verify_access():
                     return
                 self._send_json(int(HTTPStatus.OK), bridge.get_binding_info())
+                return
+            if req_path == "/api/prompt":
+                if not self._verify_access():
+                    return
+                query = parse_qs(urlsplit(self.path).query)
+                pattern = (query.get("pattern") or ["default"])[0]
+                try:
+                    status_code, body = bridge.get_prompt_payload(pattern)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ プロンプト取得中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
             if req_path != "/api/health":
                 self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
