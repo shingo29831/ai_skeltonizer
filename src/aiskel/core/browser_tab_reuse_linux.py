@@ -12,9 +12,9 @@ from .browser_paste_linux import (
     _clear_atspi_subtree_cache,
     _collect_atspi_node_texts,
     _disable_atspi_cache,
-    _get_atspi_existing_text,
     _is_atspi_app_default_browser,
     _is_atspi_document_busy,
+    _is_atspi_prompt_empty,
     _score_atspi_texts,
 )
 from .browser_paste_types import _strip_browser_title_suffix, is_loading_or_unready_title, is_login_or_auth_title
@@ -22,6 +22,13 @@ from .browser_tab_reuse_types import (
     CHAT_TURN_ACTION_BUTTON_KEYWORDS,
     NEW_CHAT_BUTTON_NAMES,
     is_empty_chat_tab_title,
+)
+
+_TAB_VERIFY_TIMEOUT_SEC = 2.0
+_DISABLED_NEW_CHAT_TOOLTIPS = (
+    "already in a new chat",
+    "すでに新しいチャット",
+    "既に新しいチャット",
 )
 
 
@@ -32,6 +39,9 @@ def _is_atspi_button_disabled(node: Any, atspi_mod: Any) -> bool:
             return True
         attrs = node.get_attributes() or {}
         if str(attrs.get("aria-disabled") or "").lower() == "true":
+            return True
+        desc = (node.get_description() or "").lower()
+        if desc and any(hint in desc for hint in _DISABLED_NEW_CHAT_TOOLTIPS):
             return True
     except Exception:
         return True
@@ -153,72 +163,83 @@ def _find_atspi_prompt_in_doc(
     return (best_node, best_label) if best_node is not None else None
 
 
+def _inspect_atspi_window_empty_chat(
+    win: Any,
+    atspi_mod: Any,
+    labels_lower: Sequence[str],
+    is_aistudio: bool,
+) -> Tuple[bool, bool]:
+    """AT-SPIウィンドウを検査し、(空チャットか, 非空確定で即終了すべきか) を返す。"""
+    if _is_atspi_document_busy(win, atspi_mod):
+        return False, False
+
+    docs = _collect_visible_atspi_documents(win, atspi_mod)
+    if not docs:
+        return False, False
+
+    roles = {atspi_mod.Role.ENTRY, atspi_mod.Role.TEXT}
+    found: Optional[Tuple[Any, str]] = None
+    target_doc: Optional[Any] = None
+    for doc in docs:
+        found = _find_atspi_prompt_in_doc(doc, labels_lower, roles, atspi_mod)
+        if found is not None:
+            target_doc = doc
+            break
+    if found is None or target_doc is None:
+        return False, False
+
+    prompt_node, matched_lbl = found
+    if not _is_atspi_prompt_empty(prompt_node, labels_lower, matched_lbl):
+        return False, True
+
+    btn_roles = {atspi_mod.Role.PUSH_BUTTON, atspi_mod.Role.TOGGLE_BUTTON}
+    max_nodes = 2500
+    queue: Deque[Tuple[Any, int]] = deque([(target_doc, 0)])
+    visited = 0
+    while queue and visited < max_nodes:
+        cur, depth = queue.popleft()
+        if cur is None:
+            continue
+        visited += 1
+        try:
+            _clear_atspi_single_cache(cur)
+            role = cur.get_role()
+            if role in btn_roles:
+                states = cur.get_state_set()
+                if states.contains(atspi_mod.StateType.VISIBLE) and _has_positive_atspi_extents(cur, atspi_mod):
+                    name_lower = (cur.get_name() or "").strip().lower()
+                    if name_lower:
+                        if is_aistudio and name_lower in NEW_CHAT_BUTTON_NAMES:
+                            if not _is_atspi_button_disabled(cur, atspi_mod):
+                                return False, True
+                        if name_lower in ("stop", "停止"):
+                            return False, True
+                        if any(kw in name_lower for kw in CHAT_TURN_ACTION_BUTTON_KEYWORDS):
+                            return False, True
+            if depth >= 48:
+                # 走査打ち切り時は安全側(False)に倒しつつ描画途中リトライを阻害しないよう確定非空にはしない
+                if cur.get_child_count() > 0:
+                    return False, False
+                continue
+            for i in range(cur.get_child_count()):
+                child = cur.get_child_at_index(i)
+                if child is not None:
+                    queue.append((child, depth + 1))
+        except Exception:
+            return False, False
+    if queue:
+        return False, False
+    return True, False
+
+
 def _is_atspi_window_empty_chat(
     win: Any,
     atspi_mod: Any,
     labels_lower: Sequence[str],
     is_aistudio: bool,
 ) -> bool:
-    if _is_atspi_document_busy(win, atspi_mod):
-        return False
-
-    docs = _collect_visible_atspi_documents(win, atspi_mod)
-    if not docs:
-        return False
-
-    roles = {atspi_mod.Role.ENTRY, atspi_mod.Role.TEXT}
-    found: Optional[Tuple[Any, str]] = None
-    for doc in docs:
-        found = _find_atspi_prompt_in_doc(doc, labels_lower, roles, atspi_mod)
-        if found is not None:
-            break
-    if found is None:
-        return False
-
-    prompt_node, matched_lbl = found
-    existing = _get_atspi_existing_text(prompt_node)
-    if existing and existing.lower() != matched_lbl:
-        return False
-
-    btn_roles = {atspi_mod.Role.PUSH_BUTTON, atspi_mod.Role.TOGGLE_BUTTON}
-    max_nodes = 2500
-    for doc in docs:
-        queue: Deque[Tuple[Any, int]] = deque([(doc, 0)])
-        visited = 0
-        while queue and visited < max_nodes:
-            cur, depth = queue.popleft()
-            if cur is None:
-                continue
-            visited += 1
-            try:
-                _clear_atspi_single_cache(cur)
-                role = cur.get_role()
-                if role in btn_roles:
-                    states = cur.get_state_set()
-                    if states.contains(atspi_mod.StateType.VISIBLE):
-                        name_lower = (cur.get_name() or "").strip().lower()
-                        if name_lower:
-                            if is_aistudio and name_lower in NEW_CHAT_BUTTON_NAMES:
-                                if not _is_atspi_button_disabled(cur, atspi_mod):
-                                    return False
-                            if name_lower in ("stop", "停止"):
-                                return False
-                            if any(kw in name_lower for kw in CHAT_TURN_ACTION_BUTTON_KEYWORDS):
-                                return False
-                if depth >= 48:
-                    # 深さ打ち切り時は会話ボタンを見落とす恐れがあるため安全側(False)に倒す
-                    if cur.get_child_count() > 0:
-                        return False
-                    continue
-                for i in range(cur.get_child_count()):
-                    child = cur.get_child_at_index(i)
-                    if child is not None:
-                        queue.append((child, depth + 1))
-            except Exception:
-                return False
-        if queue:
-            return False
-    return True
+    is_empty, _ = _inspect_atspi_window_empty_chat(win, atspi_mod, labels_lower, is_aistudio)
+    return is_empty
 
 
 def _collect_atspi_page_tabs(win: Any, atspi_mod: Any) -> List[Tuple[Any, str, bool]]:
@@ -279,8 +300,10 @@ def _wait_and_verify_selected_atspi_tab(
     labels_lower: Sequence[str],
     allowed_title_keywords: Sequence[str],
     is_aistudio: bool,
+    pre_title: str = "",
 ) -> Optional[str]:
-    deadline = time.monotonic() + 0.7
+    deadline = time.monotonic() + _TAB_VERIFY_TIMEOUT_SEC
+    mismatch_since: Optional[float] = None
     while time.monotonic() < deadline:
         _clear_atspi_subtree_cache(win)
         try:
@@ -293,8 +316,24 @@ def _wait_and_verify_selected_atspi_tab(
             title_ok = (not allowed_title_keywords) or any(
                 kw in post_title.lower() for kw in allowed_title_keywords
             )
-            if title_ok and _is_atspi_window_empty_chat(win, atspi_mod, labels_lower, is_aistudio):
-                return post_title
+            if not title_ok:
+                # 切替直後の旧タブ残像(pre_titleと同一)による誤打ち切りを防ぐ
+                if post_title != pre_title and not _is_atspi_document_busy(win, atspi_mod):
+                    if mismatch_since is None:
+                        mismatch_since = time.monotonic()
+                    elif (time.monotonic() - mismatch_since) >= 0.6:
+                        return None
+                else:
+                    mismatch_since = None
+            else:
+                mismatch_since = None
+                is_empty, definite_non_empty = _inspect_atspi_window_empty_chat(
+                    win, atspi_mod, labels_lower, is_aistudio
+                )
+                if is_empty:
+                    return post_title
+                if definite_non_empty:
+                    return None
         time.sleep(0.08)
     return None
 
@@ -396,7 +435,7 @@ def focus_linux_empty_chat_tab(
                     if not _select_atspi_tab(tab):
                         continue
                     matched_title = _wait_and_verify_selected_atspi_tab(
-                        win, Atspi, labels_lower, allowed_title_keywords, is_aistudio
+                        win, Atspi, labels_lower, allowed_title_keywords, is_aistudio, pre_title=win_title
                     )
                     if matched_title is not None:
                         return _activate_linux_window_by_title(matched_title, hints) or "atspi-focused"

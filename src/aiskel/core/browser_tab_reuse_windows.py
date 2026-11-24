@@ -24,25 +24,30 @@ from .browser_paste_windows_uia import (
     _UIA_ButtonControlTypeId,
     _UIA_ControlTypePropertyId,
     _UIA_DocumentControlTypeId,
+    _UIA_FullDescriptionPropertyId,
+    _UIA_HelpTextPropertyId,
     _UIA_IsEnabledPropertyId,
     _UIA_IsOffscreenPropertyId,
     _UIA_MenuBarControlTypeId,
     _UIA_MenuControlTypeId,
     _UIA_NamePropertyId,
     _UIA_TabItemControlTypeId,
-    _UIA_ValueValuePropertyId,
+    _UIA_ToolBarControlTypeId,
     _com_call,
     _com_release,
     _find_visible_active_documents,
+    _is_uia_descendant_of,
     _uia_create_int_condition,
     _uia_create_true_condition,
     _uia_find_all,
     _uia_find_scoped_all,
+    _uia_get_bounding_rect,
     _uia_get_prop_bool,
     _uia_get_prop_int,
     _uia_get_prop_str,
     find_best_prompt_element,
     is_browser_page_loading,
+    is_prompt_element_value_empty,
 )
 from .browser_tab_reuse_types import (
     CHAT_TURN_ACTION_BUTTON_KEYWORDS,
@@ -50,6 +55,10 @@ from .browser_tab_reuse_types import (
     is_empty_chat_tab_title,
 )
 
+_UIA_InvokePatternId = 10000
+_IID_IUIAutomationInvokePattern = _GUID(
+    0xFB377FBE, 0x8EA6, 0x46D5, (ctypes.c_ubyte * 8)(0x9C, 0x73, 0x64, 0x99, 0x64, 0x2D, 0x30, 0x59)
+)
 # UIA_SelectionItemPatternId (UIAutomationClient.h)
 _UIA_SelectionItemPatternId = 10010
 _UIA_SelectionItemIsSelectedPropertyId = 30079
@@ -58,13 +67,89 @@ _IID_IUIAutomationSelectionItemPattern = _GUID(
 )
 _SW_MINIMIZE = 6
 _SW_RESTORE = 9
+_TAB_VERIFY_TIMEOUT_SEC = 2.0
+_DISABLED_NEW_CHAT_TOOLTIPS = (
+    "already in a new chat",
+    "すでに新しいチャット",
+    "既に新しいチャット",
+)
 
 
 def _is_button_disabled(btn_el: ctypes.c_void_p, oleaut32: Any) -> bool:
     if not _uia_get_prop_bool(btn_el, oleaut32, _UIA_IsEnabledPropertyId, default=True):
         return True
-    aria_props = _uia_get_prop_str(btn_el, oleaut32, _UIA_AriaPropertiesPropertyId).lower()
-    return "disabled=true" in aria_props
+    aria_props = _uia_get_prop_str(btn_el, oleaut32, _UIA_AriaPropertiesPropertyId).lower().replace(" ", "")
+    if "disabled=true" in aria_props:
+        return True
+    for prop_id in (_UIA_HelpTextPropertyId, _UIA_FullDescriptionPropertyId):
+        desc = _uia_get_prop_str(btn_el, oleaut32, prop_id).lower()
+        if desc and any(hint in desc for hint in _DISABLED_NEW_CHAT_TOOLTIPS):
+            return True
+    return False
+
+
+def _inspect_document_empty_chat(
+    p_uia: ctypes.c_void_p,
+    root_el: ctypes.c_void_p,
+    oleaut32: Any,
+    prompt_labels: Sequence[str],
+    is_aistudio: bool,
+) -> Tuple[bool, bool]:
+    """Documentを検査し、(空チャットか, 非空確定で即終了すべきか) を返す。"""
+    target_el, matched_lbl, _ = find_best_prompt_element(
+        p_uia, root_el, oleaut32, prompt_labels, quick_probe=True
+    )
+    if target_el is None:
+        return False, False
+
+    docs = _find_visible_active_documents(p_uia, root_el, oleaut32)
+    btn_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_ButtonControlTypeId)
+    try:
+        if not is_prompt_element_value_empty(target_el, oleaut32, prompt_labels, matched_lbl):
+            return False, True
+
+        if not btn_cond or not docs:
+            return False, False
+
+        # DevToolsやサイドパネル等別Documentのボタン誤爆を防ぐため入力欄を含むDocumentのみ検査する
+        target_doc: Optional[ctypes.c_void_p] = None
+        if len(docs) == 1:
+            target_doc = docs[0]
+        else:
+            for doc_el in docs:
+                if _is_uia_descendant_of(p_uia, doc_el, target_el) is True:
+                    target_doc = doc_el
+                    break
+            if target_doc is None:
+                target_doc = docs[0]
+
+        buttons = _uia_find_all(target_doc, btn_cond)
+        try:
+            for btn in buttons:
+                if _uia_get_prop_bool(btn, oleaut32, _UIA_IsOffscreenPropertyId, default=False):
+                    continue
+                rect = _uia_get_bounding_rect(btn, oleaut32)
+                if rect is not None and (rect[2] <= 0 or rect[3] <= 0):
+                    continue
+                name_lower = _uia_get_prop_str(btn, oleaut32, _UIA_NamePropertyId).strip().lower()
+                if not name_lower:
+                    continue
+                if is_aistudio and name_lower in NEW_CHAT_BUTTON_NAMES:
+                    if not _is_button_disabled(btn, oleaut32):
+                        return False, True
+                if name_lower in ("stop", "停止"):
+                    return False, True
+                if any(kw in name_lower for kw in CHAT_TURN_ACTION_BUTTON_KEYWORDS):
+                    return False, True
+        finally:
+            for btn in buttons:
+                _com_release(btn)
+        return True, False
+    finally:
+        _com_release(target_el)
+        for doc_el in docs:
+            _com_release(doc_el)
+        _com_release(btn_cond)
 
 
 def _is_document_empty_chat(
@@ -75,49 +160,8 @@ def _is_document_empty_chat(
     is_aistudio: bool,
 ) -> bool:
     """アクティブDocumentに会話履歴がなく、空のプロンプト入力欄が存在するか検証する。"""
-    target_el, matched_lbl, _ = find_best_prompt_element(
-        p_uia, root_el, oleaut32, prompt_labels, quick_probe=True
-    )
-    if target_el is None:
-        return False
-    try:
-        existing_val = _uia_get_prop_str(target_el, oleaut32, _UIA_ValueValuePropertyId).strip()
-        if existing_val and existing_val.lower() != matched_lbl:
-            return False
-    finally:
-        _com_release(target_el)
-
-    btn_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_ButtonControlTypeId)
-    if not btn_cond:
-        return False
-    docs = _find_visible_active_documents(p_uia, root_el, oleaut32)
-    try:
-        if not docs:
-            return False
-        for doc_el in docs:
-            buttons = _uia_find_all(doc_el, btn_cond)
-            try:
-                for btn in buttons:
-                    if _uia_get_prop_bool(btn, oleaut32, _UIA_IsOffscreenPropertyId, default=False):
-                        continue
-                    name_lower = _uia_get_prop_str(btn, oleaut32, _UIA_NamePropertyId).strip().lower()
-                    if not name_lower:
-                        continue
-                    if is_aistudio and name_lower in NEW_CHAT_BUTTON_NAMES:
-                        if not _is_button_disabled(btn, oleaut32):
-                            return False
-                    if name_lower in ("stop", "停止"):
-                        return False
-                    if any(kw in name_lower for kw in CHAT_TURN_ACTION_BUTTON_KEYWORDS):
-                        return False
-            finally:
-                for btn in buttons:
-                    _com_release(btn)
-        return True
-    finally:
-        for doc_el in docs:
-            _com_release(doc_el)
-        _com_release(btn_cond)
+    is_empty, _ = _inspect_document_empty_chat(p_uia, root_el, oleaut32, prompt_labels, is_aistudio)
+    return is_empty
 
 
 def _collect_browser_tab_items(
@@ -128,15 +172,18 @@ def _collect_browser_tab_items(
     if not true_cond:
         return []
     skip_types = {_UIA_DocumentControlTypeId, _UIA_MenuControlTypeId, _UIA_MenuBarControlTypeId}
-    queue: Deque[Tuple[ctypes.c_void_p, int]] = deque([(root_el, 0)])
+    # 多数のブックマークボタン等でノード上限を消費しないようToolBar配下は後回しにする
+    main_queue: Deque[Tuple[ctypes.c_void_p, int]] = deque([(root_el, 0)])
+    toolbar_queue: Deque[Tuple[ctypes.c_void_p, int]] = deque()
     owned: List[ctypes.c_void_p] = []
     tabs: List[Tuple[ctypes.c_void_p, str, bool]] = []
     tab_ptrs: set[int] = set()
     visited = 0
     try:
-        while queue and visited < 1500:
-            cur_el, depth = queue.popleft()
+        while (main_queue or toolbar_queue) and visited < 3000:
+            cur_el, depth = main_queue.popleft() if main_queue else toolbar_queue.popleft()
             visited += 1
+            ctrl_type = 0
             if depth > 0:
                 ctrl_type = _uia_get_prop_int(cur_el, oleaut32, _UIA_ControlTypePropertyId, default=0)
                 if ctrl_type in skip_types:
@@ -152,10 +199,11 @@ def _collect_browser_tab_items(
                     continue
             if depth >= 18:
                 continue
+            target_q = toolbar_queue if ctrl_type == _UIA_ToolBarControlTypeId else main_queue
             children = _uia_find_scoped_all(cur_el, _TreeScope_Children, true_cond)
             for child in children:
                 owned.append(child)
-                queue.append((child, depth + 1))
+                target_q.append((child, depth + 1))
         return tabs
     finally:
         for obj in owned:
@@ -165,7 +213,7 @@ def _collect_browser_tab_items(
 
 
 def _select_uia_tab_item_background(tab_el: ctypes.c_void_p) -> bool:
-    """フォーカス奪取や座標誤爆を防ぐためSelectionItemPatternのみでタブを切り替える。"""
+    """フォーカス奪取や座標誤爆を防ぐためSelectionItemPattern(未実装時のみInvokePattern)でタブを切り替える。"""
     pat = ctypes.c_void_p()
     hr = _com_call(
         tab_el,
@@ -178,9 +226,26 @@ def _select_uia_tab_item_background(tab_el: ctypes.c_void_p) -> bool:
     )
     if hr >= 0 and pat.value:
         try:
+            # 反映遅延中の二重実行を防ぐためSelect()成功時はInvokeへフォールバックしない
             return _com_call(pat, 3, ctypes.c_long, ()) >= 0
         finally:
             _com_release(pat)
+
+    inv_pat = ctypes.c_void_p()
+    hr_inv = _com_call(
+        tab_el,
+        14,
+        ctypes.c_long,
+        (ctypes.c_int, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)),
+        _UIA_InvokePatternId,
+        ctypes.byref(_IID_IUIAutomationInvokePattern),
+        ctypes.byref(inv_pat),
+    )
+    if hr_inv >= 0 and inv_pat.value:
+        try:
+            return _com_call(inv_pat, 3, ctypes.c_long, ()) >= 0
+        finally:
+            _com_release(inv_pat)
     return False
 
 
@@ -193,17 +258,35 @@ def _wait_and_verify_selected_tab(
     prompt_labels: Sequence[str],
     allowed_title_keywords: Sequence[str],
     is_aistudio: bool,
+    pre_title: str = "",
 ) -> bool:
-    deadline = time.monotonic() + 0.7
+    deadline = time.monotonic() + _TAB_VERIFY_TIMEOUT_SEC
+    mismatch_since: Optional[float] = None
     while time.monotonic() < deadline:
         title = _get_window_title(hwnd, user32)
         if is_login_or_auth_title(title):
             return False
         if not is_loading_or_unready_title(title):
             title_ok = (not allowed_title_keywords) or any(kw in title.lower() for kw in allowed_title_keywords)
-            if title_ok and not is_browser_page_loading(p_uia, root_el, oleaut32):
-                if _is_document_empty_chat(p_uia, root_el, oleaut32, prompt_labels, is_aistudio):
-                    return True
+            if not title_ok:
+                # 切替直後の旧タブ残像(pre_titleと同一)による誤打ち切りを防ぐ
+                if title != pre_title and not is_browser_page_loading(p_uia, root_el, oleaut32):
+                    if mismatch_since is None:
+                        mismatch_since = time.monotonic()
+                    elif (time.monotonic() - mismatch_since) >= 0.6:
+                        return False
+                else:
+                    mismatch_since = None
+            else:
+                mismatch_since = None
+                if not is_browser_page_loading(p_uia, root_el, oleaut32):
+                    is_empty, definite_non_empty = _inspect_document_empty_chat(
+                        p_uia, root_el, oleaut32, prompt_labels, is_aistudio
+                    )
+                    if is_empty:
+                        return True
+                    if definite_non_empty:
+                        return False
         time.sleep(0.08)
     return False
 
@@ -276,7 +359,9 @@ def focus_windows_empty_chat_tab(
                     if not is_minimized and active_title_matches:
                         if not is_browser_page_loading(p_uia, root_el, oleaut32):
                             if _is_document_empty_chat(p_uia, root_el, oleaut32, prompt_labels, is_aistudio):
-                                return focus_windows_hwnd(hwnd)
+                                focused = focus_windows_hwnd(hwnd)
+                                if focused:
+                                    return focused
 
                     tabs = _collect_browser_tab_items(p_uia, root_el, oleaut32)
                     candidate_tabs = [
@@ -296,15 +381,30 @@ def focus_windows_empty_chat_tab(
                         if active_matches_empty and _wait_and_verify_selected_tab(
                             hwnd, user32, p_uia, root_el, oleaut32, prompt_labels, allowed_title_keywords, is_aistudio
                         ):
-                            return focus_windows_hwnd(hwnd)
+                            focused = focus_windows_hwnd(hwnd)
+                            if focused:
+                                return focused
+                        tab_switched = False
                         for tab_el, _ in candidate_tabs:
                             if not _select_uia_tab_item_background(tab_el):
                                 continue
+                            tab_switched = True
                             if _wait_and_verify_selected_tab(
-                                hwnd, user32, p_uia, root_el, oleaut32, prompt_labels, allowed_title_keywords, is_aistudio
+                                hwnd,
+                                user32,
+                                p_uia,
+                                root_el,
+                                oleaut32,
+                                prompt_labels,
+                                allowed_title_keywords,
+                                is_aistudio,
+                                pre_title=title,
                             ):
-                                return focus_windows_hwnd(hwnd)
-                        if prev_selected is not None:
+                                focused = focus_windows_hwnd(hwnd)
+                                if focused:
+                                    return focused
+                                break
+                        if tab_switched and prev_selected is not None:
                             _select_uia_tab_item_background(prev_selected)
                         _restore_minimized_state_if_failed(hwnd, prev_fg_hwnd, user32_focus)
                         continue
@@ -317,7 +417,15 @@ def focus_windows_empty_chat_tab(
                         if not _select_uia_tab_item_background(tab_el):
                             continue
                         if _wait_and_verify_selected_tab(
-                            hwnd, user32, p_uia, root_el, oleaut32, prompt_labels, allowed_title_keywords, is_aistudio
+                            hwnd,
+                            user32,
+                            p_uia,
+                            root_el,
+                            oleaut32,
+                            prompt_labels,
+                            allowed_title_keywords,
+                            is_aistudio,
+                            pre_title=title,
                         ):
                             if focus_windows_hwnd(hwnd):
                                 return hwnd

@@ -58,6 +58,7 @@ from .browser_paste_windows_uia import (
     _uia_get_prop_str,
     find_best_prompt_element,
     is_browser_page_loading,
+    is_prompt_element_value_empty,
     verify_element_focused,
 )
 
@@ -535,16 +536,16 @@ def paste_windows_browser_prompt(
                     target_window=hwnd,
                 )
 
-        if not allow_non_empty:
-            existing_val = _uia_get_prop_str(target_el, oleaut32, _UIA_ValueValuePropertyId).strip()
-            if existing_val and existing_val.lower() != matched_lbl:
-                return PasteOutcome(
-                    False,
-                    "入力欄に既存テキストが存在するため自動貼り付けをスキップしました",
-                    False,
-                    PasteErrorKind.USER_ABORTED,
-                    target_window=hwnd,
-                )
+        if not allow_non_empty and not is_prompt_element_value_empty(
+            target_el, oleaut32, prompt_labels, matched_lbl
+        ):
+            return PasteOutcome(
+                False,
+                "入力欄に既存テキストが存在するため自動貼り付けをスキップしました",
+                False,
+                PasteErrorKind.USER_ABORTED,
+                target_window=hwnd,
+            )
 
         # 物理カーソル移動やオーバーレイ誤爆を避けるためUIA SetFocusを最優先する
         _com_call(target_el, 3, ctypes.c_long, ())

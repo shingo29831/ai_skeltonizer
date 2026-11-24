@@ -127,6 +127,32 @@ def _get_atspi_existing_text(node: Any) -> str:
     return ""
 
 
+def _is_atspi_prompt_empty(node: Any, labels_lower: Sequence[str], matched_lbl: str = "") -> bool:
+    """AT-SPI入力要素が空または要素自身のプレースホルダー文字列と一致するか判定する。"""
+    existing = _get_atspi_existing_text(node)
+    if not existing:
+        return True
+    existing_lower = existing.lower()
+    allowed = {lbl.strip().lower() for lbl in labels_lower if lbl and lbl.strip()}
+    if matched_lbl:
+        allowed.add(matched_lbl.strip().lower())
+    if existing_lower in allowed:
+        return True
+    try:
+        attrs = node.get_attributes() or {}
+        for key in ("placeholder-text", "placeholder", "aria-placeholder"):
+            val = (attrs.get(key) or "").strip().lower()
+            if val and val == existing_lower:
+                return True
+        for raw_attr in ((node.get_name() or "").strip(), (node.get_description() or "").strip()):
+            attr_low = raw_attr.lower()
+            if attr_low and attr_low == existing_lower and any(lbl in attr_low for lbl in allowed):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _normalize_linux_token(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.strip().lower())
 
@@ -703,16 +729,14 @@ def paste_linux_browser_prompt(
             )
 
     target_node, _, matched_lbl = found
-    if not allow_non_empty:
-        existing = _get_atspi_existing_text(target_node)
-        if existing and existing.lower() != matched_lbl:
-            return PasteOutcome(
-                False,
-                "入力欄に既存テキストが存在するため自動貼り付けをスキップしました",
-                False,
-                PasteErrorKind.USER_ABORTED,
-                target_window=resolved_win_id,
-            )
+    if not allow_non_empty and not _is_atspi_prompt_empty(target_node, labels_lower, matched_lbl):
+        return PasteOutcome(
+            False,
+            "入力欄に既存テキストが存在するため自動貼り付けをスキップしました",
+            False,
+            PasteErrorKind.USER_ABORTED,
+            target_window=resolved_win_id,
+        )
 
     comp = target_node.get_component_iface()
     if comp is None or not comp.grab_focus():

@@ -460,6 +460,33 @@ def is_prompt_element_usable(el: ctypes.c_void_p, oleaut32: Any) -> bool:
     return bool(rect and rect[2] > 0 and rect[3] > 0)
 
 
+def is_prompt_element_value_empty(
+    el: ctypes.c_void_p,
+    oleaut32: Any,
+    labels: Sequence[str],
+    matched_lbl: str = "",
+) -> bool:
+    """プロンプト入力欄の現在値が空または要素自身のプレースホルダー文字列と一致するか判定する。"""
+    existing_val = _uia_get_prop_str(el, oleaut32, _UIA_ValueValuePropertyId).strip()
+    if not existing_val:
+        return True
+    existing_lower = existing_val.lower()
+    labels_lower = {lbl.strip().lower() for lbl in labels if lbl and lbl.strip()}
+    if matched_lbl:
+        labels_lower.add(matched_lbl.strip().lower())
+    if existing_lower in labels_lower:
+        return True
+    # プレースホルダー専用属性はラベル語彙非依存で完全一致を許容し、Name属性はラベル語彙を含む場合のみ許容する
+    for prop_id in (_UIA_HelpTextPropertyId, _UIA_FullDescriptionPropertyId):
+        attr_low = _uia_get_prop_str(el, oleaut32, prop_id).strip().lower()
+        if attr_low and attr_low == existing_lower:
+            return True
+    name_low = _uia_get_prop_str(el, oleaut32, _UIA_NamePropertyId).strip().lower()
+    if name_low and name_low == existing_lower and any(lbl in name_low for lbl in labels_lower):
+        return True
+    return False
+
+
 def _uia_compare_elements(p_uia: ctypes.c_void_p, el1: ctypes.c_void_p, el2: ctypes.c_void_p) -> bool:
     same = ctypes.c_int(0)
     hr = _com_call(
