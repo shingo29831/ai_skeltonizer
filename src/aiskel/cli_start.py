@@ -295,6 +295,7 @@ def handle_start_command(
     paste_settle_delay: float = DEFAULT_PASTE_SETTLE_DELAY,
     paste_timeout_sec: float = DEFAULT_PASTE_TIMEOUT_SEC,
     existing_tab_focuser: Optional[Callable[..., Optional[Union[bool, int, str]]]] = None,
+    on_run_structured: Optional[Callable[..., Any]] = None,
 ) -> int:
     """プロジェクト同期・バンドルコピー・ブラウザ起動・AI Studio監視ブリッジ待機を一括開始する。"""
     project_root: Path = parsed_args.project_dir.resolve()
@@ -394,6 +395,13 @@ def handle_start_command(
     should_paste_on_start = should_focus_on_start and paste_requested_on_start and supported_paste_url
     bridge_no_focus = no_focus or no_auto_focus
     bridge_no_paste = no_paste or no_auto_paste
+    auto_run = getattr(parsed_args, "auto_run", None)
+    if auto_run is True and (bridge_no_focus or bridge_no_paste):
+        print(
+            "⚠ 自動フォーカスまたは自動貼り付けが無効化されているため --auto-run を無効化します。",
+            file=sys.stderr,
+        )
+        auto_run = False
 
     def _default_start_focuser() -> Union[bool, int, str, None]:
         # 既存テスト等が cli_start.focus_default_browser を差し替えた場合も後方互換を保つ
@@ -557,5 +565,7 @@ def handle_start_command(
         extension_dir_arg=getattr(parsed_args, "extension_dir", None),
         no_focus=bridge_no_focus,
         no_paste=bridge_no_paste,
+        auto_run=auto_run,
+        structured_command_runner=on_run_structured,
         on_ready=_on_bridge_ready if not no_browser else None,
     )

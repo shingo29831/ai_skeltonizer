@@ -5,8 +5,9 @@ import sys
 import subprocess
 import platform
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Optional, Sequence, Set, Tuple, Union
 
 from .config import SkeletonConfig, load_bloat_config_from_meta
 from .core.bloat_detector import (
@@ -58,6 +59,114 @@ _extract_commit_message = extract_commit_message
 _read_single_key_from_tty = read_single_key_from_tty
 _prompt_user_confirmation = prompt_user_confirmation
 _rollback_modified_files = rollback_modified_files
+
+
+@dataclass(frozen=True)
+class CopyCommandResult:
+    """aiskel c コマンドの構造化実行結果を保持する。"""
+
+    exit_code: int
+    pasted: bool = False
+    paste_reason: str = ""
+    copied_chars: int = 0
+
+
+def _execute_copy_command(
+    parsed_args: argparse.Namespace,
+    copy_specs: List[str],
+    project_root: Path,
+    focus_browser: bool = True,
+    allowed_title_keywords: Optional[Sequence[str]] = None,
+) -> CopyCommandResult:
+    max_chars = parsed_args.max_chars
+    with_deps = getattr(parsed_args, "deps", False)
+    try:
+        formatted_text, est_tokens, item_count = extract_and_format_snippets(
+            copy_specs, project_root, max_chars=max_chars, with_deps=with_deps
+        )
+        set_clipboard_text(formatted_text)
+        deps_note = " (依存ノード自動解決含む)" if with_deps else ""
+        print(f"📋 クリップボードに {item_count} 件のコード{deps_note}をコピーしました。")
+        print(f"   - 総文字数   : {len(formatted_text):,} 文字")
+        print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
+        print("   AIチャットへそのままペーストしてご利用いただけます。")
+
+        pasted = False
+        paste_reason = ""
+        if not getattr(parsed_args, "no_focus", False):
+            target_window: Optional[Union[int, str]] = None
+            can_attempt_paste = False
+            if focus_browser:
+                target_window = focus_default_browser_target(interactive_only=True)
+                if target_window is not None:
+                    print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
+                    can_attempt_paste = True
+            else:
+                # ブリッジ経由で対象タブが既に最前面のときは別ブラウザへのフォーカス奪取を防ぐ
+                can_attempt_paste = True
+
+            if can_attempt_paste and not getattr(parsed_args, "no_paste", False):
+                paste_res = paste_to_browser_prompt(
+                    interactive_only=True,
+                    target_window=target_window,
+                    allowed_title_keywords=allowed_title_keywords,
+                )
+                if paste_res.success:
+                    pasted = True
+                    print("   📝 プロンプト入力欄に貼り付けて自動入力しました。")
+                elif paste_res.reason:
+                    paste_reason = paste_res.reason
+                    print(f"   ℹ 自動貼り付けをスキップしました: {paste_res.reason}")
+        return CopyCommandResult(
+            exit_code=0,
+            pasted=pasted,
+            paste_reason=paste_reason,
+            copied_chars=len(formatted_text),
+        )
+    except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
+        print(f"✖ コピー失敗: {e}", file=sys.stderr)
+        cmd_flag = "-d " if with_deps else ""
+        specs_str = " ".join(copy_specs)
+        error_report = (
+            f"[aiskel c コード抽出エラー]\n"
+            f"コマンド: aiskel c {cmd_flag}{specs_str}\n"
+            f"失敗原因: {e}\n\n"
+            f"上記エラーを解消するための正しい対象指定（ファイルパスやノード名）を提示してください。"
+        )
+        # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存(非フォーカス時等はスキップ)
+        if not getattr(parsed_args, "no_error_clipboard", False):
+            try:
+                set_clipboard_text(error_report)
+                print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
+            except Exception:
+                pass
+        return CopyCommandResult(exit_code=1, pasted=False, paste_reason=str(e))
+
+
+def run_structured_command(
+    args: Optional[List[str]] = None,
+    *,
+    focus_browser: bool = True,
+    allowed_title_keywords: Optional[Sequence[str]] = None,
+) -> CopyCommandResult:
+    """CLIコマンドを実行し、copy系コマンド時は貼り付け成否を含む構造化結果を返す。"""
+    try:
+        parsed_args = parse_arguments(args)
+        is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c", "cp")
+        copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
+        if copy_specs:
+            project_root = (parsed_args.dir if is_copy_cmd else parsed_args.project_dir).resolve()
+            return _execute_copy_command(
+                parsed_args,
+                copy_specs=copy_specs,
+                project_root=project_root,
+                focus_browser=focus_browser,
+                allowed_title_keywords=allowed_title_keywords,
+            )
+    except Exception as e:
+        print(f"\n致命的なエラーが発生しました: {e}", file=sys.stderr)
+        return CopyCommandResult(exit_code=1, pasted=False, paste_reason=str(e))
+    return CopyCommandResult(exit_code=main(args), pasted=False)
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -152,50 +261,12 @@ def main(args: Optional[List[str]] = None) -> int:
         copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
         if copy_specs:
             project_root = (parsed_args.dir if is_copy_cmd else parsed_args.project_dir).resolve()
-            max_chars = parsed_args.max_chars
-            with_deps = getattr(parsed_args, "deps", False)
-            try:
-                formatted_text, est_tokens, item_count = extract_and_format_snippets(
-                    copy_specs, project_root, max_chars=max_chars, with_deps=with_deps
-                )
-                set_clipboard_text(formatted_text)
-                deps_note = " (依存ノード自動解決含む)" if with_deps else ""
-                print(f"📋 クリップボードに {item_count} 件のコード{deps_note}をコピーしました。")
-                print(f"   - 総文字数   : {len(formatted_text):,} 文字")
-                print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
-                print("   AIチャットへそのままペーストしてご利用いただけます。")
-                if not getattr(parsed_args, "no_focus", False):
-                    target_window = focus_default_browser_target(interactive_only=True)
-                    if target_window is not None:
-                        print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
-                        if not getattr(parsed_args, "no_paste", False):
-                            paste_res = paste_to_browser_prompt(
-                                interactive_only=True,
-                                target_window=target_window,
-                            )
-                            if paste_res.success:
-                                print("   📝 プロンプト入力欄に貼り付けて自動入力しました。")
-                            elif paste_res.reason:
-                                print(f"   ℹ 自動貼り付けをスキップしました: {paste_res.reason}")
-                return 0
-            except (ValueError, FileNotFoundError, KeyError, RuntimeError) as e:
-                print(f"✖ コピー失敗: {e}", file=sys.stderr)
-                cmd_flag = "-d " if with_deps else ""
-                specs_str = " ".join(copy_specs)
-                error_report = (
-                    f"[aiskel c コード抽出エラー]\n"
-                    f"コマンド: aiskel c {cmd_flag}{specs_str}\n"
-                    f"失敗原因: {e}\n\n"
-                    f"上記エラーを解消するための正しい対象指定（ファイルパスやノード名）を提示してください。"
-                )
-                # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存(非フォーカス時等はスキップ)
-                if not getattr(parsed_args, "no_error_clipboard", False):
-                    try:
-                        set_clipboard_text(error_report)
-                        print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
-                    except Exception:
-                        pass
-                return 1
+            return _execute_copy_command(
+                parsed_args,
+                copy_specs=copy_specs,
+                project_root=project_root,
+                focus_browser=True,
+            ).exit_code
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("docs", "d"):
             targets = parsed_args.targets
@@ -239,10 +310,18 @@ def main(args: Optional[List[str]] = None) -> int:
             return handle_commit_command(parsed_args, on_auto_sync=_trigger_auto_sync)
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("listen", "l"):
-            return handle_listen_command(parsed_args, on_run_command=main)
+            return handle_listen_command(
+                parsed_args,
+                on_run_command=main,
+                on_run_structured=run_structured_command,
+            )
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("start", "s"):
-            return handle_start_command(parsed_args, on_run_command=main)
+            return handle_start_command(
+                parsed_args,
+                on_run_command=main,
+                on_run_structured=run_structured_command,
+            )
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("watch", "w"):
             project_root: Path = parsed_args.project_dir.resolve()

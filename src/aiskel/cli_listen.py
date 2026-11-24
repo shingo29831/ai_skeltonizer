@@ -2,7 +2,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Callable, List
+from typing import Any, Callable, List, Optional
 
 from .core.aistudio_bridge import run_bridge_server
 from .core.aistudio_extension import (
@@ -19,6 +19,7 @@ from .core.aistudio_extension import (
 def handle_listen_command(
     parsed_args: argparse.Namespace,
     on_run_command: Callable[[List[str]], int],
+    on_run_structured: Optional[Callable[..., Any]] = None,
 ) -> int:
     """ローカルブリッジサーバーを起動し、Google AI Studio推論完了時のaiskel c自動実行を待機する。"""
     host: str = getattr(parsed_args, "host", DEFAULT_BRIDGE_HOST)
@@ -76,6 +77,13 @@ def handle_listen_command(
             print("   ※ 既に読み込み済みの場合は各ブラウザの拡張機能画面で更新(リロード)をクリックしてください")
         return 0
 
+    no_focus = getattr(parsed_args, "no_focus", False)
+    no_paste = getattr(parsed_args, "no_paste", False)
+    auto_run = getattr(parsed_args, "auto_run", None)
+    if auto_run is True and (no_focus or no_paste):
+        print("⚠ --no-focus または --no-paste 指定時は --auto-run を無効化します。", file=sys.stderr)
+        auto_run = False
+
     project_root: Path = parsed_args.project_dir.resolve()
     return run_bridge_server(
         project_root=project_root,
@@ -84,6 +92,8 @@ def handle_listen_command(
         port=port,
         explicit_token=explicit_token,
         extension_dir_arg=ext_dir_arg,
-        no_focus=getattr(parsed_args, "no_focus", False),
-        no_paste=getattr(parsed_args, "no_paste", False),
+        no_focus=no_focus,
+        no_paste=no_paste,
+        auto_run=auto_run,
+        structured_command_runner=on_run_structured,
     )

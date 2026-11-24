@@ -12,7 +12,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Deque, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, TextIO, Tuple
 from urllib.parse import urlsplit
 
 from .aistudio_bridge_handler import build_bridge_request_handler_class
@@ -64,6 +64,9 @@ class BridgeExecutionResult:
     argv: Tuple[str, ...]
     message: str
     skipped: bool = False
+    pasted: bool = False
+    auto_run: bool = False
+    auto_run_allowed: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -72,6 +75,9 @@ class BridgeExecutionResult:
             "command": self.command,
             "message": self.message,
             "skipped": self.skipped,
+            "pasted": self.pasted,
+            "auto_run": self.auto_run,
+            "auto_run_allowed": self.auto_run_allowed,
         }
 
 
@@ -100,6 +106,9 @@ class _TeeTextIO:
 
     def isatty(self) -> bool:
         return getattr(self._wrapped, "isatty", lambda: False)()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._wrapped, name)
 
     def getvalue(self) -> str:
         return self._buffer.getvalue()
@@ -162,15 +171,24 @@ class AiskelBridgeServer:
         no_focus: bool = False,
         no_paste: bool = False,
         require_tab_binding: bool = False,
+        auto_run: Optional[bool] = None,
+        structured_command_runner: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.command_runner = command_runner
+        self.structured_command_runner = structured_command_runner
         self.host = host
         self.port = port
         self._token: Optional[str] = None
         self.token = token
         self.no_focus = no_focus
         self.no_paste = no_paste
+        if no_focus or no_paste or auto_run is False:
+            self._auto_run_mode = "disabled"
+        elif auto_run is True:
+            self._auto_run_mode = "enabled"
+        else:
+            self._auto_run_mode = "manual"
         self._binding_manager = TabBindingManager(self.project_root, require_binding=require_tab_binding)
         self._exec_lock = threading.Lock()
         self._queue_state_lock = threading.Lock()
@@ -204,17 +222,35 @@ class AiskelBridgeServer:
             return str(addr[0]), int(addr[1])
         return normalize_bind_host(self.host), self.port
 
+    def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
+        enriched = dict(info)
+        enriched["auto_run_default"] = self._auto_run_mode == "enabled"
+        enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
+        return enriched
+
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
-        return self._binding_manager.get_info()
+        return self._enrich_binding_info(self._binding_manager.get_info())
 
     def bind_tab(self, tab_id: str, tab_title: str = "", tab_url: str = "") -> Dict[str, object]:
         """指定されたブラウザタブをこのブリッジへ紐づける。"""
-        return self._binding_manager.bind(tab_id=tab_id, tab_title=tab_title, tab_url=tab_url)
+        return self._enrich_binding_info(self._binding_manager.bind(tab_id=tab_id, tab_title=tab_title, tab_url=tab_url))
 
     def unbind_tab(self, tab_id: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
         """現在のブラウザタブ紐づけを解除する。"""
-        return self._binding_manager.unbind(tab_id=tab_id)
+        changed, info = self._binding_manager.unbind(tab_id=tab_id)
+        return changed, self._enrich_binding_info(info)
+
+    def _resolve_target_title_keywords(self, payload: Dict[str, object]) -> Tuple[str, ...]:
+        raw_title = payload.get("tab_title")
+        title_str = " ".join(str(raw_title).split()) if isinstance(raw_title, str) else ""
+        if not title_str:
+            binding_title = self._binding_manager.get_info().get("tab_title")
+            title_str = " ".join(str(binding_title).split()) if isinstance(binding_title, str) else ""
+        normalized = title_str[:80].strip().lower()
+        if len(normalized) >= 4:
+            return (normalized,)
+        return ("google ai studio", "aistudio")
 
     def _normalize_incoming_commands(self, payload: Dict[str, object]) -> List[str]:
         raw_commands = payload.get("commands")
@@ -282,6 +318,10 @@ class AiskelBridgeServer:
         # タブ切替直後の同一ターン位置・同一コマンドの誤スキップを防ぐためtab_idで重複キーを分離
         dedup_key = f"{req_tab_id}::{turn_id}::{display_cmd}" if turn_id else ""
 
+        target_title_keywords = self._resolve_target_title_keywords(payload)
+        # タブ側が既にフォアグラウンドのときは別ブラウザ・別ウィンドウへのフォーカス奪取を防ぐ
+        focus_browser = (not effective_no_focus) and (page_focused is not True)
+
         with self._exec_lock:
             if dedup_key and dedup_key in self._recent_keys:
                 return int(HTTPStatus.OK), BridgeExecutionResult(
@@ -298,9 +338,23 @@ class AiskelBridgeServer:
 
             tee_stderr = _TeeTextIO(sys.stderr)
             system_exit_note = ""
+            exec_pasted = False
             with contextlib.redirect_stderr(tee_stderr):
                 try:
-                    exit_code = int(self.command_runner(argv))
+                    if self.structured_command_runner is not None:
+                        raw_res = self.structured_command_runner(
+                            argv,
+                            focus_browser=focus_browser,
+                            allowed_title_keywords=target_title_keywords,
+                        )
+                    else:
+                        raw_res = self.command_runner(argv)
+
+                    if isinstance(raw_res, int):
+                        exit_code = int(raw_res)
+                    else:
+                        exit_code = int(getattr(raw_res, "exit_code", 1))
+                        exec_pasted = bool(getattr(raw_res, "pasted", False))
                 except SystemExit as e:
                     # argparse等のSystemExitでブリッジワーカーループが崩壊するのを防止
                     exit_code = _normalize_system_exit_code(e)
@@ -309,6 +363,15 @@ class AiskelBridgeServer:
 
             if exit_code == 0 and dedup_key:
                 self._recent_keys.append(dedup_key)
+
+            pasted = (
+                exit_code == 0
+                and not effective_no_focus
+                and not effective_no_paste
+                and exec_pasted
+            )
+            auto_run_allowed = pasted and (self._auto_run_mode != "disabled")
+            auto_run = pasted and (self._auto_run_mode == "enabled")
 
             if exit_code == 0:
                 status_msg = "コマンドを実行しました"
@@ -326,6 +389,9 @@ class AiskelBridgeServer:
                 command=display_cmd,
                 argv=tuple(argv),
                 message=status_msg,
+                pasted=pasted,
+                auto_run=auto_run,
+                auto_run_allowed=auto_run_allowed,
             )
 
     def _dispatch_execute_payload(self, payload: Dict[str, object]) -> Tuple[int, BridgeExecutionResult]:
@@ -504,6 +570,8 @@ def run_bridge_server(
     no_paste: bool = False,
     on_ready: Optional[Callable[[threading.Event], None]] = None,
     require_tab_binding: bool = True,
+    auto_run: Optional[bool] = None,
+    structured_command_runner: Optional[Callable[..., Any]] = None,
 ) -> int:
     """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
     if not project_root.exists() or not project_root.is_dir():
@@ -523,6 +591,8 @@ def run_bridge_server(
         no_focus=no_focus,
         no_paste=no_paste,
         require_tab_binding=require_tab_binding,
+        auto_run=auto_run,
+        structured_command_runner=structured_command_runner,
     )
 
     # --port 0(動的割当)でも実ポートを拡張機能へ反映させるため先にbindを実行
