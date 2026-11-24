@@ -1,12 +1,13 @@
 """Module: @role: コーディング開始時のスケルトン同期・バンドルコピー・ブラウザ起動・AI Studio監視ブリッジ起動を統合制御する。"""
 import argparse
+import inspect
 import os
 import sys
 import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
 from .cli_parser import process_comma_separated_args
@@ -20,10 +21,10 @@ from .core.clipboard import set_clipboard_text
 from .core.token_counter import estimate_tokens
 
 DEFAULT_AISTUDIO_URL = "https://aistudio.google.com/"
-DEFAULT_FOCUS_RETRY_DELAYS: Tuple[float, ...] = (0.3, 0.5, 0.7, 1.0)
-DEFAULT_PASTE_SETTLE_DELAY: float = 1.2
-DEFAULT_PASTE_RETRY_DELAYS: Tuple[float, ...] = (0.4, 0.6, 0.8, 1.0, 1.2)
-DEFAULT_PASTE_TIMEOUT_SEC: float = 8.0
+DEFAULT_FOCUS_RETRY_DELAYS: Tuple[float, ...] = (0.3, 0.5, 0.7, 1.0, 1.5)
+DEFAULT_PASTE_SETTLE_DELAY: float = 1.5
+DEFAULT_PASTE_RETRY_DELAYS: Tuple[float, ...] = (0.5, 0.7, 1.0, 1.2, 1.5, 2.0, 2.0, 2.0, 2.5, 2.5)
+DEFAULT_PASTE_TIMEOUT_SEC: float = 18.0
 SUPPORTED_PASTE_DOMAIN_TITLE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
     "aistudio.google.com": ("google ai studio", "aistudio"),
     "gemini.google.com": ("gemini",),
@@ -188,6 +189,27 @@ def _focus_with_retry(
     return None
 
 
+def _is_loading_wait_reason(reason: str) -> bool:
+    norm = (reason or "").lower()
+    return any(kw in norm for kw in ("読み込み", "ページ遷移", "描画更新", "loading"))
+
+
+def _is_non_loading_mismatch_reason(reason: str) -> bool:
+    text = reason or ""
+    return text.startswith("許可対象外のページ") or text.startswith("ページ内に対象のプロンプト入力欄が見つかりませんでした")
+
+
+def _call_paste_to_browser_prompt_safe(**kwargs: Any) -> PasteResult:
+    try:
+        sig = inspect.signature(paste_to_browser_prompt)
+        params = sig.parameters
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs = {k: v for k, v in kwargs.items() if k in params}
+    except (TypeError, ValueError):
+        pass
+    return paste_to_browser_prompt(**kwargs)
+
+
 def _paste_with_retry(
     paster: Callable[..., PasteResult],
     target_window: Optional[Union[int, str]],
@@ -204,10 +226,33 @@ def _paste_with_retry(
     if result.success or not result.retryable or stop_event.is_set():
         return result
 
+    printed_waiting = False
+    non_loading_mismatch_count = 0
+    window_lost_count = 0
+    cap_long_retries = len(retry_delays) > 5
+
     for delay in retry_delays:
+        if _is_non_loading_mismatch_reason(result.reason):
+            non_loading_mismatch_count += 1
+            if cap_long_retries and non_loading_mismatch_count > 4:
+                return result
+        else:
+            non_loading_mismatch_count = 0
+
+        if result.error_kind == PasteErrorKind.WINDOW_LOST:
+            window_lost_count += 1
+            if cap_long_retries and window_lost_count > 3:
+                return result
+        else:
+            window_lost_count = 0
+
         remaining = deadline - time.monotonic()
         if remaining <= 0 or delay > remaining:
             return result
+
+        if not printed_waiting and _is_loading_wait_reason(result.reason):
+            print("⏳ サイトの読み込み完了を待機してから自動貼り付けを実行します...", flush=True)
+            printed_waiting = True
 
         if delay > 0 and stop_event.wait(delay):
             return result
@@ -355,11 +400,12 @@ def handle_start_command(
     opener = browser_opener or (lambda url: open_browser_url(url, interactive_only=True))
     focuser = browser_focuser or _default_start_focuser
     paster = prompt_paster or (
-        lambda target_window=None: paste_to_browser_prompt(
+        lambda target_window=None: _call_paste_to_browser_prompt_safe(
             interactive_only=True,
             target_window=target_window,
             allowed_title_keywords=allowed_title_keywords,
             quick_probe=True,
+            verify_stability=True,
         )
     )
 

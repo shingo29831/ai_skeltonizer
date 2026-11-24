@@ -2,42 +2,67 @@
 import ctypes
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Set, Tuple
 
 from .browser_focus_windows import _get_windows_default_browser_exe_names
-from .browser_paste_types import PasteErrorKind, PasteOutcome, is_login_or_auth_title
+from .browser_paste_types import (
+    PasteErrorKind,
+    PasteOutcome,
+    is_loading_or_unready_title,
+    is_login_or_auth_title,
+)
+from .browser_paste_windows_uia import (
+    _CLSID_CUIAutomation,
+    _CLSCTX_INPROC_SERVER,
+    _COINIT_APARTMENTTHREADED,
+    _GUID,
+    _IID_IUIAutomation,
+    _IS_64BIT,
+    _RPC_E_CHANGED_MODE,
+    _TreeScope_Descendants,
+    _UIA_AriaPropertiesPropertyId,
+    _UIA_AriaRolePropertyId,
+    _UIA_BoundingRectanglePropertyId,
+    _UIA_ControlTypePropertyId,
+    _UIA_DocumentControlTypeId,
+    _UIA_EditControlTypeId,
+    _UIA_FullDescriptionPropertyId,
+    _UIA_HasKeyboardFocusPropertyId,
+    _UIA_HelpTextPropertyId,
+    _UIA_IsEnabledPropertyId,
+    _UIA_IsKeyboardFocusablePropertyId,
+    _UIA_IsOffscreenPropertyId,
+    _UIA_IsPasswordPropertyId,
+    _UIA_NamePropertyId,
+    _UIA_TextControlTypeId,
+    _UIA_ValueIsReadOnlyPropertyId,
+    _UIA_ValueValuePropertyId,
+    _VARIANT,
+    _VT_ARRAY,
+    _VT_BOOL,
+    _VT_BSTR,
+    _VT_I4,
+    _VT_R8,
+    _com_call,
+    _com_release,
+    _find_visible_active_document,
+    _score_candidate,
+    _uia_create_bstr_condition,
+    _uia_create_int_condition,
+    _uia_create_or_condition,
+    _uia_create_true_condition,
+    _uia_find_all,
+    _uia_find_first,
+    _uia_get_bounding_rect,
+    _uia_get_prop_bool,
+    _uia_get_prop_str,
+    find_best_prompt_element,
+    is_browser_page_loading,
+    verify_element_focused,
+)
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_COINIT_APARTMENTTHREADED = 0x2
-_CLSCTX_INPROC_SERVER = 0x1
-_RPC_E_CHANGED_MODE = -2147417850
-
-_TreeScope_Descendants = 4
-
-_UIA_BoundingRectanglePropertyId = 30001
-_UIA_ControlTypePropertyId = 30003
-_UIA_NamePropertyId = 30005
-_UIA_HasKeyboardFocusPropertyId = 30008
-_UIA_IsKeyboardFocusablePropertyId = 30009
-_UIA_IsEnabledPropertyId = 30010
-_UIA_HelpTextPropertyId = 30013
-_UIA_IsPasswordPropertyId = 30019
-_UIA_IsOffscreenPropertyId = 30022
-_UIA_ValueValuePropertyId = 30045
-_UIA_ValueIsReadOnlyPropertyId = 30046
-_UIA_AriaRolePropertyId = 30101
-_UIA_AriaPropertiesPropertyId = 30102
-_UIA_FullDescriptionPropertyId = 30159
-
-_UIA_EditControlTypeId = 50004
-_UIA_TextControlTypeId = 50020
-_UIA_DocumentControlTypeId = 50030
-
-_VT_I4 = 3
-_VT_R8 = 5
-_VT_BSTR = 8
-_VT_BOOL = 11
-_VT_ARRAY = 0x2000
+_STABILITY_CHECK_DELAY_SEC = 0.35
 
 _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
@@ -61,28 +86,9 @@ _VK_RMENU = 0xA5
 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
 _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = ctypes.c_void_p(-3)
 
-_IS_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
-
-
-class _GUID(ctypes.Structure):
-    _fields_ = [
-        ("Data1", ctypes.c_uint32),
-        ("Data2", ctypes.c_uint16),
-        ("Data3", ctypes.c_uint16),
-        ("Data4", ctypes.c_ubyte * 8),
-    ]
-
-
-# Unionを含めない固定構造体として定義し32/64bit ctypes引数渡し制限を回避する
-class _VARIANT(ctypes.Structure):
-    _fields_ = [
-        ("vt", ctypes.c_uint16),
-        ("wReserved1", ctypes.c_uint16),
-        ("wReserved2", ctypes.c_uint16),
-        ("wReserved3", ctypes.c_uint16),
-        ("data1", ctypes.c_ssize_t),
-        ("data2", ctypes.c_ssize_t),
-    ]
+_find_best_prompt_element = find_best_prompt_element
+_is_browser_page_loading = is_browser_page_loading
+_verify_element_focused = verify_element_focused
 
 
 class _POINT(ctypes.Structure):
@@ -247,312 +253,27 @@ def _get_window_title(hwnd: int, user32: Any) -> str:
     return buf.value
 
 
-def _uia_create_int_condition(p_uia: ctypes.c_void_p, prop_id: int, value: int) -> Optional[ctypes.c_void_p]:
-    var = _VARIANT(vt=_VT_I4, data1=value)
-    cond = ctypes.c_void_p()
-    if _IS_64BIT:
-        hr = _com_call(
-            p_uia, 23, ctypes.c_long,
-            (ctypes.c_int, ctypes.POINTER(_VARIANT), ctypes.POINTER(ctypes.c_void_p)),
-            prop_id, ctypes.byref(var), ctypes.byref(cond),
-        )
-    else:
-        hr = _com_call(
-            p_uia, 23, ctypes.c_long,
-            (ctypes.c_int, _VARIANT, ctypes.POINTER(ctypes.c_void_p)),
-            prop_id, var, ctypes.byref(cond),
-        )
-    return cond if hr >= 0 and cond.value else None
-
-
-def _uia_create_bstr_condition(
-    p_uia: ctypes.c_void_p, oleaut32: Any, prop_id: int, text: str
-) -> Optional[ctypes.c_void_p]:
-    bstr = oleaut32.SysAllocString(text)
-    if not bstr:
+def _validate_foreground_hwnd(
+    hwnd: int,
+    user32: Any,
+    kernel32: Any,
+    exe_names: Set[str],
+    lost_msg: str,
+    switched_browser_msg: str,
+    switched_other_msg: str,
+) -> Optional[PasteOutcome]:
+    cur_fg_ptr = user32.GetForegroundWindow()
+    cur_fg = int(cur_fg_ptr) if cur_fg_ptr else 0
+    if cur_fg == hwnd:
         return None
-    var = _VARIANT(vt=_VT_BSTR, data1=int(bstr))
-    cond = ctypes.c_void_p()
-    try:
-        if _IS_64BIT:
-            hr = _com_call(
-                p_uia, 23, ctypes.c_long,
-                (ctypes.c_int, ctypes.POINTER(_VARIANT), ctypes.POINTER(ctypes.c_void_p)),
-                prop_id, ctypes.byref(var), ctypes.byref(cond),
-            )
-        else:
-            hr = _com_call(
-                p_uia, 23, ctypes.c_long,
-                (ctypes.c_int, _VARIANT, ctypes.POINTER(ctypes.c_void_p)),
-                prop_id, var, ctypes.byref(cond),
-            )
-        return cond if hr >= 0 and cond.value else None
-    finally:
-        oleaut32.VariantClear(ctypes.byref(var))
-
-
-def _uia_create_or_condition(
-    p_uia: ctypes.c_void_p, cond1: ctypes.c_void_p, cond2: ctypes.c_void_p
-) -> Optional[ctypes.c_void_p]:
-    cond = ctypes.c_void_p()
-    hr = _com_call(
-        p_uia, 28, ctypes.c_long,
-        (ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
-        cond1, cond2, ctypes.byref(cond),
-    )
-    return cond if hr >= 0 and cond.value else None
-
-
-def _uia_create_true_condition(p_uia: ctypes.c_void_p) -> Optional[ctypes.c_void_p]:
-    cond = ctypes.c_void_p()
-    hr = _com_call(p_uia, 21, ctypes.c_long, (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(cond))
-    return cond if hr >= 0 and cond.value else None
-
-
-def _uia_find_all(el: ctypes.c_void_p, cond: ctypes.c_void_p) -> List[ctypes.c_void_p]:
-    arr = ctypes.c_void_p()
-    hr = _com_call(
-        el, 6, ctypes.c_long,
-        (ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
-        _TreeScope_Descendants, cond, ctypes.byref(arr),
-    )
-    if hr < 0 or not arr.value:
-        return []
-    result: List[ctypes.c_void_p] = []
-    try:
-        length = ctypes.c_int(0)
-        if _com_call(arr, 3, ctypes.c_long, (ctypes.POINTER(ctypes.c_int),), ctypes.byref(length)) < 0:
-            return []
-        for idx in range(length.value):
-            item = ctypes.c_void_p()
-            if _com_call(
-                arr, 4, ctypes.c_long, (ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)), idx, ctypes.byref(item)
-            ) >= 0 and item.value:
-                result.append(item)
-        return result
-    finally:
-        _com_release(arr)
-
-
-def _uia_find_first(el: ctypes.c_void_p, cond: ctypes.c_void_p) -> Optional[ctypes.c_void_p]:
-    found = ctypes.c_void_p()
-    hr = _com_call(
-        el, 5, ctypes.c_long,
-        (ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
-        _TreeScope_Descendants, cond, ctypes.byref(found),
-    )
-    return found if hr >= 0 and found.value else None
-
-
-def _uia_get_prop_bool(el: ctypes.c_void_p, oleaut32: Any, prop_id: int, default: bool = False) -> bool:
-    var = _VARIANT()
-    hr = _com_call(el, 10, ctypes.c_long, (ctypes.c_int, ctypes.POINTER(_VARIANT)), prop_id, ctypes.byref(var))
-    try:
-        if hr >= 0 and var.vt == _VT_BOOL:
-            return ctypes.c_int16(var.data1 & 0xFFFF).value != 0
-        return default
-    finally:
-        oleaut32.VariantClear(ctypes.byref(var))
-
-
-def _uia_get_prop_str(el: ctypes.c_void_p, oleaut32: Any, prop_id: int) -> str:
-    var = _VARIANT()
-    hr = _com_call(el, 10, ctypes.c_long, (ctypes.c_int, ctypes.POINTER(_VARIANT)), prop_id, ctypes.byref(var))
-    try:
-        if hr >= 0 and var.vt == _VT_BSTR and var.data1:
-            return ctypes.wstring_at(var.data1)
-        return ""
-    finally:
-        oleaut32.VariantClear(ctypes.byref(var))
-
-
-def _uia_get_bounding_rect(el: ctypes.c_void_p, oleaut32: Any) -> Optional[Tuple[float, float, float, float]]:
-    var = _VARIANT()
-    hr = _com_call(
-        el, 10, ctypes.c_long, (ctypes.c_int, ctypes.POINTER(_VARIANT)), _UIA_BoundingRectanglePropertyId, ctypes.byref(var)
-    )
-    try:
-        if hr < 0 or var.vt != (_VT_ARRAY | _VT_R8) or not var.data1:
-            return None
-        psa = ctypes.c_void_p(var.data1)
-        lb = ctypes.c_long(0)
-        ub = ctypes.c_long(0)
-        if oleaut32.SafeArrayGetLBound(psa, 1, ctypes.byref(lb)) < 0:
-            return None
-        if oleaut32.SafeArrayGetUBound(psa, 1, ctypes.byref(ub)) < 0:
-            return None
-        if (ub.value - lb.value + 1) < 4:
-            return None
-        pdata = ctypes.c_void_p()
-        if oleaut32.SafeArrayAccessData(psa, ctypes.byref(pdata)) < 0 or not pdata.value:
-            return None
-        try:
-            doubles = ctypes.cast(pdata, ctypes.POINTER(ctypes.c_double))
-            return (doubles[0], doubles[1], doubles[2], doubles[3])
-        finally:
-            oleaut32.SafeArrayUnaccessData(psa)
-    finally:
-        oleaut32.VariantClear(ctypes.byref(var))
-
-
-def _collect_element_match_texts(
-    p_uia: ctypes.c_void_p, el: ctypes.c_void_p, oleaut32: Any, text_cond: Optional[ctypes.c_void_p]
-) -> List[str]:
-    texts: List[str] = []
-    for prop_id in (_UIA_NamePropertyId, _UIA_HelpTextPropertyId, _UIA_FullDescriptionPropertyId, _UIA_AriaPropertiesPropertyId):
-        val = _uia_get_prop_str(el, oleaut32, prop_id).strip()
-        if val:
-            texts.append(val)
-
-    # ProseMirror/TipTap等のcontenteditable要素でプレースホルダーが子Textノードにある場合も拾う
-    if not texts and text_cond is not None:
-        child_texts = _uia_find_all(el, text_cond)
-        try:
-            for c_el in child_texts[:4]:
-                c_name = _uia_get_prop_str(c_el, oleaut32, _UIA_NamePropertyId).strip()
-                if c_name:
-                    texts.append(c_name)
-        finally:
-            for c_el in child_texts:
-                _com_release(c_el)
-    return texts
-
-
-def _score_candidate(texts: Sequence[str], labels_lower: Sequence[str]) -> Tuple[int, str]:
-    best_score = 0
-    matched_label = ""
-    for raw_text in texts:
-        norm = raw_text.strip().lower()
-        if not norm:
-            continue
-        for lbl in labels_lower:
-            if norm == lbl:
-                return 100, lbl
-            if lbl in norm or (len(norm) >= 4 and norm in lbl):
-                if 60 > best_score:
-                    best_score = 60
-                    matched_label = lbl
-    return best_score, matched_label
-
-
-def _find_visible_active_document(
-    p_uia: ctypes.c_void_p, root_el: ctypes.c_void_p, oleaut32: Any
-) -> Optional[ctypes.c_void_p]:
-    doc_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_DocumentControlTypeId)
-    if not doc_cond:
-        return None
-    try:
-        docs = _uia_find_all(root_el, doc_cond)
-        chosen: Optional[ctypes.c_void_p] = None
-        for doc in docs:
-            if _uia_get_prop_bool(doc, oleaut32, _UIA_IsOffscreenPropertyId, default=False):
-                _com_release(doc)
-                continue
-            rect = _uia_get_bounding_rect(doc, oleaut32)
-            if not rect or rect[2] <= 0 or rect[3] <= 0:
-                _com_release(doc)
-                continue
-            if chosen is None:
-                chosen = doc
-            else:
-                _com_release(doc)
-        return chosen
-    finally:
-        _com_release(doc_cond)
-
-
-def _find_best_prompt_element(
-    p_uia: ctypes.c_void_p,
-    root_el: ctypes.c_void_p,
-    oleaut32: Any,
-    labels: Sequence[str],
-    quick_probe: bool = False,
-) -> Tuple[Optional[ctypes.c_void_p], str, str]:
-    labels_lower = [lbl.strip().lower() for lbl in labels if lbl.strip()]
-    edit_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_EditControlTypeId)
-    textbox_cond = _uia_create_bstr_condition(p_uia, oleaut32, _UIA_AriaRolePropertyId, "textbox")
-    text_cond = _uia_create_int_condition(p_uia, _UIA_ControlTypePropertyId, _UIA_TextControlTypeId)
-    true_cond = _uia_create_true_condition(p_uia)
-
-    input_cond: Optional[ctypes.c_void_p] = None
-    if edit_cond and textbox_cond:
-        input_cond = _uia_create_or_condition(p_uia, edit_cond, textbox_cond)
-    elif edit_cond:
-        input_cond = edit_cond
-        edit_cond = None
-
-    if not input_cond:
-        for c in (edit_cond, textbox_cond, text_cond, true_cond):
-            _com_release(c)
-        return None, "", "UI Automation検索条件の生成に失敗しました"
-
-    try:
-        doc_el: Optional[ctypes.c_void_p] = None
-        max_attempts = 4 if quick_probe else 12
-        sleep_sec = 0.06 if quick_probe else 0.08
-        early_dom_attempt = 2 if quick_probe else 3
-        try:
-            for attempt in range(max_attempts):
-                if doc_el is None:
-                    doc_el = _find_visible_active_document(p_uia, root_el, oleaut32)
-                if doc_el is None:
-                    time.sleep(sleep_sec)
-                    continue
-
-                candidates = _uia_find_all(doc_el, input_cond)
-                best_el: Optional[ctypes.c_void_p] = None
-                best_score = 0
-                best_label = ""
-
-                for el in candidates:
-                    try:
-                        if not _uia_get_prop_bool(el, oleaut32, _UIA_IsEnabledPropertyId, default=False):
-                            continue
-                        if _uia_get_prop_bool(el, oleaut32, _UIA_IsOffscreenPropertyId, default=False):
-                            continue
-                        if not _uia_get_prop_bool(el, oleaut32, _UIA_IsKeyboardFocusablePropertyId, default=False):
-                            continue
-                        if _uia_get_prop_bool(el, oleaut32, _UIA_IsPasswordPropertyId, default=False):
-                            continue
-                        if _uia_get_prop_bool(el, oleaut32, _UIA_ValueIsReadOnlyPropertyId, default=False):
-                            continue
-                        rect = _uia_get_bounding_rect(el, oleaut32)
-                        if not rect or rect[2] <= 0 or rect[3] <= 0:
-                            continue
-
-                        texts = _collect_element_match_texts(p_uia, el, oleaut32, text_cond)
-                        score, matched_lbl = _score_candidate(texts, labels_lower)
-                        if score > best_score:
-                            _com_release(best_el)
-                            best_el = el
-                            best_score = score
-                            best_label = matched_lbl
-                            el = None  # 所有権移転
-                    finally:
-                        _com_release(el)
-
-                if best_el is not None:
-                    return best_el, best_label, ""
-
-                # アクティブDocumentのDOMが展開済みかつ数回試して見つからない場合は早期終了する
-                if attempt >= early_dom_attempt and true_cond is not None:
-                    any_child = _uia_find_first(doc_el, true_cond)
-                    has_dom = any_child is not None
-                    _com_release(any_child)
-                    if has_dom:
-                        return None, "", "ページ内に対象のプロンプト入力欄が見つかりませんでした"
-
-                time.sleep(sleep_sec)
-
-            return None, "", "プロンプト入力欄の検出がタイムアウトしました"
-        finally:
-            _com_release(doc_el)
-    finally:
-        for c in (input_cond, edit_cond, textbox_cond, text_cond, true_cond):
-            if c is not None and c is not input_cond:
-                _com_release(c)
-        if input_cond is not None:
-            _com_release(input_cond)
+    if not cur_fg:
+        return PasteOutcome(False, lost_msg, True, PasteErrorKind.WINDOW_LOST)
+    cur_fg_exe = _get_hwnd_process_exe_name(cur_fg, user32, kernel32)
+    if cur_fg_exe in exe_names and (
+        not user32.IsWindow(ctypes.c_void_p(hwnd)) or not user32.IsWindowVisible(ctypes.c_void_p(hwnd))
+    ):
+        return PasteOutcome(False, switched_browser_msg, True, PasteErrorKind.TRANSIENT, target_window=cur_fg)
+    return PasteOutcome(False, switched_other_msg, False, PasteErrorKind.USER_ABORTED)
 
 
 def _send_key_release_if_pressed(user32: Any, inputs: List[_INPUT], vk: int) -> None:
@@ -638,6 +359,7 @@ def paste_windows_browser_prompt(
     allowed_title_keywords: Sequence[str] = (),
     allow_non_empty: bool = False,
     quick_probe: bool = False,
+    verify_stability: bool = False,
 ) -> PasteOutcome:
     """Windowsブラウザの対象プロンプト入力欄を検出し、フォーカスしてCtrl+Vを送信する。"""
     exe_names = set(_get_windows_default_browser_exe_names())
@@ -700,6 +422,14 @@ def paste_windows_browser_prompt(
             PasteErrorKind.LOGIN_REQUIRED,
             target_window=hwnd,
         )
+    if is_loading_or_unready_title(title):
+        return PasteOutcome(
+            False,
+            f"サイトを読み込み中のため完了を待機しています (title: {title})",
+            True,
+            PasteErrorKind.TRANSIENT,
+            target_window=hwnd,
+        )
     if allowed_title_keywords:
         title_lower = title.lower()
         if not any(kw in title_lower for kw in allowed_title_keywords):
@@ -737,6 +467,15 @@ def paste_windows_browser_prompt(
         if hr_el < 0 or not root_el.value:
             return PasteOutcome(False, f"ブラウザウィンドウのUIA要素取得に失敗しました (HRESULT={hr_el:#x})", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
 
+        if _is_browser_page_loading(p_uia, root_el, oleaut32):
+            return PasteOutcome(
+                False,
+                "Webページを読み込み中のため完了を待機しています",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=hwnd,
+            )
+
         target_el, matched_lbl, err_reason = _find_best_prompt_element(
             p_uia, root_el, oleaut32, prompt_labels, quick_probe=quick_probe
         )
@@ -749,6 +488,52 @@ def paste_windows_browser_prompt(
                 PasteErrorKind.FAILED if is_cond_err else PasteErrorKind.TRANSIENT,
                 target_window=hwnd,
             )
+
+        if verify_stability:
+            # 起動直後のリダイレクトやSPA再描画中の誤爆を防ぐため安定性を再確認し要素を再取得する
+            time.sleep(_STABILITY_CHECK_DELAY_SEC)
+            fg_err = _validate_foreground_hwnd(
+                hwnd,
+                user32,
+                kernel32,
+                exe_names,
+                "ページ安定確認中にフォアグラウンドウィンドウが失われたため再試行します",
+                "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+                "ページ安定確認中に別ウィンドウへ切り替わったため中断しました",
+            )
+            if fg_err is not None:
+                return fg_err
+            mid_title = _get_window_title(hwnd, user32)
+            if is_login_or_auth_title(mid_title):
+                return PasteOutcome(
+                    False,
+                    f"認証・ログイン画面のため自動貼り付けを中断しました (title: {mid_title})",
+                    False,
+                    PasteErrorKind.LOGIN_REQUIRED,
+                    target_window=hwnd,
+                )
+            if mid_title != title or is_loading_or_unready_title(mid_title) or _is_browser_page_loading(p_uia, root_el, oleaut32):
+                return PasteOutcome(
+                    False,
+                    "ページ遷移または読み込み中のため安定完了を待機しています",
+                    True,
+                    PasteErrorKind.TRANSIENT,
+                    target_window=hwnd,
+                )
+            _com_release(target_el)
+            target_el = None
+            target_el, matched_lbl, err_reason = _find_best_prompt_element(
+                p_uia, root_el, oleaut32, prompt_labels, quick_probe=quick_probe
+            )
+            if target_el is None:
+                is_cond_err = "検索条件の生成" in err_reason
+                return PasteOutcome(
+                    False,
+                    err_reason if is_cond_err else "ページ描画更新中のため再試行します",
+                    not is_cond_err,
+                    PasteErrorKind.FAILED if is_cond_err else PasteErrorKind.TRANSIENT,
+                    target_window=hwnd,
+                )
 
         if not allow_non_empty:
             existing_val = _uia_get_prop_str(target_el, oleaut32, _UIA_ValueValuePropertyId).strip()
@@ -764,40 +549,30 @@ def paste_windows_browser_prompt(
         # 物理カーソル移動やオーバーレイ誤爆を避けるためUIA SetFocusを最優先する
         _com_call(target_el, 3, ctypes.c_long, ())
         time.sleep(0.04)
-        has_focus = _uia_get_prop_bool(target_el, oleaut32, _UIA_HasKeyboardFocusPropertyId, default=False)
-        if not has_focus:
+        if not _verify_element_focused(p_uia, target_el, oleaut32):
             if not _click_safe_region_preserving_cursor(user32, target_el, oleaut32):
                 return PasteOutcome(False, "プロンプト入力欄へのフォーカス設定に失敗しました", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
-            time.sleep(0.05)
-
-        cur_fg_ptr = user32.GetForegroundWindow()
-        cur_fg = int(cur_fg_ptr) if cur_fg_ptr else 0
-        if not cur_fg or cur_fg != hwnd:
-            if not cur_fg:
+            time.sleep(0.06)
+            if not _verify_element_focused(p_uia, target_el, oleaut32):
                 return PasteOutcome(
                     False,
-                    "貼り付け直前にフォアグラウンドウィンドウが失われたため再試行します",
-                    True,
-                    PasteErrorKind.WINDOW_LOST,
-                )
-            cur_fg_exe = _get_hwnd_process_exe_name(cur_fg, user32, kernel32)
-            if (
-                cur_fg_exe in exe_names
-                and (not user32.IsWindow(ctypes.c_void_p(hwnd)) or not user32.IsWindowVisible(ctypes.c_void_p(hwnd)))
-            ):
-                return PasteOutcome(
-                    False,
-                    "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+                    "プロンプト入力欄がフォーカスを受け付けないため再試行します",
                     True,
                     PasteErrorKind.TRANSIENT,
-                    target_window=cur_fg,
+                    target_window=hwnd,
                 )
-            return PasteOutcome(
-                False,
-                "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
-                False,
-                PasteErrorKind.USER_ABORTED,
-            )
+
+        fg_err = _validate_foreground_hwnd(
+            hwnd,
+            user32,
+            kernel32,
+            exe_names,
+            "貼り付け直前にフォアグラウンドウィンドウが失われたため再試行します",
+            "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+            "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
+        )
+        if fg_err is not None:
+            return fg_err
 
         if not _send_ctrl_v_clean(user32):
             return PasteOutcome(False, "Ctrl+Vキーイベントの送信に失敗しました", False, PasteErrorKind.FAILED, target_window=hwnd)

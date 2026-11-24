@@ -4,7 +4,17 @@ import subprocess
 from typing import Optional, Sequence, Tuple
 
 from .browser_focus_macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
-from .browser_paste_types import LOGIN_TITLE_REGEX_PATTERN, PasteErrorKind, PasteOutcome
+from .browser_paste_types import (
+    BROWSER_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
+    BROWSER_STANDALONE_PROFILE_REGEX_PATTERN,
+    BROWSER_TITLE_SUFFIX_REGEX_PATTERN,
+    BROWSER_TRAILING_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
+    LOADING_TITLE_REGEX_PATTERN,
+    LOGIN_TITLE_REGEX_PATTERN,
+    SERVICE_TITLE_KEYWORDS_REGEX_PATTERN,
+    PasteErrorKind,
+    PasteOutcome,
+)
 
 _MACOS_FOCUS_AND_PASTE_JXA = r"""
 function run(argv) {
@@ -13,18 +23,274 @@ function run(argv) {
     var labels = payload.labels;
     var titleKeywords = payload.titleKeywords;
     var loginRegex = payload.loginRegex || "";
+    var loadingRegex = payload.loadingRegex || "";
+    var browserSuffixRegex = payload.browserSuffixRegex || "";
+    var standaloneProfileRegex = payload.standaloneProfileRegex || "";
+    var trailingCustomProfileSuffixRegex = payload.trailingCustomProfileSuffixRegex || "";
+    var customProfileSuffixRegex = payload.customProfileSuffixRegex || "";
+    var serviceTitleKeywordsRegex = payload.serviceTitleKeywordsRegex || "";
     var allowNonEmpty = payload.allowNonEmpty;
     var quickProbe = !!payload.quickProbe;
+    var verifyStability = !!payload.verifyStability;
     var frontmostWaitMs = quickProbe ? 700 : 1000;
     var webAreaWaitMs = quickProbe ? 400 : 1200;
     var findPromptTimeoutMs = quickProbe ? 800 : 1500;
+    var suffixRe = browserSuffixRegex ? new RegExp(browserSuffixRegex, "i") : null;
+    var standaloneProfileRe = standaloneProfileRegex ? new RegExp(standaloneProfileRegex, "i") : null;
+    var trailingCustomProfileSuffixRe = trailingCustomProfileSuffixRegex ? new RegExp(trailingCustomProfileSuffixRegex, "i") : null;
+    var customProfileSuffixRe = customProfileSuffixRegex ? new RegExp(customProfileSuffixRegex) : null;
+    var serviceKeywordsRe = serviceTitleKeywordsRegex ? new RegExp(serviceTitleKeywordsRegex, "i") : null;
+    var loadingRe = loadingRegex ? new RegExp(loadingRegex, "i") : null;
+    var loginRe = loginRegex ? new RegExp(loginRegex, "i") : null;
+    var NON_INPUT_ROLES = {
+        "AXButton": true, "AXLink": true, "AXMenuItem": true,
+        "AXCheckBox": true, "AXRadioButton": true, "AXPopUpButton": true,
+        "AXDisclosureTriangle": true, "AXTab": true, "AXSwitch": true,
+        "AXSlider": true, "AXIncrementor": true
+    };
+    var CONTAINER_ROLES = {
+        "AXApplication": true, "AXWindow": true, "AXWebArea": true,
+        "AXScrollArea": true, "AXToolbar": true, "AXTabGroup": true,
+        "AXMenuBar": true, "AXMenu": true, "AXSheet": true, "AXDrawer": true
+    };
+    var cgAvailable = false;
+    try {
+        ObjC.import("CoreGraphics");
+        cgAvailable = (typeof $.CGWindowListCopyWindowInfo === "function");
+    } catch (e) {}
+
+    function isLoadingTitle(rawTitle) {
+        if (!loadingRe) return false;
+        var core = String(rawTitle || "").trim();
+        var strippedBrowserSuffix = false;
+        while (core && suffixRe) {
+            var next = core.replace(suffixRe, "").trim();
+            if (next === core) break;
+            core = next;
+            strippedBrowserSuffix = true;
+        }
+        if (loadingRe.test(core)) return true;
+        if (strippedBrowserSuffix) {
+            if (standaloneProfileRe && standaloneProfileRe.test(core)) return true;
+            if (customProfileSuffixRe) {
+                var match = core.match(customProfileSuffixRe);
+                if (match) {
+                    var tail = match[0];
+                    if (!serviceKeywordsRe || !serviceKeywordsRe.test(tail)) {
+                        var withoutProfile = core.slice(0, core.length - tail.length).trim();
+                        if (loadingRe.test(withoutProfile)) return true;
+                    }
+                }
+            }
+            return false;
+        }
+        if (trailingCustomProfileSuffixRe) {
+            var trailingMatch = core.match(trailingCustomProfileSuffixRe);
+            if (trailingMatch) {
+                var tTail = trailingMatch[0];
+                if (!serviceKeywordsRe || !serviceKeywordsRe.test(tTail)) {
+                    var withoutTrailing = core.slice(0, core.length - tTail.length).trim();
+                    if (loadingRe.test(withoutTrailing) || (standaloneProfileRe && standaloneProfileRe.test(withoutTrailing))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    function isWebAreaLoaded(area) {
+        try {
+            var loaded = area.attributes.byName("AXLoaded").value();
+            if (loaded === false) return false;
+        } catch (e) {}
+        return true;
+    }
+
+    function getProcessCGWindowIds(pid, frontWin) {
+        if (!cgAvailable || !pid) return null;
+        try {
+            var raw = $.CGWindowListCopyWindowInfo(
+                $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+                $.kCGNullWindowID
+            );
+            if (!raw) return null;
+            var list = ObjC.deepUnwrap(raw);
+            if (!list || !list.length) return null;
+            var winPos = null;
+            var winSize = null;
+            try { winPos = frontWin ? frontWin.position() : null; } catch (e) {}
+            try { winSize = frontWin ? frontWin.size() : null; } catch (e) {}
+            var ids = [];
+            var matchedId = null;
+            for (var i = 0; i < list.length; i++) {
+                var item = list[i];
+                if (item && item.kCGWindowOwnerPID === pid && item.kCGWindowLayer === 0) {
+                    var b = item.kCGWindowBounds;
+                    if (b && b.Width > 50 && b.Height > 50 && typeof item.kCGWindowNumber === "number") {
+                        ids.push(item.kCGWindowNumber);
+                        if (
+                            matchedId === null && winPos && winSize &&
+                            Math.abs(b.X - winPos[0]) <= 4 && Math.abs(b.Y - winPos[1]) <= 4 &&
+                            Math.abs(b.Width - winSize[0]) <= 4 && Math.abs(b.Height - winSize[1]) <= 4
+                        ) {
+                            matchedId = item.kCGWindowNumber;
+                        }
+                    }
+                }
+            }
+            if (ids.length === 0) return null;
+            return {frontId: matchedId !== null ? matchedId : ids[0], allIds: ids};
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function validateActiveWindow(appPid, initialWinId, switchedOtherMsg) {
+        if (!appProc.frontmost()) {
+            var activeProcs = [];
+            try { activeProcs = se.applicationProcesses.whose({frontmost: true})(); } catch (e) {}
+            if (activeProcs && activeProcs.length > 0) {
+                return {err: JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: switchedOtherMsg}), win: null};
+            }
+            return {err: JSON.stringify({ok: false, retryable: true, errorKind: "window_lost", reason: "ウィンドウ遷移中のため再試行します"}), win: null};
+        }
+        var curWins = [];
+        try { curWins = appProc.windows(); } catch (e) {}
+        if (!curWins || curWins.length === 0) {
+            return {err: JSON.stringify({ok: false, retryable: true, errorKind: "window_lost", reason: "ブラウザウィンドウが一時的に見つからないため再試行します"}), win: null};
+        }
+        var curFront = curWins[0];
+        if (initialWinId !== null) {
+            var cgInfo = getProcessCGWindowIds(appPid, curFront);
+            if (cgInfo && cgInfo.frontId !== initialWinId) {
+                if (cgInfo.allIds.indexOf(initialWinId) !== -1) {
+                    return {err: JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: switchedOtherMsg}), win: null};
+                }
+                return {err: JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "対象ブラウザウィンドウが切り替わったため再試行します"}), win: null};
+            }
+        }
+        return {err: null, win: curFront};
+    }
+
+    function getAxOptionalAttr(el, attrName) {
+        try {
+            var v = el.attributes.byName(attrName).value();
+            return v ? String(v) : "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function sameAxElement(a, b) {
+        try {
+            var aPos = a.position();
+            var aSize = a.size();
+            var bPos = b.position();
+            var bSize = b.size();
+            var aRole = String(a.role() || "");
+            var bRole = String(b.role() || "");
+            if (
+                aRole !== bRole || !aPos || !bPos || !aSize || !bSize ||
+                Math.abs(aPos[0] - bPos[0]) > 2 || Math.abs(aPos[1] - bPos[1]) > 2 ||
+                Math.abs(aSize[0] - bSize[0]) > 2 || Math.abs(aSize[1] - bSize[1]) > 2
+            ) {
+                return false;
+            }
+            var checkAttrs = ["AXSubrole", "AXDOMIdentifier", "AXIdentifier", "AXDescription", "AXTitle"];
+            for (var i = 0; i < checkAttrs.length; i++) {
+                var av = getAxOptionalAttr(a, checkAttrs[i]);
+                var bv = getAxOptionalAttr(b, checkAttrs[i]);
+                if (av && bv && av !== bv) return false;
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function hasFocusedDescendant(node, depth, state) {
+        if (depth > 8 || state.visited >= 60) return false;
+        state.visited += 1;
+        var role = "";
+        try { role = String(node.role() || ""); } catch (e) { return false; }
+        if (depth > 0 && NON_INPUT_ROLES[role]) return false;
+        try {
+            if (node.focused() === true) return true;
+        } catch (e) {}
+        var children = [];
+        try { children = node.uiElements(); } catch (e) { return false; }
+        for (var i = 0; i < children.length; i++) {
+            if (hasFocusedDescendant(children[i], depth + 1, state)) return true;
+        }
+        return false;
+    }
+
+    function isFocusedElementInsidePrompt(promptEl) {
+        var focusedEl = null;
+        try { focusedEl = appProc.attributes.byName("AXFocusedUIElement").value(); } catch (e) {}
+        if (!focusedEl) return false;
+        var fRole = "";
+        try { fRole = String(focusedEl.role() || ""); } catch (e) {}
+        if (NON_INPUT_ROLES[fRole] || CONTAINER_ROLES[fRole]) return false;
+        if (sameAxElement(focusedEl, promptEl)) return true;
+
+        var cur = focusedEl;
+        var traversedParent = false;
+        var reachedBoundary = false;
+        for (var step = 0; step < 48; step++) {
+            var parentEl = null;
+            try { parentEl = cur.attributes.byName("AXParent").value(); } catch (e) { parentEl = null; }
+            if (!parentEl) {
+                if (traversedParent) reachedBoundary = true;
+                break;
+            }
+            traversedParent = true;
+            if (sameAxElement(parentEl, promptEl)) return true;
+            var pRole = "";
+            try { pRole = String(parentEl.role() || ""); } catch (e) {}
+            if (pRole === "AXWebArea" || pRole === "AXWindow" || pRole === "AXApplication") {
+                reachedBoundary = true;
+                break;
+            }
+            cur = parentEl;
+        }
+        if (traversedParent && reachedBoundary) return false;
+
+        try {
+            var pPos = promptEl.position();
+            var pSize = promptEl.size();
+            var fPos = focusedEl.position();
+            var fSize = focusedEl.size();
+            if (pPos && pSize && fPos && fSize && fSize[0] > 0 && fSize[1] > 0) {
+                return (
+                    fPos[0] >= (pPos[0] - 2) &&
+                    fPos[1] >= (pPos[1] - 2) &&
+                    (fPos[0] + fSize[0]) <= (pPos[0] + pSize[0] + 2) &&
+                    (fPos[1] + fSize[1]) <= (pPos[1] + pSize[1] + 2)
+                );
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function verifyPromptFocused(promptEl) {
+        try {
+            if (promptEl.focused() === true) return true;
+        } catch (e) {}
+        if (hasFocusedDescendant(promptEl, 0, {visited: 0})) return true;
+        if (isFocusedElementInsidePrompt(promptEl)) return true;
+        return false;
+    }
 
     var se = Application("System Events");
-    var procs = se.applicationProcesses.whose({bundleIdentifier: bundleId});
+    var procs = se.applicationProcesses.whose({bundleIdentifier: bundleId})();
     if (procs.length === 0) {
         return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "対象ブラウザプロセスが見つかりません"});
     }
     var appProc = procs[0];
+    var appPid = 0;
+    try { appPid = Number(appProc.unixId() || 0); } catch (e) {}
 
     var deadline = Date.now() + frontmostWaitMs;
     while (!appProc.frontmost() && Date.now() < deadline) {
@@ -39,18 +305,20 @@ function run(argv) {
     try { appProc.attributes.byName("AXManualAccessibility").value = true; } catch (e) {}
     try { appProc.attributes.byName("AXEnhancedUserInterface").value = true; } catch (e) {}
 
-    var wins = appProc.windows;
+    var wins = appProc.windows();
     if (wins.length === 0) {
         return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ブラウザウィンドウが存在しません"});
     }
     var frontWin = wins[0];
+    var initialCgInfo = getProcessCGWindowIds(appPid, frontWin);
+    var initialWinId = initialCgInfo ? initialCgInfo.frontId : null;
     var winTitle = "";
     try { winTitle = String(frontWin.name() || ""); } catch (e) {}
-    if (winTitle && loginRegex) {
-        var loginRe = new RegExp(loginRegex, "i");
-        if (loginRe.test(winTitle)) {
-            return JSON.stringify({ok: false, retryable: false, errorKind: "login_required", reason: "認証・ログイン画面のため自動貼り付けを中断しました (title: " + winTitle + ")"});
-        }
+    if (winTitle && loginRe && loginRe.test(winTitle)) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "login_required", reason: "認証・ログイン画面のため自動貼り付けを中断しました (title: " + winTitle + ")"});
+    }
+    if (isLoadingTitle(winTitle)) {
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "サイトを読み込み中のため完了を待機しています (title: " + winTitle + ")"});
     }
     if (titleKeywords.length > 0) {
         var titleLower = winTitle.toLowerCase();
@@ -85,6 +353,9 @@ function run(argv) {
     }
     if (!webArea) {
         return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "Webコンテンツ領域(AXWebArea)が検出できませんでした"});
+    }
+    if (!isWebAreaLoaded(webArea)) {
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "Webページを読み込み中のため完了を待機しています"});
     }
 
     function collectTexts(el) {
@@ -148,7 +419,9 @@ function run(argv) {
             }
             if (isInput) {
                 try {
-                    if (node.enabled()) {
+                    var sz = null;
+                    try { sz = node.size(); } catch (eSize) {}
+                    if (node.enabled() && (!sz || (sz[0] > 0 && sz[1] > 0))) {
                         var res = scoreTexts(collectTexts(node));
                         if (res.score > 0 && (!bestMatch || res.score > bestMatch.score)) {
                             bestMatch = {el: node, score: res.score, label: res.label};
@@ -169,6 +442,30 @@ function run(argv) {
     findPrompt(webArea, 0);
     if (!bestMatch) {
         return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ページ内に対象のプロンプト入力欄が見つかりませんでした"});
+    }
+
+    if (verifyStability) {
+        // リダイレクトやSPA再描画中の誤貼付を防ぐため待機後にウィンドウ・AXWebArea・要素を再検証する
+        delay(0.35);
+        var midWinCheck = validateActiveWindow(appPid, initialWinId, "ページ安定確認中に別アプリまたは別ウィンドウへ切り替わったため中断しました");
+        if (midWinCheck.err) return midWinCheck.err;
+        frontWin = midWinCheck.win;
+
+        var midTitle = "";
+        try { midTitle = String(frontWin.name() || ""); } catch (e) {}
+        if (midTitle && loginRe && loginRe.test(midTitle)) {
+            return JSON.stringify({ok: false, retryable: false, errorKind: "login_required", reason: "認証・ログイン画面のため自動貼り付けを中断しました (title: " + midTitle + ")"});
+        }
+        webArea = findWebArea(frontWin, 0);
+        if (!webArea || midTitle !== winTitle || isLoadingTitle(midTitle) || !isWebAreaLoaded(webArea)) {
+            return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ページ遷移または読み込み中のため安定完了を待機しています"});
+        }
+        bestMatch = null;
+        startTime = Date.now();
+        findPrompt(webArea, 0);
+        if (!bestMatch) {
+            return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "ページ描画更新中のため再試行します"});
+        }
     }
 
     var promptEl = bestMatch.el;
@@ -192,9 +489,18 @@ function run(argv) {
     }
 
     delay(0.05);
-    if (!appProc.frontmost()) {
-        return JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: "貼り付け直前に別アプリへ切り替わったため中断しました"});
+    if (!verifyPromptFocused(promptEl)) {
+        try {
+            promptEl.actions.byName("AXPress").perform();
+            delay(0.06);
+        } catch (e3) {}
+        if (!verifyPromptFocused(promptEl)) {
+            return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "プロンプト入力欄がフォーカスを受け付けないため再試行します"});
+        }
     }
+
+    var prePasteCheck = validateActiveWindow(appPid, initialWinId, "貼り付け直前に別アプリまたは別ウィンドウへ切り替わったため中断しました");
+    if (prePasteCheck.err) return prePasteCheck.err;
     se.keystroke("v", {using: "command down"});
     return JSON.stringify({ok: true, retryable: false, errorKind: "none", reason: ""});
 }
@@ -216,6 +522,7 @@ def paste_macos_browser_prompt(
     allowed_title_keywords: Sequence[str] = (),
     allow_non_empty: bool = False,
     quick_probe: bool = False,
+    verify_stability: bool = False,
 ) -> PasteOutcome:
     """最前面のmacOSデフォルトブラウザでプロンプト入力欄を探してフォーカスし、Cmd+Vを送信する。"""
     if not prompt_labels:
@@ -234,19 +541,26 @@ def paste_macos_browser_prompt(
             "labels": list(prompt_labels),
             "titleKeywords": list(allowed_title_keywords),
             "loginRegex": LOGIN_TITLE_REGEX_PATTERN,
+            "loadingRegex": LOADING_TITLE_REGEX_PATTERN,
+            "browserSuffixRegex": BROWSER_TITLE_SUFFIX_REGEX_PATTERN,
+            "standaloneProfileRegex": BROWSER_STANDALONE_PROFILE_REGEX_PATTERN,
+            "trailingCustomProfileSuffixRegex": BROWSER_TRAILING_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
+            "customProfileSuffixRegex": BROWSER_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
+            "serviceTitleKeywordsRegex": SERVICE_TITLE_KEYWORDS_REGEX_PATTERN,
             "allowNonEmpty": allow_non_empty,
             "quickProbe": bool(quick_probe),
+            "verifyStability": bool(verify_stability),
         }
     )
 
     try:
-        # JXA待機＋AXツリー探索負荷によるTimeoutExpired誤爆を防ぐため6秒確保する
+        # 安定確認待機＋AXツリー探索負荷によるTimeoutExpired誤爆を防ぐため8秒確保する
         res = subprocess.run(
             ["osascript", "-l", "JavaScript", "-", payload],
             input=_MACOS_FOCUS_AND_PASTE_JXA,
             capture_output=True,
             text=True,
-            timeout=6,
+            timeout=8,
         )
         if res.returncode != 0:
             err_msg = (res.stderr or "").strip()

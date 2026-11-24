@@ -4,11 +4,17 @@ import re
 import shutil
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 from .browser_focus_linux import _get_linux_browser_wm_hints
-from .browser_paste_types import PasteErrorKind, PasteOutcome, is_login_or_auth_title
+from .browser_paste_types import (
+    PasteErrorKind,
+    PasteOutcome,
+    is_loading_or_unready_title,
+    is_login_or_auth_title,
+)
 
 _LINUX_BROWSER_BINARY_ALIASES: Dict[str, Tuple[str, ...]] = {
     "googlechrome": ("chrome",),
@@ -233,6 +239,226 @@ def _is_x11_window_alive(win_id: int) -> bool:
         return True
 
 
+def _clear_atspi_single_cache(node: Any) -> None:
+    # 走査ループ内でのO(N^2)再帰クリアを防ぐため単一ノードのみクリアする
+    if node is None:
+        return
+    try:
+        if hasattr(node, "clear_cache_single"):
+            node.clear_cache_single()
+    except Exception:
+        pass
+
+
+def _clear_atspi_subtree_cache(node: Any) -> None:
+    if node is None:
+        return
+    try:
+        if hasattr(node, "clear_cache"):
+            node.clear_cache()
+    except Exception:
+        pass
+
+
+def _disable_atspi_cache(desktop: Any, atspi_mod: Any) -> None:
+    try:
+        cache_enum = getattr(atspi_mod, "Cache", None)
+        if cache_enum is not None and hasattr(desktop, "set_cache_mask"):
+            desktop.set_cache_mask(cache_enum.NONE)
+    except Exception:
+        pass
+    _clear_atspi_subtree_cache(desktop)
+
+
+def _is_atspi_document_busy(root_win: Any, atspi_mod: Any, max_nodes: int = 1000) -> bool:
+    """表示中タブのDocumentノードのみを対象にAT-SPIのBUSY状態を判定する。"""
+    if not hasattr(root_win, "clear_cache_single"):
+        _clear_atspi_subtree_cache(root_win)
+
+    skip_chrome_roles = {
+        atspi_mod.Role.MENU,
+        atspi_mod.Role.MENU_BAR,
+        atspi_mod.Role.MENU_ITEM,
+        atspi_mod.Role.POPUP_MENU,
+        atspi_mod.Role.TOOL_BAR,
+        atspi_mod.Role.STATUS_BAR,
+    }
+    tab_roles = {atspi_mod.Role.PAGE_TAB_LIST, atspi_mod.Role.PAGE_TAB}
+    doc_roles = {atspi_mod.Role.DOCUMENT_WEB, atspi_mod.Role.DOCUMENT_FRAME}
+
+    # 多数のタブヘッダでノード上限を消費しないよう非タブ領域を先に探索しタブ領域は後回しにする
+    main_queue: Deque[Tuple[Any, int]] = deque([(root_win, 0)])
+    tab_queue: Deque[Tuple[Any, int]] = deque()
+    visited = 0
+    while (main_queue or tab_queue) and visited < max_nodes:
+        node, depth = main_queue.popleft() if main_queue else tab_queue.popleft()
+        if node is None:
+            continue
+        visited += 1
+        try:
+            _clear_atspi_single_cache(node)
+            role = node.get_role()
+            if role in doc_roles:
+                states = node.get_state_set()
+                # 非表示のバックグラウンドタブを読込中と誤認しないようVISIBLEかつSHOWINGのみ判定する
+                if states.contains(atspi_mod.StateType.VISIBLE) and states.contains(atspi_mod.StateType.SHOWING):
+                    if states.contains(atspi_mod.StateType.BUSY):
+                        return True
+                continue
+            if depth > 0 and role in skip_chrome_roles:
+                continue
+            if role == atspi_mod.Role.PAGE_TAB:
+                states = node.get_state_set()
+                if not (states.contains(atspi_mod.StateType.VISIBLE) and states.contains(atspi_mod.StateType.SHOWING)):
+                    continue
+                if states.contains(atspi_mod.StateType.SELECTABLE) and not states.contains(atspi_mod.StateType.SELECTED):
+                    continue
+            if depth >= 16:
+                continue
+            target_q = tab_queue if role in tab_roles else main_queue
+            count = node.get_child_count()
+            for i in range(count):
+                child = node.get_child_at_index(i)
+                if child is not None:
+                    target_q.append((child, depth + 1))
+        except Exception:
+            continue
+    return False
+
+
+def _verify_atspi_node_focused(node: Any, atspi_mod: Any, max_nodes: int = 200) -> bool:
+    """対象ノードまたは内部の入力子孫要素がAT-SPI上でFOCUSEDを獲得したか検証する。"""
+    if not hasattr(node, "clear_cache_single"):
+        _clear_atspi_subtree_cache(node)
+
+    non_input_roles = {
+        atspi_mod.Role.PUSH_BUTTON,
+        atspi_mod.Role.TOGGLE_BUTTON,
+        atspi_mod.Role.LINK,
+        atspi_mod.Role.MENU_ITEM,
+        atspi_mod.Role.CHECK_BOX,
+        atspi_mod.Role.RADIO_BUTTON,
+        atspi_mod.Role.COMBO_BOX,
+        atspi_mod.Role.PAGE_TAB,
+        atspi_mod.Role.SCROLL_BAR,
+        atspi_mod.Role.SLIDER,
+        atspi_mod.Role.SPIN_BUTTON,
+    }
+    queue: Deque[Tuple[Any, int]] = deque([(node, 0)])
+    visited = 0
+    while queue and visited < max_nodes:
+        cur, depth = queue.popleft()
+        if cur is None:
+            continue
+        visited += 1
+        try:
+            _clear_atspi_single_cache(cur)
+            if depth > 0 and cur.get_role() in non_input_roles:
+                continue
+            if cur.get_state_set().contains(atspi_mod.StateType.FOCUSED):
+                return True
+            if depth >= 16:
+                continue
+            for i in range(cur.get_child_count()):
+                child = cur.get_child_at_index(i)
+                if child is not None:
+                    queue.append((child, depth + 1))
+        except Exception:
+            continue
+    return False
+
+
+def _has_any_active_atspi_window(atspi_mod: Any, browser_hints: Sequence[str]) -> Tuple[bool, bool]:
+    """全AT-SPIアプリからアクティブウィンドウ有無とブラウザ一致有無を返す。"""
+    desktop = atspi_mod.get_desktop(0)
+    if desktop is None:
+        return False, False
+    _disable_atspi_cache(desktop, atspi_mod)
+    hint_norms = _build_linux_hint_norms(browser_hints)
+    for app_idx in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(app_idx)
+        if app is None:
+            continue
+        is_browser = _is_atspi_app_default_browser(app, hint_norms)
+        for win_idx in range(app.get_child_count()):
+            win = app.get_child_at_index(win_idx)
+            if win is None:
+                continue
+            try:
+                _clear_atspi_single_cache(win)
+                if win.get_state_set().contains(atspi_mod.StateType.ACTIVE):
+                    return True, is_browser
+            except Exception:
+                continue
+    return False, False
+
+
+def _validate_linux_window_active(
+    active_win: Any,
+    atspi_mod: Any,
+    browser_hints: Sequence[str],
+    has_x11: bool,
+    expected_x11_id: Optional[int],
+    aborted_msg: str,
+) -> Optional[PasteOutcome]:
+    _clear_atspi_single_cache(active_win)
+    try:
+        states = active_win.get_state_set()
+        is_active = states.contains(atspi_mod.StateType.ACTIVE)
+        is_defunct = states.contains(atspi_mod.StateType.DEFUNCT)
+    except Exception:
+        is_active = False
+        is_defunct = True
+
+    if has_x11 and expected_x11_id is not None:
+        cur_x11_id = _get_x11_active_window_id()
+        if cur_x11_id is None:
+            if not is_active:
+                return PasteOutcome(
+                    False,
+                    "ウィンドウフォーカスが一時的に外れたため再試行します",
+                    True,
+                    PasteErrorKind.WINDOW_LOST,
+                )
+            return None
+        if cur_x11_id != expected_x11_id:
+            if not _is_x11_window_alive(expected_x11_id):
+                _, is_browser_active = _has_any_active_atspi_window(atspi_mod, browser_hints)
+                if is_browser_active:
+                    return PasteOutcome(
+                        False,
+                        "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+                        True,
+                        PasteErrorKind.TRANSIENT,
+                        target_window=hex(cur_x11_id),
+                    )
+            return PasteOutcome(False, aborted_msg, False, PasteErrorKind.USER_ABORTED)
+        if not is_defunct:
+            return None
+
+    if not is_active:
+        # 生存中ウィンドウがACTIVEを失った場合はXWayland/システムダイアログ等への操作移譲とみなしフォーカス奪取しない
+        if not is_defunct:
+            return PasteOutcome(False, aborted_msg, False, PasteErrorKind.USER_ABORTED)
+        has_active, is_browser_active = _has_any_active_atspi_window(atspi_mod, browser_hints)
+        if has_active and is_browser_active:
+            return PasteOutcome(
+                False,
+                "対象ブラウザウィンドウが新ウィンドウへ切り替わったため再試行します",
+                True,
+                PasteErrorKind.TRANSIENT,
+            )
+        if not has_active:
+            return PasteOutcome(
+                False,
+                "ウィンドウフォーカスが一時的に外れたため再試行します",
+                True,
+                PasteErrorKind.WINDOW_LOST,
+            )
+        return PasteOutcome(False, aborted_msg, False, PasteErrorKind.USER_ABORTED)
+    return None
+
+
 def _wait_active_atspi_window(
     atspi_mod: Any,
     allowed_title_keywords: Sequence[str],
@@ -243,10 +469,12 @@ def _wait_active_atspi_window(
     if desktop is None:
         return None, "AT-SPIデスクトップの取得に失敗しました", False, PasteErrorKind.UNSUPPORTED
 
+    _disable_atspi_cache(desktop, atspi_mod)
     hint_norms = _build_linux_hint_norms(browser_hints)
     deadline = time.monotonic() + timeout_sec
     while True:
         last_browser_title: Optional[str] = None
+        last_loading_title: Optional[str] = None
         saw_non_browser_active = False
         for app_idx in range(desktop.get_child_count()):
             app = desktop.get_child_at_index(app_idx)
@@ -258,6 +486,7 @@ def _wait_active_atspi_window(
                 if win is None:
                     continue
                 try:
+                    _clear_atspi_single_cache(win)
                     states = win.get_state_set()
                     if not states.contains(atspi_mod.StateType.ACTIVE):
                         continue
@@ -272,6 +501,9 @@ def _wait_active_atspi_window(
                             False,
                             PasteErrorKind.LOGIN_REQUIRED,
                         )
+                    if is_loading_or_unready_title(win_title):
+                        last_loading_title = win_title
+                        continue
                     if allowed_title_keywords:
                         title_lower = win_title.lower()
                         if not any(kw in title_lower for kw in allowed_title_keywords):
@@ -282,6 +514,13 @@ def _wait_active_atspi_window(
                     continue
 
         # アクティブウィンドウが確定済みの場合は残余タイムアウトを待たずに即座に判定を返す
+        if last_loading_title is not None:
+            return (
+                None,
+                f"サイトを読み込み中のため完了を待機しています (title: {last_loading_title})",
+                True,
+                PasteErrorKind.TRANSIENT,
+            )
         if last_browser_title is not None:
             return (
                 None,
@@ -337,6 +576,7 @@ def paste_linux_browser_prompt(
     allowed_title_keywords: Sequence[str] = (),
     allow_non_empty: bool = False,
     quick_probe: bool = False,
+    verify_stability: bool = False,
 ) -> PasteOutcome:
     """Linuxのアクティブブラウザ上でプロンプト入力欄をフォーカスし、Ctrl+Vを送信する。"""
     has_x11 = bool(os.environ.get("DISPLAY"))
@@ -385,6 +625,15 @@ def paste_linux_browser_prompt(
             else:
                 expected_x11_id = target_x11_id
 
+    if _is_atspi_document_busy(active_win, Atspi):
+        return PasteOutcome(
+            False,
+            "Webページを読み込み中のため完了を待機しています",
+            True,
+            PasteErrorKind.TRANSIENT,
+            target_window=resolved_win_id,
+        )
+
     labels_lower = [lbl.strip().lower() for lbl in prompt_labels if lbl.strip()]
     roles = {Atspi.Role.ENTRY, Atspi.Role.TEXT}
     found = _find_atspi_prompt_node(active_win, labels_lower, roles, Atspi)
@@ -396,6 +645,62 @@ def paste_linux_browser_prompt(
             PasteErrorKind.TRANSIENT,
             target_window=resolved_win_id,
         )
+
+    if verify_stability:
+        # 起動直後のリダイレクトやSPA再描画中の誤貼付を防ぐため安定性を再確認する
+        _clear_atspi_single_cache(active_win)
+        try:
+            initial_title = (active_win.get_name() or "").strip()
+        except Exception:
+            initial_title = ""
+        time.sleep(0.35)
+        win_err_mid = _validate_linux_window_active(
+            active_win,
+            Atspi,
+            browser_hints,
+            has_x11,
+            expected_x11_id,
+            "ページ安定確認中に別ウィンドウへ切り替わったため中断しました",
+        )
+        if win_err_mid is not None:
+            return win_err_mid
+        _clear_atspi_single_cache(active_win)
+        try:
+            mid_title = (active_win.get_name() or "").strip()
+        except Exception:
+            return PasteOutcome(
+                False,
+                "ページ安定確認に失敗したため再試行します",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=resolved_win_id,
+            )
+        if is_login_or_auth_title(mid_title):
+            return PasteOutcome(
+                False,
+                f"認証・ログイン画面のため自動貼り付けを中断しました (title: {mid_title})",
+                False,
+                PasteErrorKind.LOGIN_REQUIRED,
+                target_window=resolved_win_id,
+            )
+        if mid_title != initial_title or is_loading_or_unready_title(mid_title) or _is_atspi_document_busy(active_win, Atspi):
+            return PasteOutcome(
+                False,
+                "ページ遷移または読み込み中のため安定完了を待機しています",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=resolved_win_id,
+            )
+        _clear_atspi_subtree_cache(active_win)
+        found = _find_atspi_prompt_node(active_win, labels_lower, roles, Atspi)
+        if found is None:
+            return PasteOutcome(
+                False,
+                "ページ描画更新中のため再試行します",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=resolved_win_id,
+            )
 
     target_node, _, matched_lbl = found
     if not allow_non_empty:
@@ -420,31 +725,27 @@ def paste_linux_browser_prompt(
         )
 
     time.sleep(0.05)
-    try:
-        if not active_win.get_state_set().contains(Atspi.StateType.ACTIVE):
+    if not _verify_atspi_node_focused(target_node, Atspi):
+        comp.grab_focus()
+        time.sleep(0.06)
+        if not _verify_atspi_node_focused(target_node, Atspi):
             return PasteOutcome(
                 False,
-                "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
-                False,
-                PasteErrorKind.USER_ABORTED,
+                "プロンプト入力欄がフォーカスを受け付けないため再試行します",
+                True,
+                PasteErrorKind.TRANSIENT,
+                target_window=resolved_win_id,
             )
-    except Exception:
-        return PasteOutcome(
-            False,
-            "貼り付け直前のアクティブウィンドウ確認に失敗したため中断しました",
-            True,
-            PasteErrorKind.TRANSIENT,
-            target_window=resolved_win_id,
-        )
 
-    if has_x11 and expected_x11_id is not None:
-        cur_x11_id = _get_x11_active_window_id()
-        if cur_x11_id is not None and cur_x11_id != expected_x11_id:
-            return PasteOutcome(
-                False,
-                "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
-                False,
-                PasteErrorKind.USER_ABORTED,
-            )
+    win_err_final = _validate_linux_window_active(
+        active_win,
+        Atspi,
+        browser_hints,
+        has_x11,
+        expected_x11_id,
+        "貼り付け直前に別ウィンドウへ切り替わったため中断しました",
+    )
+    if win_err_final is not None:
+        return win_err_final
 
     return _send_linux_ctrl_v(is_wayland_only=(has_wayland and not has_x11), target_window=resolved_win_id)

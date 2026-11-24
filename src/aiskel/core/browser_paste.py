@@ -1,9 +1,10 @@
 """Module: @role: 最前面化されたデフォルトブラウザのプロンプト入力欄を検出し、フォーカスしてクリップボード内容を貼り付けるOS別ディスパッチャを提供する。"""
+import inspect
 import os
 import platform
 import subprocess
 import sys
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 from .browser_paste_linux import paste_linux_browser_prompt
 from .browser_paste_macos import paste_macos_browser_prompt
@@ -49,6 +50,20 @@ def _to_paste_result(raw_res: Union[PasteOutcome, Tuple[bool, str]]) -> PasteRes
     )
 
 
+def _filter_supported_kwargs(fn: Callable[..., Any], extra_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """既存の2〜4引数モック関数と衝突しないよう受領可能なキーワード引数のみ抽出する。"""
+    if not extra_kwargs:
+        return {}
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return extra_kwargs
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return extra_kwargs
+    return {k: v for k, v in extra_kwargs.items() if k in params}
+
+
 def paste_to_browser_prompt(
     interactive_only: bool = False,
     prompt_labels: Optional[Sequence[str]] = None,
@@ -56,6 +71,7 @@ def paste_to_browser_prompt(
     allowed_title_keywords: Optional[Sequence[str]] = None,
     allow_non_empty: bool = False,
     quick_probe: bool = False,
+    verify_stability: bool = False,
 ) -> PasteResult:
     """ブラウザ上の対象プロンプト入力欄にフォーカスを当て、クリップボード内容を貼り付ける。"""
     # 非TTY（テスト実行やパイプ出力）およびCI環境でのキーボード送信を防ぐ
@@ -70,42 +86,48 @@ def paste_to_browser_prompt(
     raw_keywords = DEFAULT_ALLOWED_TITLE_KEYWORDS if allowed_title_keywords is None else allowed_title_keywords
     title_keywords = tuple(kw.strip().lower() for kw in raw_keywords if kw and kw.strip())
 
-    # 既存の2〜4引数モック関数との互換性を保つためquick_probeはTrue時のみ明示渡しする
-    probe_kwargs: Dict[str, Any] = {"quick_probe": True} if quick_probe else {}
+    optional_kwargs: Dict[str, Any] = {}
+    if quick_probe:
+        optional_kwargs["quick_probe"] = True
+    if verify_stability:
+        optional_kwargs["verify_stability"] = True
 
     system = platform.system()
     try:
         if system == "Windows":
             target_hwnd = target_window if isinstance(target_window, int) and not isinstance(target_window, bool) else None
+            kwargs = _filter_supported_kwargs(paste_windows_browser_prompt, optional_kwargs)
             return _to_paste_result(
                 paste_windows_browser_prompt(
                     labels,
                     target_hwnd=target_hwnd,
                     allowed_title_keywords=title_keywords,
                     allow_non_empty=allow_non_empty,
-                    **probe_kwargs,
+                    **kwargs,
                 )
             )
         if system == "Darwin":
             bundle_id = target_window if isinstance(target_window, str) else None
+            kwargs = _filter_supported_kwargs(paste_macos_browser_prompt, optional_kwargs)
             return _to_paste_result(
                 paste_macos_browser_prompt(
                     labels,
                     target_bundle_id=bundle_id,
                     allowed_title_keywords=title_keywords,
                     allow_non_empty=allow_non_empty,
-                    **probe_kwargs,
+                    **kwargs,
                 )
             )
         if system == "Linux":
             win_id = target_window if isinstance(target_window, str) else None
+            kwargs = _filter_supported_kwargs(paste_linux_browser_prompt, optional_kwargs)
             return _to_paste_result(
                 paste_linux_browser_prompt(
                     labels,
                     target_window_id=win_id,
                     allowed_title_keywords=title_keywords,
                     allow_non_empty=allow_non_empty,
-                    **probe_kwargs,
+                    **kwargs,
                 )
             )
         return PasteResult(False, f"未対応のOS ({system}) です", False, PasteErrorKind.UNSUPPORTED)
