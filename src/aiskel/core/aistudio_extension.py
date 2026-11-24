@@ -721,6 +721,7 @@ def build_userscript_js(
         f"// @version      {EXTENSION_VERSION}\n"
         "// @description  Google AI Studio推論完了時に応答内の aiskel c コマンドを自動実行 (Tampermonkey/Violentmonkey専用)\n"
         "// @match        https://aistudio.google.com/*\n"
+        "// @run-at       document-idle\n"
         "// @grant        GM_xmlhttpRequest\n"
         "// @grant        GM_openInTab\n"
         # Tampermonkey等の@connectは裸のドメイン・IPを要求するため角括弧なしのclient_hostを指定
