@@ -100,24 +100,36 @@ def _wrap_proposed_implementation(resp: str) -> str:
         tag = f"{tag}_{idx}"
     return f"<{tag}>\n{resp}\n</{tag}>"
 
+def _format_check_error_section(check_err: str) -> str:
+    return (
+        "=== 事前検証結果 (aiskel a --check エラー) ===\n"
+        "上記の提案実装に対して `aiskel a --check` を事前実行したところ、以下のエラーが検出されました。\n"
+        "通常のレビュー観点とあわせてこの適用・構文エラーの原因も必ず解消し、"
+        "未適用の現行コードベースへ単体でそのまま `aiskel a` 適用できる完全版パッチを提示してください。\n\n"
+        f"{check_err}"
+    )
+
 def format_handoff_prompt_text(
     response_text: str,
     summary_text: str,
     review_prompt: Optional[str] = None,
+    check_error: Optional[str] = None,
 ) -> str:
-    """コピーしたAI応答・要約バンドル・任意のレビュー指示を新規タブ貼り付け用テキストへ統合する。"""
+    """コピーしたAI応答・要約バンドル・任意のレビュー指示・事前checkエラーを新規タブ貼り付け用テキストへ統合する。"""
     resp = (response_text or "").strip()
     summary = (summary_text or "").strip()
-    if not resp and not summary:
+    check_err = (check_error or "").strip()
+    if not resp and not summary and not check_err:
         return ""
     prompt = (review_prompt or "").strip()
     if not prompt:
-        if resp and summary:
-            return f"{resp}\n\n{summary}"
-        return resp or summary
+        parts = [part for part in (resp, _format_check_error_section(check_err) if check_err else "", summary) if part]
+        return "\n\n".join(parts)
     sections = [prompt]
     if resp:
         sections.append(_wrap_proposed_implementation(resp))
+    if check_err:
+        sections.append(_format_check_error_section(check_err))
     if summary:
         sections.append(summary)
     return "\n\n".join(sections)

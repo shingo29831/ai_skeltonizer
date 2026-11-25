@@ -5,7 +5,8 @@ from http import HTTPStatus
 from typing import Any, Dict, Optional, Tuple
 
 from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
-from .aistudio_bridge_types import MAX_PATCH_HANDOFF_MAX_TABS
+from .aistudio_auto_apply import AutoApplyOutcome, execute_auto_check_patch_detailed
+from .aistudio_bridge_types import MAX_ERROR_DETAIL_CHARS, MAX_PATCH_HANDOFF_MAX_TABS
 from .aistudio_handoff import (
     has_handoff_stop_signal_in_text,
     has_patch_delimiters_in_text,
@@ -83,7 +84,16 @@ def run_terminal_auto_apply(
 
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"\n[{timestamp}] {log_banner}", flush=True)
-    apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
+    if hasattr(bridge, "_execute_auto_apply_detailed"):
+        outcome = bridge._execute_auto_apply_detailed(target_patch)
+        apply_exit_code = outcome.exit_code
+        apply_message = outcome.message
+        apply_phase = outcome.phase
+        apply_error_report = outcome.error_report
+    else:
+        apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
+        apply_phase = "apply"
+        apply_error_report = "" if apply_exit_code == 0 else apply_message
     applied = apply_exit_code == 0
     if applied:
         bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
@@ -99,7 +109,9 @@ def run_terminal_auto_apply(
         "apply_attempted": True,
         "applied": applied,
         "apply_exit_code": apply_exit_code,
+        "apply_phase": apply_phase,
         "apply_message": apply_message,
+        "apply_error_report": apply_error_report,
         "message": success_message if applied else apply_message,
     }
 
@@ -215,6 +227,29 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 bridge._recent_keys.append(dedup_key)
             return status_code, body
 
+        check_outcome: Optional[AutoApplyOutcome] = None
+        if hasattr(bridge, "_execute_auto_check"):
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
+            check_outcome = bridge._execute_auto_check(response_text)
+        elif getattr(bridge, "command_runner", None) is not None:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
+            check_outcome = execute_auto_check_patch_detailed(
+                project_root=bridge.project_root,
+                patch_text=response_text,
+                command_runner=bridge.command_runner,
+                max_error_chars=MAX_ERROR_DETAIL_CHARS,
+            )
+
+        check_attempted = check_outcome is not None
+        check_passed = True if check_outcome is None else (check_outcome.exit_code == 0)
+        check_exit_code: Optional[int] = None if check_outcome is None else check_outcome.exit_code
+        check_message = "" if check_outcome is None else check_outcome.message
+        check_error_report = ""
+        if check_outcome is not None and check_outcome.exit_code != 0:
+            check_error_report = check_outcome.error_report or check_outcome.message
+
         try:
             summary_text = load_project_summary_text(bridge.project_root)
         except (OSError, ValueError, RuntimeError) as e:
@@ -240,6 +275,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             summary_text=summary_text,
             review_prompt=review_prompt,
             remaining_auto_tabs=next_remaining,
+            check_error=check_error_report or None,
         )
         bridge._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, next_remaining)
         if dedup_key:
@@ -251,10 +287,16 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 f"\n[{timestamp}] ⚠ 修正パッチを含む応答内の終了合図は無効化しました（次タブのAIが終了可否を判定します）",
                 flush=True,
             )
-        print(
-            f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーし、新規タブへ要約とともに引き継ぎます (新規タブ残り回数: {next_remaining})",
-            flush=True,
-        )
+        if check_attempted and not check_passed:
+            print(
+                f"\n[{timestamp}] ⚠ aiskel a --check でエラーを検出しました (終了コード: {check_exit_code}) -> 応答をコピーし、エラー結果を含めて新規タブへ引き継ぎます (新規タブ残り回数: {next_remaining})",
+                flush=True,
+            )
+        else:
+            print(
+                f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーし、新規タブへ要約とともに引き継ぎます (新規タブ残り回数: {next_remaining})",
+                flush=True,
+            )
         return int(HTTPStatus.OK), {
             "ok": True,
             "skipped": False,
@@ -262,6 +304,11 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             "self_stop_ignored": ignored_self_stop,
             "remaining_auto_tabs": next_remaining,
             "copied_to_clipboard": copied_to_clipboard,
+            "check_attempted": check_attempted,
+            "check_passed": check_passed,
+            "check_exit_code": check_exit_code,
+            "check_message": check_message,
+            "check_error_report": check_error_report,
             "handoff_id": handoff.handoff_id,
             "new_chat_url": handoff.new_chat_url,
             "message": "パッチ応答をコピーし、新規タブ引き継ぎを準備しました",

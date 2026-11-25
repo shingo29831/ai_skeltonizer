@@ -223,6 +223,7 @@ class PatchHandoffManager:
         handoff_kind: Union[HandoffKind, str] = HandoffKind.PATCH_REVIEW,
         target_file: str = "",
         raw_combined_text: Optional[str] = None,
+        check_error: Optional[str] = None,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
@@ -230,7 +231,12 @@ class PatchHandoffManager:
         combined = (
             raw_combined_text
             if raw_combined_text is not None
-            else format_handoff_prompt_text(response_text, summary_text, review_prompt=review_prompt)
+            else format_handoff_prompt_text(
+                response_text,
+                summary_text,
+                review_prompt=review_prompt,
+                check_error=check_error,
+            )
         )
         kind_val = (
             handoff_kind.value

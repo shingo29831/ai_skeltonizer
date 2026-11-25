@@ -7,7 +7,14 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
-from .aistudio_auto_apply import execute_auto_apply_patch
+from .aistudio_auto_apply import (
+    AutoApplyOutcome,
+    execute_auto_apply_patch,
+    execute_auto_apply_patch_detailed,
+    execute_auto_check_patch_detailed,
+)
+
+_DEFAULT_EXECUTE_AUTO_APPLY_PATCH = execute_auto_apply_patch
 from .aistudio_bridge_execution import (
     _terminate_process_tree,
     handle_execute_command,
@@ -304,8 +311,31 @@ class AiskelBridgeServer:
     def _validate_optional_tab_id(self, payload: Dict[str, object], required: bool = False) -> Tuple[Optional[str], Optional[str]]:
         return validate_optional_tab_id(self._binding_manager, payload, required=required)
 
+    def _execute_auto_check(self, patch_text: str) -> AutoApplyOutcome:
+        return execute_auto_check_patch_detailed(
+            project_root=self.project_root,
+            patch_text=patch_text,
+            command_runner=self.command_runner,
+            max_error_chars=MAX_ERROR_DETAIL_CHARS,
+        )
+
     def _execute_auto_apply(self, patch_text: str) -> Tuple[int, str]:
         return execute_auto_apply_patch(
+            project_root=self.project_root,
+            patch_text=patch_text,
+            command_runner=self.command_runner,
+            max_error_chars=MAX_ERROR_DETAIL_CHARS,
+        )
+
+    def _execute_auto_apply_detailed(self, patch_text: str) -> AutoApplyOutcome:
+        # テストモック等で _execute_auto_apply や execute_auto_apply_patch が差し替えられている場合は互換性を維持
+        if (
+            getattr(self._execute_auto_apply, "__func__", None) is not AiskelBridgeServer._execute_auto_apply
+            or execute_auto_apply_patch is not _DEFAULT_EXECUTE_AUTO_APPLY_PATCH
+        ):
+            code, msg = self._execute_auto_apply(patch_text)
+            return AutoApplyOutcome(exit_code=code, message=msg, phase="apply", error_report="" if code == 0 else msg)
+        return execute_auto_apply_patch_detailed(
             project_root=self.project_root,
             patch_text=patch_text,
             command_runner=self.command_runner,

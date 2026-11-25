@@ -1,12 +1,25 @@
 """Module: @role: ブリッジ経由の非対話 aiskel apply 自動実行および失敗詳細抽出を担当する。"""
 import contextlib
 import io
+import re
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, TextIO, Tuple
+from typing import Any, Callable, Iterator, List, Optional, TextIO, Tuple
 
 DEFAULT_APPLY_ERROR_DETAIL_CHARS = 240
+DEFAULT_CHAT_ERROR_REPORT_CHARS = 4000
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+@dataclass(frozen=True)
+class AutoApplyOutcome:
+    """事前検証(check)および実適用(apply)の結果とチャット送信向けエラーレポートを保持する。"""
+
+    exit_code: int
+    message: str
+    phase: str = ""
+    error_report: str = ""
 
 
 class _AutoApplyTeeIO:
@@ -94,13 +107,100 @@ def extract_apply_error_detail(
     return joined
 
 
-def execute_auto_apply_patch(
-    project_root: Path,
-    patch_text: str,
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+def extract_apply_error_report(
+    stderr_text: str,
+    stdout_text: str,
+    *,
+    phase: str = "apply",
+    exit_code: int = 1,
+    fallback_note: str = "",
+    max_chars: int = DEFAULT_CHAT_ERROR_REPORT_CHARS,
+) -> str:
+    """aiskel check / apply のエラー出力からAIチャット自動送信用の詳細エラーレポートを構築する。"""
+    clean_stdout = _strip_ansi(stdout_text or "")
+    clean_stderr = _strip_ansi(stderr_text or "")
+
+    extracted_stdout: List[str] = []
+    in_failed_section = False
+    for raw in clean_stdout.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("=== ") and stripped.endswith(" ==="):
+            in_failed_section = False
+            extracted_stdout.append(stripped)
+            continue
+        if stripped == "【失敗箇所】":
+            in_failed_section = True
+            extracted_stdout.append(stripped)
+            continue
+        if in_failed_section:
+            if stripped.startswith(("📋", "⚠", "ℹ", "📦")):
+                in_failed_section = False
+                continue
+            extracted_stdout.append(raw.rstrip())
+            continue
+        if stripped.startswith(("✖", "❌", "⛔", "エラー:", "Error:", "致命的")):
+            extracted_stdout.append(raw.rstrip())
+
+    extracted_stderr: List[str] = []
+    for raw in clean_stderr.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("📋"):
+            continue
+        extracted_stderr.append(raw.rstrip())
+
+    body_lines: List[str] = []
+    if extracted_stdout:
+        body_lines.extend(extracted_stdout)
+    if extracted_stderr:
+        if body_lines:
+            body_lines.append("")
+        body_lines.extend(extracted_stderr)
+
+    if not body_lines and fallback_note:
+        body_lines.append(fallback_note)
+
+    if phase == "apply_check":
+        cmd_label = "aiskel a --check (置換検証)"
+    elif phase == "check":
+        cmd_label = "aiskel check (置換検証)"
+    else:
+        cmd_label = "aiskel a"
+    header = (
+        f"提示されたパッチの適用に失敗しました ({cmd_label}, 終了コード: {exit_code})。\n"
+        "以下のエラー箇所について、現在のコードと整合する修正パッチを再提示してください。"
+    )
+    if not body_lines:
+        return header
+
+    report = header + "\n\n" + "\n".join(body_lines)
+    if len(report) > max_chars:
+        return report[: max_chars - 3] + "..."
+    return report
+
+def _run_captured_command(
     command_runner: Callable[[List[str]], Any],
-    max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
-) -> Tuple[int, str]:
-    """一時ファイル経由・非対話モードで aiskel apply を実行し、(終了コード, 結果メッセージ)を返す。"""
+    argv: List[str],
+) -> Tuple[int, str, str, str]:
+    tee_stdout = _AutoApplyTeeIO(sys.stdout)
+    tee_stderr = _AutoApplyTeeIO(sys.stderr)
+    system_exit_note = ""
+    with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
+        try:
+            raw_res = command_runner(argv)
+            exit_code = int(raw_res) if isinstance(raw_res, int) else int(getattr(raw_res, "exit_code", 1))
+        except SystemExit as e:
+            exit_code = _normalize_exit_code(e)
+            if isinstance(e.code, str) and e.code.strip():
+                system_exit_note = e.code.strip()
+    return exit_code, tee_stdout.getvalue(), tee_stderr.getvalue(), system_exit_note
+
+@contextlib.contextmanager
+def _temporary_patch_file(patch_text: str) -> Iterator[Path]:
     # stdinブロックやクリップボード競合、Windowsでの改行二重変換を防ぐため一時ファイル経由で渡す
     tmp_path: Optional[Path] = None
     try:
@@ -114,37 +214,113 @@ def execute_auto_apply_patch(
         ) as tmp_file:
             tmp_file.write(patch_text)
             tmp_path = Path(tmp_file.name)
-
-        argv = ["apply", "--dir", str(project_root), "--non-interactive", "--yes", "--no-push", str(tmp_path)]
-        tee_stdout = _AutoApplyTeeIO(sys.stdout)
-        tee_stderr = _AutoApplyTeeIO(sys.stderr)
-        system_exit_note = ""
-        with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
-            try:
-                raw_res = command_runner(argv)
-                exit_code = int(raw_res) if isinstance(raw_res, int) else int(getattr(raw_res, "exit_code", 1))
-            except SystemExit as e:
-                exit_code = _normalize_exit_code(e)
-                if isinstance(e.code, str) and e.code.strip():
-                    system_exit_note = e.code.strip()
-
-        if exit_code == 0:
-            return 0, "aiskel a でパッチを適用しました"
-        detail = extract_apply_error_detail(
-            tee_stderr.getvalue(),
-            tee_stdout.getvalue(),
-            fallback_note=system_exit_note,
-            max_chars=max_error_chars,
-        )
-        msg = (
-            f"aiskel a が終了コード {exit_code} で失敗しました: {detail}"
-            if detail
-            else f"aiskel a が終了コード {exit_code} で失敗しました"
-        )
-        return exit_code, msg
+        yield tmp_path
     finally:
         if tmp_path is not None:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+def _execute_patch_command_phase(
+    command_runner: Callable[[List[str]], Any],
+    argv: List[str],
+    *,
+    phase: str,
+    cmd_display: str,
+    success_message: str,
+    max_error_chars: int,
+    max_report_chars: int,
+) -> AutoApplyOutcome:
+    exit_code, out, err, note = _run_captured_command(command_runner, argv)
+    if exit_code == 0:
+        return AutoApplyOutcome(exit_code=0, message=success_message, phase=phase)
+
+    detail = extract_apply_error_detail(
+        err,
+        out,
+        fallback_note=note,
+        max_chars=max_error_chars,
+    )
+    msg = (
+        f"{cmd_display} が終了コード {exit_code} で失敗しました: {detail}"
+        if detail
+        else f"{cmd_display} が終了コード {exit_code} で失敗しました"
+    )
+    report = extract_apply_error_report(
+        err,
+        out,
+        phase=phase,
+        exit_code=exit_code,
+        fallback_note=note or detail,
+        max_chars=max_report_chars,
+    )
+    return AutoApplyOutcome(exit_code=exit_code, message=msg, phase=phase, error_report=report)
+
+def execute_auto_check_patch_detailed(
+    project_root: Path,
+    patch_text: str,
+    command_runner: Callable[[List[str]], Any],
+    max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
+    max_report_chars: int = DEFAULT_CHAT_ERROR_REPORT_CHARS,
+) -> AutoApplyOutcome:
+    """一時ファイル経由で非対話の aiskel a --check を実行し、検証結果を返す。"""
+    with _temporary_patch_file(patch_text) as tmp_path:
+        check_argv = ["apply", "--check", "--dir", str(project_root), "--non-interactive", str(tmp_path)]
+        return _execute_patch_command_phase(
+            command_runner,
+            check_argv,
+            phase="apply_check",
+            cmd_display="aiskel a --check (置換検証)",
+            success_message="aiskel a --check でパッチ検証に成功しました",
+            max_error_chars=max_error_chars,
+            max_report_chars=max_report_chars,
+        )
+
+def execute_auto_apply_patch_detailed(
+    project_root: Path,
+    patch_text: str,
+    command_runner: Callable[[List[str]], Any],
+    max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
+    max_report_chars: int = DEFAULT_CHAT_ERROR_REPORT_CHARS,
+) -> AutoApplyOutcome:
+    """一時ファイル経由で事前検証(check)を行い、成功時のみ aiskel apply を実行する。"""
+    with _temporary_patch_file(patch_text) as tmp_path:
+        check_argv = ["check", "--dir", str(project_root), "--non-interactive", str(tmp_path)]
+        check_outcome = _execute_patch_command_phase(
+            command_runner,
+            check_argv,
+            phase="check",
+            cmd_display="aiskel check (置換検証)",
+            success_message="",
+            max_error_chars=max_error_chars,
+            max_report_chars=max_report_chars,
+        )
+        if check_outcome.exit_code != 0:
+            return check_outcome
+
+        apply_argv = ["apply", "--dir", str(project_root), "--non-interactive", "--yes", "--no-push", str(tmp_path)]
+        return _execute_patch_command_phase(
+            command_runner,
+            apply_argv,
+            phase="apply",
+            cmd_display="aiskel a",
+            success_message="aiskel a でパッチを適用しました",
+            max_error_chars=max_error_chars,
+            max_report_chars=max_report_chars,
+        )
+
+def execute_auto_apply_patch(
+    project_root: Path,
+    patch_text: str,
+    command_runner: Callable[[List[str]], Any],
+    max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
+) -> Tuple[int, str]:
+    """一時ファイル経由・非対話モードで事前検証後に aiskel apply を実行し、(終了コード, 結果メッセージ)を返す。"""
+    outcome = execute_auto_apply_patch_detailed(
+        project_root=project_root,
+        patch_text=patch_text,
+        command_runner=command_runner,
+        max_error_chars=max_error_chars,
+    )
+    return outcome.exit_code, outcome.message
