@@ -1,4 +1,5 @@
 """Module: @role: パッチ適用後の直前コミット破棄、検証テスト実行、コミット確定およびロールバック処理を担当する。"""
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -116,6 +117,35 @@ def run_post_apply_validation(
     return True
 
 
+def _invoke_commit_exec(
+    commit_exec: Callable[..., Tuple[bool, bool, Optional[str], bool]],
+    project_root: Path,
+    commit_msg: str,
+    target_files: Set[Path],
+    skip_push: bool,
+) -> Tuple[bool, bool, Optional[str], bool]:
+    # 既存のテスト用commit_fnモックとの引数互換性を保ちつつプッシュを抑止する
+    if skip_push:
+        try:
+            params = inspect.signature(commit_exec).parameters
+            supports_no_push = "no_push" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):
+            supports_no_push = False
+        if supports_no_push:
+            return commit_exec(
+                project_root,
+                commit_msg,
+                target_files=target_files,
+                no_push=True,
+            )
+    return commit_exec(
+        project_root,
+        commit_msg,
+        target_files=target_files,
+    )
+
 def finalize_apply_commit(
     project_root: Path,
     initial_commit_msg: Optional[str],
@@ -127,18 +157,22 @@ def finalize_apply_commit(
     commit_fn: Optional[Callable[..., Tuple[bool, bool, Optional[str], bool]]] = None,
     rollback_fn: Optional[Callable[[Path, Set[Path]], bool]] = None,
     non_interactive: bool = False,
+    no_push: bool = False,
 ) -> Tuple[bool, bool]:
     confirm = confirm_fn or prompt_user_confirmation
     commit_exec = commit_fn or execute_git_commit
     rollback = rollback_fn or rollback_modified_files
 
     commit_msg = initial_commit_msg or "chore: apply patch"
-    if not (initial_commit_msg or test_failed or commit_partial):
+    # -y指定時はcommitタグ不在でもデフォルトメッセージで自動コミットを成立させる
+    if not (initial_commit_msg or test_failed or commit_partial or auto_yes):
         save_pending_commit(project_root, None, total_modified_files)
         return False, False
 
     if initial_commit_msg and not commit_partial:
         print(f"\n📦 コミットメッセージを検出しました: {commit_msg}")
+    elif auto_yes and not initial_commit_msg and not test_failed:
+        print(f"\n📦 コミットメッセージ未指定のためデフォルトメッセージを使用します: {commit_msg}")
     prompt_msg = (
         "テストが失敗しましたが、コミットを実行しますか？ [Enter/Space: y, 他: n]: "
         if test_failed
@@ -150,10 +184,12 @@ def finalize_apply_commit(
 
     if should_commit:
         print("コミットを実行します...")
-        committed_successfully, had_diff, commit_err, _ = commit_exec(
+        committed_successfully, had_diff, commit_err, _ = _invoke_commit_exec(
+            commit_exec,
             project_root,
             commit_msg,
-            target_files=total_modified_files,
+            total_modified_files,
+            skip_push=(no_push or non_interactive),
         )
         if committed_successfully:
             clear_pending_commit(project_root, total_modified_files)

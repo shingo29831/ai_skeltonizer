@@ -217,6 +217,7 @@ def execute_git_commit(
     target_files: Optional[Set[Path]] = None,
     stage_all: bool = False,
     auto_push: bool = False,
+    no_push: bool = False,
 ) -> Tuple[bool, bool, Optional[str], bool]:
     """指定ファイル(または全変更)をステージングし、(コミット成否, 差分有無, エラー, プッシュ成否)を返す"""
     try:
@@ -239,9 +240,12 @@ def execute_git_commit(
         print("✔ コミットが完了しました。")
 
         push_ok = True
-        should_push = auto_push or prompt_user_confirmation(
-            "リモートリポジトリにプッシュ (git push) しますか？ [Enter/Space: y, 他: n]: ",
-            default=False,
+        # 非対話や自動適用時はプッシュ確認で待機・誤送信しないよう無条件スキップ
+        should_push = False if no_push else (
+            auto_push or prompt_user_confirmation(
+                "リモートリポジトリにプッシュ (git push) しますか？ [Enter/Space: y, 他: n]: ",
+                default=False,
+            )
         )
         if should_push:
             print("プッシュを実行中...")

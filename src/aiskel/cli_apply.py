@@ -109,6 +109,7 @@ def handle_apply_command(
         yes=getattr(parsed_args, "yes", False),
         no_sync=getattr(parsed_args, "no_sync", False),
         no_bloat=getattr(parsed_args, "no_bloat", False),
+        no_push=getattr(parsed_args, "no_push", False),
     )
 
     total_modified_files: Set[Path] = set()
@@ -205,6 +206,7 @@ def handle_apply_command(
             commit_fn=execute_git_commit,
             rollback_fn=rollback_modified_files,
             non_interactive=is_non_interactive,
+            no_push=session.no_push,
         )
         if aborted:
             return 1

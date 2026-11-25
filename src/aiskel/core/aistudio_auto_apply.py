@@ -115,7 +115,7 @@ def execute_auto_apply_patch(
             tmp_file.write(patch_text)
             tmp_path = Path(tmp_file.name)
 
-        argv = ["apply", "--dir", str(project_root), "--non-interactive", str(tmp_path)]
+        argv = ["apply", "--dir", str(project_root), "--non-interactive", "--yes", "--no-push", str(tmp_path)]
         tee_stdout = _AutoApplyTeeIO(sys.stdout)
         tee_stderr = _AutoApplyTeeIO(sys.stderr)
         system_exit_note = ""
