@@ -8,14 +8,18 @@ from ..config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
+from ..write_path_policy_updater import (
+    find_new_top_directories,
+    update_write_policy_for_created_dirs,
+)
 from .patch_matcher import generate_diff_display
 from .patch_result import PatchResult
 
 
 def validate_python_syntax(
-    file_contents: Dict[Path, str],
+    file_contents: Dict[Path, Optional[str]],
     modified_files: Set[Path],
-    original_contents: Dict[Path, str],
+    original_contents: Dict[Path, Optional[str]],
     project_root: Path,
     files_to_delete: Optional[Set[Path]] = None,
 ) -> Tuple[int, List[str], Set[Path]]:
@@ -50,9 +54,35 @@ def validate_python_syntax(
     return len(syntax_errors), failed_details, syntax_error_files
 
 
+def _is_under_extra_dirs(target_path: Path, extra_dirs: Sequence[Path]) -> bool:
+    if not extra_dirs:
+        return False
+    resolved = target_path.resolve()
+    return any(resolved == d.resolve() or d.resolve() in resolved.parents for d in extra_dirs)
+
+
+def _cleanup_empty_parent_dirs(start_dir: Path, project_root: Path) -> None:
+    resolved_root = project_root.resolve()
+    cur = start_dir.resolve()
+    while cur != resolved_root:
+        try:
+            cur.relative_to(resolved_root)
+        except ValueError:
+            break
+        if not cur.is_dir():
+            break
+        try:
+            if any(cur.iterdir()):
+                break
+            cur.rmdir()
+        except OSError:
+            break
+        cur = cur.parent
+
+
 def commit_patch_transaction(
-    file_contents: Dict[Path, str],
-    original_contents: Dict[Path, str],
+    file_contents: Dict[Path, Optional[str]],
+    original_contents: Dict[Path, Optional[str]],
     modified_files: Set[Path],
     files_to_delete: Set[Path],
     project_root: Path,
@@ -63,6 +93,10 @@ def commit_patch_transaction(
     dry_run: bool = False,
     show_diff: bool = True,
     allowed_write_paths: Optional[Sequence[Union[str, Path]]] = None,
+    binary_contents: Optional[Dict[Path, bytes]] = None,
+    move_sources: Optional[Dict[Path, Path]] = None,
+    extra_allowed_dirs: Optional[Sequence[Path]] = None,
+    case_rename_targets: Optional[Sequence[Path]] = None,
 ) -> PatchResult:
     """構文検証・ドライラン出力・ディスクへのトランザクションコミットを一括実行する。"""
     write_policy = (
@@ -70,11 +104,21 @@ def commit_patch_transaction(
         if allowed_write_paths is None
         else WritePathPolicy.from_allowed_paths(allowed_write_paths, project_root)
     )
+    extra_dirs = list(extra_allowed_dirs or [])
+    move_src_map = dict(move_sources or {})
+    bin_map = dict(binary_contents or {})
+    case_rename_set = set(case_rename_targets or ())
+    persist_policy_update = allowed_write_paths is None
+
     if write_policy.is_active:
         disallowed_reasons: Dict[Path, str] = {}
         for p in sorted(modified_files | files_to_delete):
+            denied, deny_reason = write_policy.is_explicitly_denied(p)
+            if denied:
+                disallowed_reasons[p] = deny_reason
+                continue
             allowed, reject_reason = write_policy.check_path(p)
-            if not allowed:
+            if not allowed and not _is_under_extra_dirs(p, extra_dirs):
                 disallowed_reasons[p] = reject_reason
         for p, reject_reason in disallowed_reasons.items():
             try:
@@ -83,7 +127,14 @@ def commit_patch_transaction(
                 rel_p = p
             modified_files.discard(p)
             files_to_delete.discard(p)
+            bin_map.pop(p, None)
             file_contents[p] = original_contents.get(p, "")
+            # なぜ必要か: 移動先がポリシー拒否された際に移動元ファイルだけ削除されるのを防ぐため
+            if p in move_src_map:
+                src_p = move_src_map[p]
+                files_to_delete.discard(src_p)
+                modified_files.discard(src_p)
+                file_contents[src_p] = original_contents.get(src_p, "")
             print(f"✖ 書き込み拒否 (許可されていないパス): {rel_p}")
             failed_details.append(f"{rel_p}: {reject_reason}")
             fail_count += 1
@@ -94,37 +145,105 @@ def commit_patch_transaction(
     fail_count += err_count
     failed_details.extend(syntax_failed_details)
 
+    # なぜ必要か: 移動先ファイルに構文エラーが発生した際に移動元ファイルだけ削除されて消失するのを防ぐため
+    protected_sources: Set[Path] = {
+        move_src_map[err_dst]
+        for err_dst in syntax_error_files
+        if err_dst in move_src_map
+    }
+    for src_p in protected_sources:
+        files_to_delete.discard(src_p)
+        modified_files.discard(src_p)
+        file_contents[src_p] = original_contents.get(src_p, "")
+
+    write_targets = [
+        p for p in sorted(modified_files, key=lambda x: str(x))
+        if p not in files_to_delete
+        and p not in syntax_error_files
+        and (p in bin_map or (p in file_contents and file_contents[p] is not None))
+    ]
+    created_top_dirs = find_new_top_directories(write_targets, project_root)
+
     if dry_run:
         if show_diff:
             print("\n🔍 [DRY-RUN] 差分プレビュー (ディスクは変更されません):")
             for path in modified_files:
-                orig = original_contents.get(path, "")
-                diff_text = generate_diff_display(path, orig, file_contents.get(path, ""), project_root)
+                orig = original_contents.get(path, "") or ""
+                updated = file_contents.get(path, "") or ""
+                diff_text = generate_diff_display(path, orig, updated, project_root)
                 if diff_text:
                     print(diff_text)
-        return PatchResult(success_count, fail_count, skipped_count, modified_files, failed_details)
+        policy_added_dirs, _ = update_write_policy_for_created_dirs(
+            project_root,
+            created_top_dirs,
+            write_policy,
+            dry_run=True,
+            created_files=write_targets,
+            persist=persist_policy_update,
+        )
+        return PatchResult(
+            success_count,
+            fail_count,
+            skipped_count,
+            modified_files,
+            failed_details,
+            created_dirs=created_top_dirs,
+            policy_added_dirs=policy_added_dirs,
+        )
 
     written_files: Set[Path] = set()
     for path in files_to_delete:
         if path in modified_files and path not in syntax_error_files:
             if path.exists():
                 path.unlink()
-                try:
-                    parent = path.parent
-                    if parent != project_root and not any(parent.iterdir()):
-                        parent.rmdir()
-                except OSError:
-                    pass
+                _cleanup_empty_parent_dirs(path.parent, project_root)
             written_files.add(path)
 
-    for path in modified_files:
-        if path not in files_to_delete and path in file_contents and path not in syntax_error_files:
-            new_content = file_contents[path]
-            if new_content is not None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if new_content and not new_content.endswith("\n"):
-                    new_content += "\n"
-                path.write_text(new_content, encoding="utf-8")
-                written_files.add(path)
+    for path in write_targets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path in case_rename_set and path.exists():
+            try:
+                if path.resolve().name != path.name:
+                    path.unlink()
+            except OSError:
+                pass
+        if path in bin_map:
+            path.write_bytes(bin_map[path])
+            written_files.add(path)
+            continue
+        new_content = file_contents[path]
+        if new_content is not None:
+            if new_content and not new_content.endswith("\n"):
+                new_content += "\n"
+            path.write_text(new_content, encoding="utf-8")
+            written_files.add(path)
 
-    return PatchResult(success_count, fail_count, skipped_count, written_files, failed_details)
+    policy_added_dirs: List[Path] = []
+    if created_top_dirs:
+        if write_policy.is_active:
+            policy_added_dirs, _ = update_write_policy_for_created_dirs(
+                project_root,
+                created_top_dirs,
+                write_policy,
+                dry_run=False,
+                created_files=write_targets,
+                persist=persist_policy_update,
+            )
+        else:
+            disp_dirs = []
+            for d in created_top_dirs:
+                try:
+                    disp_dirs.append(f"{d.relative_to(project_root).as_posix()}/")
+                except ValueError:
+                    disp_dirs.append(str(d))
+            print(f"📁 新規ディレクトリを作成しました: {', '.join(disp_dirs)}")
+
+    return PatchResult(
+        success_count,
+        fail_count,
+        skipped_count,
+        written_files,
+        failed_details,
+        created_dirs=created_top_dirs,
+        policy_added_dirs=policy_added_dirs,
+    )

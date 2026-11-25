@@ -49,6 +49,7 @@ _TOKEN_UNESCAPE_MAP: Tuple[Tuple[str, str], ...] = (
     ("{{>>>>}}", ">" * 4),
     ("{{FILE_HEADER}}", "ファイル" + "パス:"),
     ("{{DELETE_HEADER}}", "削" + "除:"),
+    ("{{MOVE_HEADER}}", "移" + "動:"),
     ("{{COMMIT_OPEN}}", "<" + "commit>"),
     ("{{COMMIT_CLOSE}}", "</" + "commit>"),
 )

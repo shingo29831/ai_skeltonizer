@@ -6,11 +6,18 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .core.clipboard import get_clipboard_text, set_clipboard_text
-from .core.patch_parser import is_file_deletion_patch
+from .core.patch_parser import is_file_deletion_patch, is_file_move_patch
 
 
 def has_applicable_patch_content(patch_text: str) -> bool:
-    return bool(patch_text and (re.search(r"<{4,}", patch_text) or is_file_deletion_patch(patch_text)))
+    return bool(
+        patch_text
+        and (
+            re.search(r"<{4,}", patch_text)
+            or is_file_deletion_patch(patch_text)
+            or is_file_move_patch(patch_text)
+        )
+    )
 
 
 def load_patch_text(

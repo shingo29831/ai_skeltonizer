@@ -1,6 +1,7 @@
 """Module: @role: パッチテキストの構文解析、ファイルヘッダーおよび置換・削除チャンクの抽出・検証を担当する。"""
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 from typing import List, Optional, Tuple
@@ -14,6 +15,11 @@ from .syntax_block_editor import (
 DELIMITER_START = re.compile(r"^[ \t]*<{4,}\s*$", re.MULTILINE)
 DELIMITER_MID = re.compile(r"^[ \t]*={4,}\s*$", re.MULTILINE)
 DELIMITER_END = re.compile(r"^[ \t]*>{4,}\s*$", re.MULTILINE)
+MOVE_HEADER_PATTERN = re.compile(
+    r"^[ \t]*(?:移動|名前変更|リネーム|ファイル移動|move|mv|rename|ファイルパス|File(?:\s+path)?|ファイル)"
+    r"[ \t]*[:：][ \t]*(.+?)[ \t]*(?:->|=>)[ \t]*(.+?)[ \t]*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -26,6 +32,8 @@ class PatchChunk:
     replace_lines: List[str]
     block_line_no: int
     del_node_name: Optional[str] = None
+    is_file_move: bool = False
+    move_target_path: Optional[Path] = None
 
 
 def check_and_warn_delimiter(line: str, line_no: int) -> None:
@@ -44,6 +52,23 @@ def has_patch_delimiters(patch_text: str) -> bool:
     )
 
 
+def _strip_path_wrappers(raw: str) -> str:
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("`", '"', "'"):
+        return s[1:-1].strip()
+    return s.strip("`").strip()
+
+
+def _resolve_patch_path(raw_str: str, project_root: Path) -> Path:
+    raw_path = Path(raw_str)
+    candidate = raw_path if raw_path.is_absolute() else (project_root / raw_path)
+    # なぜ必要か: case-insensitive FSでresolve()が移動先ファイル名の大文字小文字を既存名へ上書きするのを防ぐため
+    normalized = Path(os.path.abspath(str(candidate)))
+    if normalized.name:
+        return normalized.parent.resolve() / normalized.name
+    return normalized.resolve()
+
+
 def is_file_deletion_patch(patch_text: str) -> bool:
     """区切り記号がないパッチで、明示的なファイル削除ディレクティブのみが含まれているか判定する"""
     file_header_matches = list(FILE_HEADER_PATTERN.finditer(patch_text))
@@ -57,6 +82,22 @@ def is_file_deletion_patch(patch_text: str) -> bool:
             if m.group(0) in line
         )
     )
+
+
+def is_file_move_patch(patch_text: str) -> bool:
+    """置換ブロック外の行に明示的なファイル移動・名前変更ディレクティブが含まれるか判定する"""
+    in_block = False
+    for line in patch_text.splitlines():
+        if not in_block and DELIMITER_START.match(line):
+            in_block = True
+            continue
+        if in_block:
+            if DELIMITER_END.match(line):
+                in_block = False
+            continue
+        if MOVE_HEADER_PATTERN.match(line):
+            return True
+    return False
 
 
 def parse_patch_chunks(
@@ -78,6 +119,43 @@ def parse_patch_chunks(
     i = 0
     while i < len(lines):
         line = lines[i]
+        move_match = MOVE_HEADER_PATTERN.match(line)
+        if move_match:
+            raw_src_str = _strip_path_wrappers(move_match.group(1))
+            raw_dst_str = _strip_path_wrappers(move_match.group(2))
+            if not raw_src_str or not raw_dst_str or "->" in raw_src_str or "=>" in raw_src_str:
+                failed_details.append(f"行 {i + 1}: 移動/名前変更のパス指定が不正です: {line.strip()}")
+                fail_count += 1
+                i += 1
+                continue
+
+            src_path = _resolve_patch_path(raw_src_str, project_root)
+            dst_is_dir_hint = raw_dst_str.endswith(("/", "\\"))
+            dst_path = _resolve_patch_path(raw_dst_str, project_root)
+            if dst_is_dir_hint or (dst_path.exists() and dst_path.is_dir()):
+                dst_path = _resolve_patch_path(str(dst_path / src_path.name), project_root)
+
+            # なぜ必要か: 順方向基準で後続編集の対象パスを確定し、リバート時は逆順・逆方向で安全に復元するため
+            current_file = dst_path
+            target_node = None
+            file_delete_flag = False
+            chunk_src, chunk_dst = (dst_path, src_path) if revert else (src_path, dst_path)
+            chunks.append(
+                PatchChunk(
+                    file_path=chunk_src,
+                    target_node=None,
+                    is_file_deletion=False,
+                    is_standalone_file_delete=False,
+                    search_lines=[],
+                    replace_lines=[],
+                    block_line_no=i + 1,
+                    is_file_move=True,
+                    move_target_path=chunk_dst,
+                )
+            )
+            i += 1
+            continue
+
         file_match = FILE_HEADER_PATTERN.search(line)
         if file_match:
             raw_path = Path(file_match.group(1))
@@ -191,5 +269,8 @@ def parse_patch_chunks(
             continue
 
         i += 1
+
+    if revert and any(c.is_file_move for c in chunks):
+        chunks.reverse()
 
     return chunks, failed_details, fail_count

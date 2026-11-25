@@ -14,7 +14,7 @@ _DEFAULT_BUNDLE_FILENAMES = (
 )
 _COMMIT_TAG_OPEN = "<" + "commit>"
 _PATCH_STRUCTURE_HINT_RE = re.compile(
-    r"^[ \t]*(?:ファイルパス|File(?:\s+path)?|Path|削除)[ \t]*[:：]|^[ \t]*"
+    r"^[ \t]*(?:ファイルパス|File(?:\s+path)?|Path|削除|移動|名前変更|リネーム|ファイル移動|move|mv|rename)[ \t]*[:：]|^[ \t]*"
     + re.escape(_COMMIT_TAG_OPEN)
     + r"[ \t]*$",
     re.IGNORECASE | re.MULTILINE,

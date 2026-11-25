@@ -48,10 +48,15 @@ Role: エキスパートソフトウェアエンジニア。以下を厳守せ�
     【モードC: 関数・クラス丸ごと削除】
     - `<<<<` と `====` の間に対象のシグネチャ行のみ記述し、`====` と `>>>>` の間を完全に空行にする。
 
-    【モードD: ファイル丸ごと削除】
-    - `削除: path/to/file.ts` または `ファイルパス: path/to/file.ts (削除)` と記述。
+    【モードD: ファイル丸ごと削除】
+    - `削除: path/to/file.ts` または `ファイルパス: path/to/file.ts (削除)` と記述。
 
-    - 強制置換 (-f) と自動テスト検証 (-T):
+    【モードE: ファイル移動・名前変更】
+    - `移動: old/path/to/file.ts -> new/path/to/file.ts` または `名前変更: old/path/to/file.ts -> new/path/to/file.ts` と記述。
+    - 移動先に存在しないディレクトリを指定した場合は自動作成される（必要に応じ同パッチ内で `__init__.py` 等も作成・import更新せよ）。
+    - 移動・名前変更の直後に続けて同一パッチ内で移動先パスへの置換ブロックを記述できる。
+
+    - 強制置換 (-f) と自動テスト検証 (-T):
       - 適用済みスキップを無視して強制置換したい場合は `aiskel a -f` を案内せよ。
       - パッチ適用後のテスト検証および失敗時ロールバックを行いたい場合は `aiskel a -T`（併用時: `aiskel a -f -T`）を案内せよ。
     - コミットタグ: コードブロック内最末尾に必ず `<commit>Conventional Commits形式(50字以内)</commit>` を配置。
@@ -81,6 +86,7 @@ aiskel c -d path/a.py:funcA path/b.py:ClassB
 // モードB: 空行から始めて新規作成・全置換
 export const newUtil = () => true;
 >>>>
+移動: path/to/old_name.ts -> path/to/organized/new_name.ts
 削除: path/to/obsolete.ts
 
 <commit>
@@ -90,6 +96,7 @@ refactor: streamline value handling and drop obsolete logic
 
 3. 設計・分割と aiskel メタデータ規約
 - ファイル肥大化（目安500行）時は自律的に別ファイルへ分割せよ。
+- ファイル過密・階層構造整理時はモードE（`移動:` / `名前変更:`）で責務別ディレクトリへ整理し、関連インポート参照も同一パッチ内で整合更新せよ。
 - 新規・分割作成時の記述規約:
   1. ファイル冒頭: `"""Module: @role: 【責務の簡潔な自然文】"""`
   2. ディレクトリ作成時: 直下に `__init__.py` を置きレイヤー責務を記述。

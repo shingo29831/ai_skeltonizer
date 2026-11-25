@@ -144,7 +144,7 @@ def build_monitor_dom_parser_js() -> str:
         "    if (!Array.isArray(turns) || !turns.length) return false;\n"
         "    const commitTagPattern = '(?:^|\\\\n)[ \\\\t]*<' + 'commit>[ \\\\t]*(?:\\\\n|$)';\n"
         "    const structureHintRe = new RegExp(\n"
-        "      '(?:^|\\\\n)[ \\\\t]*(?:ファイルパス|File(?:\\\\s+path)?|Path|削除)[ \\\\t]*[:：]|' + commitTagPattern,\n"
+        "      '(?:^|\\\\n)[ \\\\t]*(?:ファイルパス|File(?:\\\\s+path)?|Path|削除|移動|名前変更|リネーム|ファイル移動|move|mv|rename)[ \\\\t]*[:：]|' + commitTagPattern,\n"
         "      'i'\n"
         "    );\n"
         "    const { codeTexts, bodyTexts } = collectResponseTexts(turns);\n"

@@ -29,6 +29,7 @@ from .cli_interaction import (
     rollback_modified_files,
 )
 from .cli_apply import handle_apply_command
+from .cli_move import handle_move_command
 from .cli_commands import (
     handle_bloat_command,
     handle_docs_command,
@@ -232,6 +233,9 @@ def main(args: Optional[List[str]] = None) -> int:
 
         if cmd in ("commit", "cm", "ci"):
             return handle_commit_command(parsed_args, on_auto_sync=_trigger_auto_sync)
+
+        if cmd in ("move", "mv", "rename"):
+            return handle_move_command(parsed_args, on_auto_sync=_trigger_auto_sync)
 
         if cmd in ("listen", "l"):
             return handle_listen_command(

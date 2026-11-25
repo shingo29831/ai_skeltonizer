@@ -296,6 +296,26 @@ class WritePathPolicy:
     def deny_paths(self) -> List[Path]:
         return resolve_allowed_write_paths(self.deny_patterns, self.project_root)
 
+    @property
+    def has_whitelist_rule(self) -> bool:
+        if self.mode in (WritePathMode.WHITELIST, WritePathMode.BOTH):
+            return True
+        return self.mode == WritePathMode.AUTO and bool(self.allow_patterns)
+
+    @property
+    def has_blacklist_rule(self) -> bool:
+        if self.mode in (WritePathMode.BLACKLIST, WritePathMode.BOTH):
+            return True
+        return self.mode == WritePathMode.AUTO and bool(self.deny_patterns)
+
+    def is_explicitly_denied(self, target_path: Path) -> Tuple[bool, str]:
+        """対象パスがブラックリスト設定により明示的に禁止されているか返す。"""
+        if self.mode == WritePathMode.DISABLED:
+            return False, ""
+        if self.has_blacklist_rule and self._matches_any(target_path, self.deny_patterns):
+            return True, "ai_meta設定の denied_write_paths (ブラックリスト) により禁止されているパスです"
+        return False, ""
+
     def _matches_any(self, target_path: Path, patterns: Tuple[str, ...]) -> bool:
         if not patterns:
             return False

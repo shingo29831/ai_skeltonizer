@@ -142,11 +142,28 @@ def prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
 
 def rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> bool:
     # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git経由で完全ロールバックを保証
+    resolved_root = project_root.resolve()
     try:
         for f in modified_files:
             res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
             if res.returncode != 0:
                 subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
+                resolved_f = f.resolve() if f.is_absolute() else (resolved_root / f).resolve()
+                cur = resolved_f.parent
+                while cur != resolved_root:
+                    try:
+                        cur.relative_to(resolved_root)
+                    except ValueError:
+                        break
+                    if not cur.is_dir():
+                        break
+                    try:
+                        if any(cur.iterdir()):
+                            break
+                        cur.rmdir()
+                    except OSError:
+                        break
+                    cur = cur.parent
         print("🔄 変更ファイルを元の状態に復元しました。")
         return True
     except Exception as e:

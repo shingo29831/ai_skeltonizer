@@ -188,6 +188,16 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     commit_parser.add_argument("--clear", action="store_true", help="保持されているコミット情報を破棄します")
     commit_parser.add_argument("--no-sync", action="store_true", help="コミット成功後のスケルトン・バンドル自動同期をスキップします")
 
+    move_parser = subparsers.add_parser("move", aliases=["mv", "rename"], help="ファイルを移動または名前変更します（存在しない移動先ディレクトリは自動作成されます）")
+    move_parser.add_argument("src", type=str, help="移動元ファイルパス")
+    move_parser.add_argument("dst", type=str, help="移動先ファイルパスまたはディレクトリパス")
+    move_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    move_parser.add_argument("-f", "--force-replace", action="store_true", help="移動先に既存ファイルがある場合でも上書きします")
+    move_parser.add_argument("-n", "--dry-run", action="store_true", help="実際には移動せずプレビューのみ表示します")
+    move_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップして自動コミットします")
+    move_parser.add_argument("--no-push", action="store_true", help="コミット成功後のプッシュ確認をスキップします")
+    move_parser.add_argument("--no-sync", action="store_true", help="移動成功後のスケルトン・バンドル自動同期をスキップします")
+
     test_parser = subparsers.add_parser("test", aliases=["t"], help="設定ファイル(ai_meta)または指定されたテスト・検証コマンドを実行します")
     test_parser.add_argument("cmd", nargs="*", default=[], help="実行するテストコマンド (省略時は設定ファイルから取得または自動検出)")
     test_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")

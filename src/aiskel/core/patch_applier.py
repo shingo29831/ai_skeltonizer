@@ -22,8 +22,10 @@ from .patch_parser import (
     check_and_warn_delimiter,
     has_patch_delimiters,
     is_file_deletion_patch,
+    is_file_move_patch,
     parse_patch_chunks,
 )
+from ..write_path_policy_updater import find_new_top_directories
 from .patch_result import PatchResult
 from .syntax_block_editor import (
     BLOCK_PATTERN,
@@ -76,6 +78,57 @@ def _safe_read_text(file_path: Path) -> Tuple[Optional[str], Optional[str]]:
     return None, "テキストとしてデコードできません"
 
 
+def _is_within_project(target_path: Path, project_root: Path) -> bool:
+    try:
+        target_path.resolve().relative_to(project_root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _is_under_extra_allowed_dirs(target_path: Path, extra_dirs: Set[Path]) -> bool:
+    resolved = target_path.resolve()
+    return any(resolved == d or d in resolved.parents for d in extra_dirs)
+
+
+def _check_path_with_dynamic_dirs(
+    write_policy: WritePathPolicy,
+    target_path: Path,
+    extra_allowed_dirs: Set[Path],
+) -> Tuple[bool, str]:
+    denied, deny_reason = write_policy.is_explicitly_denied(target_path)
+    if denied:
+        return False, deny_reason
+    allowed, reject_reason = write_policy.check_path(target_path)
+    if allowed:
+        return True, ""
+    if _is_under_extra_allowed_dirs(target_path, extra_allowed_dirs):
+        return True, ""
+    return False, reject_reason
+
+
+def _check_move_destination_policy(
+    write_policy: WritePathPolicy,
+    dst_path: Path,
+    project_root: Path,
+    extra_allowed_dirs: Set[Path],
+) -> Tuple[bool, str, List[Path]]:
+    if not write_policy.is_active:
+        return True, "", []
+    denied, deny_reason = write_policy.is_explicitly_denied(dst_path)
+    if denied:
+        return False, deny_reason, []
+    allowed, reject_reason = _check_path_with_dynamic_dirs(write_policy, dst_path, extra_allowed_dirs)
+    if allowed:
+        return True, "", []
+    # なぜ必要か: ホワイトリスト適用下でも許可元ファイルの新規ディレクトリ作成を伴う移動整理を成立させるため
+    if _is_within_project(dst_path, project_root) and not dst_path.parent.exists():
+        new_tops = find_new_top_directories([dst_path], project_root)
+        if new_tops and not any(write_policy.is_explicitly_denied(top)[0] for top in new_tops):
+            return True, "", new_tops
+    return False, reject_reason, []
+
+
 def apply_patch(
     patch_text: str,
     project_root: Path,
@@ -97,7 +150,7 @@ def apply_patch(
     )
 
     if not has_patch_delimiters(patch_text):
-        if is_file_deletion_patch(patch_text):
+        if is_file_deletion_patch(patch_text) or is_file_move_patch(patch_text):
             pass
         else:
             if revert:
@@ -127,8 +180,12 @@ def apply_patch(
     modified_files: Set[Path] = set()
     files_to_delete: Set[Path] = set()
 
-    file_contents: Dict[Path, str] = {}
-    original_contents: Dict[Path, str] = {}
+    file_contents: Dict[Path, Optional[str]] = {}
+    original_contents: Dict[Path, Optional[str]] = {}
+    binary_contents: Dict[Path, bytes] = {}
+    move_sources: Dict[Path, Path] = {}
+    extra_allowed_dirs: Set[Path] = set()
+    case_rename_targets: Set[Path] = set()
 
     for chunk in chunks:
         current_file = chunk.file_path
@@ -140,7 +197,150 @@ def apply_patch(
         except ValueError:
             disp_path = current_file
 
-        allowed, reject_reason = write_policy.check_path(current_file)
+        if chunk.is_file_move and chunk.move_target_path is not None:
+            src_path = current_file
+            dst_path = chunk.move_target_path
+            if dst_path.exists() and dst_path.is_dir():
+                dst_path = (dst_path / src_path.name)
+
+            try:
+                dst_disp = dst_path.relative_to(project_root)
+            except ValueError:
+                dst_disp = dst_path
+
+            is_case_only_rename = (
+                src_path == dst_path
+                and src_path.exists()
+                and src_path.is_file()
+                and src_path.resolve().name != dst_path.name
+            )
+            if src_path == dst_path and not is_case_only_rename:
+                print(f"⏭ ファイル移動スキップ (移動元と移動先が同一): {disp_path}")
+                skipped_count += 1
+                continue
+
+            src_allowed, src_reject = _check_path_with_dynamic_dirs(write_policy, src_path, extra_allowed_dirs)
+            if not src_allowed:
+                action_label = "リバート移動" if revert else "ファイル移動"
+                print(f"✖ {action_label}拒否 (許可されていない移動元パス): {disp_path} (パッチ行 {chunk.block_line_no})")
+                failed_details.append(
+                    f"{disp_path}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
+                    f"  -> {src_reject}"
+                )
+                fail_count += 1
+                continue
+
+            dst_allowed, dst_reject, new_top_dirs = _check_move_destination_policy(
+                write_policy, dst_path, project_root, extra_allowed_dirs
+            )
+            if not dst_allowed:
+                action_label = "リバート移動" if revert else "ファイル移動"
+                print(f"✖ {action_label}拒否 (許可されていない移動先パス): {dst_disp} (パッチ行 {chunk.block_line_no})")
+                failed_details.append(
+                    f"{dst_disp}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
+                    f"  -> {dst_reject}"
+                )
+                fail_count += 1
+                continue
+
+            if src_path.exists() and src_path.is_dir():
+                print(f"✖ ファイル移動失敗: 移動元がディレクトリです: {disp_path} (パッチ行 {chunk.block_line_no})")
+                failed_details.append(f"{disp_path}: ディレクトリ全体の移動には対応していません (ファイルパスを指定してください)")
+                fail_count += 1
+                continue
+
+            if not is_case_only_rename and dst_path.exists() and dst_path.is_dir():
+                print(f"✖ ファイル移動失敗: 移動先がディレクトリです: {dst_disp} (パッチ行 {chunk.block_line_no})")
+                failed_details.append(f"{dst_disp}: 移動先と同名のディレクトリが既に存在します")
+                fail_count += 1
+                continue
+
+            src_in_memory = (src_path in file_contents and src_path not in files_to_delete) or (src_path in binary_contents)
+            src_on_disk = src_path.exists() and src_path.is_file() and src_path not in files_to_delete
+            dst_in_memory = (
+                not is_case_only_rename
+                and ((dst_path in file_contents and dst_path not in files_to_delete) or (dst_path in binary_contents))
+            )
+            dst_on_disk = (not is_case_only_rename) and dst_path.exists() and dst_path not in files_to_delete
+
+            if not src_in_memory and not src_on_disk:
+                if dst_in_memory or dst_on_disk:
+                    print(f"⏭ ファイル移動スキップ (既に移動済み): {disp_path} -> {dst_disp}")
+                    skipped_count += 1
+                else:
+                    print(f"✖ ファイル移動失敗: 移動元ファイルが存在しません: {disp_path} (パッチ行 {chunk.block_line_no})")
+                    failed_details.append(f"{disp_path}: 移動元ファイルが存在しません (パッチ行 {chunk.block_line_no})")
+                    fail_count += 1
+                continue
+
+            if (dst_in_memory or dst_on_disk) and not force_replace:
+                print(f"✖ ファイル移動失敗: 移動先に既にファイルが存在します: {dst_disp} (パッチ行 {chunk.block_line_no})")
+                failed_details.append(
+                    f"{dst_disp}: 移動先に既にファイルが存在します (上書きするには -f/--force-replace を指定してください)"
+                )
+                fail_count += 1
+                continue
+
+            extra_allowed_dirs.update(new_top_dirs)
+
+            # なぜ必要か: 連続移動(A->B->C)や往復移動(A->B->A)時に中間ファイル残留や元内容上書きを防ぐため
+            moved_binary: Optional[bytes] = None
+            moved_text: Optional[str] = None
+            if src_path in binary_contents:
+                moved_binary = binary_contents.pop(src_path)
+            elif src_path in file_contents:
+                cached_text = file_contents.pop(src_path)
+                if cached_text is None and src_on_disk:
+                    moved_binary = src_path.read_bytes()
+                else:
+                    moved_text = cached_text or ""
+            else:
+                src_text, _ = _safe_read_text(src_path)
+                original_contents.setdefault(src_path, src_text)
+                if src_text is None:
+                    moved_binary = src_path.read_bytes()
+                else:
+                    moved_text = src_text
+
+            if dst_path not in original_contents:
+                if dst_on_disk and dst_path.is_file():
+                    orig_dst_text, _ = _safe_read_text(dst_path)
+                    original_contents[dst_path] = orig_dst_text
+                else:
+                    original_contents[dst_path] = ""
+
+            root_src = move_sources.pop(src_path, src_path)
+            modified_files.discard(src_path)
+            case_rename_targets.discard(src_path)
+
+            if is_case_only_rename:
+                case_rename_targets.add(dst_path)
+            elif dst_path == root_src:
+                files_to_delete.discard(root_src)
+            elif root_src.exists() and root_src.is_file():
+                files_to_delete.add(root_src)
+                modified_files.add(root_src)
+                file_contents[root_src] = ""
+                move_sources[dst_path] = root_src
+
+            if moved_binary is not None:
+                binary_contents[dst_path] = moved_binary
+                file_contents[dst_path] = None
+            else:
+                binary_contents.pop(dst_path, None)
+                file_contents[dst_path] = moved_text if moved_text is not None else ""
+
+            files_to_delete.discard(dst_path)
+            modified_files.add(dst_path)
+
+            if src_path.parent == dst_path.parent:
+                print(f"✏ ファイル名変更成功: {disp_path} -> {dst_disp}")
+            else:
+                print(f"📦 ファイル移動成功: {disp_path} -> {dst_disp}")
+            success_count += 1
+            continue
+
+        allowed, reject_reason = _check_path_with_dynamic_dirs(write_policy, current_file, extra_allowed_dirs)
         if not allowed:
             action_label = "リバート" if revert else (
                 "ファイル削除" if (chunk.is_standalone_file_delete or chunk.is_file_deletion) else "書き込み"
@@ -155,14 +355,23 @@ def apply_patch(
 
         # ブロックを伴わない単体ファイル削除ディレクティブの処理
         if chunk.is_standalone_file_delete:
-            if not current_file.exists():
+            in_mem = (current_file in file_contents and current_file not in files_to_delete) or (current_file in binary_contents)
+            on_disk = current_file.exists() and current_file not in files_to_delete
+            if not in_mem and not on_disk:
                 print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
                 skipped_count += 1
             else:
-                files_to_delete.add(current_file)
-                modified_files.add(current_file)
-                file_contents[current_file] = ""
-                original_contents[current_file] = ""
+                binary_contents.pop(current_file, None)
+                case_rename_targets.discard(current_file)
+                move_sources.pop(current_file, None)
+                if on_disk:
+                    files_to_delete.add(current_file)
+                    modified_files.add(current_file)
+                    file_contents[current_file] = ""
+                    original_contents.setdefault(current_file, "")
+                else:
+                    modified_files.discard(current_file)
+                    file_contents.pop(current_file, None)
                 print(f"🗑 ファイル削除成功: {disp_path}")
                 success_count += 1
             continue
@@ -171,7 +380,7 @@ def apply_patch(
             if chunk.is_file_deletion:
                 file_contents[current_file] = ""
                 original_contents[current_file] = ""
-            elif current_file.exists():
+            elif current_file.exists() and current_file not in files_to_delete:
                 orig_text, _ = _safe_read_text(current_file)
                 file_contents[current_file] = orig_text
                 original_contents[current_file] = orig_text
@@ -188,13 +397,22 @@ def apply_patch(
 
         # 1. ファイル丸ごと削除判定
         if chunk.is_file_deletion:
-            if not current_file.exists() and not content:
+            in_mem = (current_file in file_contents and current_file not in files_to_delete) or (current_file in binary_contents)
+            on_disk = current_file.exists() and current_file not in files_to_delete
+            if not on_disk and not content and not in_mem:
                 print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
                 skipped_count += 1
             else:
-                files_to_delete.add(current_file)
-                modified_files.add(current_file)
-                file_contents[current_file] = ""
+                binary_contents.pop(current_file, None)
+                case_rename_targets.discard(current_file)
+                move_sources.pop(current_file, None)
+                if on_disk:
+                    files_to_delete.add(current_file)
+                    modified_files.add(current_file)
+                    file_contents[current_file] = ""
+                else:
+                    modified_files.discard(current_file)
+                    file_contents.pop(current_file, None)
                 print(f"🗑 ファイル削除成功: {disp_path}")
                 success_count += 1
             continue
@@ -233,7 +451,7 @@ def apply_patch(
             continue
 
         # 3. 既存ファイルが存在する場合の処理
-        if current_file.exists() or content:
+        if (current_file.exists() and current_file not in files_to_delete) or content:
             if is_empty_search:
                 if revert:
                     print(f"✖ リバート失敗: 空の検索ブロックに対するリバートは行えません: {disp_path}")
@@ -399,6 +617,14 @@ def apply_patch(
         commit_kwargs["show_diff"] = False
     if allowed_write_paths is not None:
         commit_kwargs["allowed_write_paths"] = allowed_write_paths
+    if binary_contents:
+        commit_kwargs["binary_contents"] = binary_contents
+    if move_sources:
+        commit_kwargs["move_sources"] = move_sources
+    if extra_allowed_dirs:
+        commit_kwargs["extra_allowed_dirs"] = sorted(extra_allowed_dirs)
+    if case_rename_targets:
+        commit_kwargs["case_rename_targets"] = sorted(case_rename_targets)
     return commit_patch_transaction(
         file_contents=file_contents,
         original_contents=original_contents,
