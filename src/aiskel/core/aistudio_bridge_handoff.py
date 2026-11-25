@@ -90,10 +90,12 @@ def run_terminal_auto_apply(
         apply_message = outcome.message
         apply_phase = outcome.phase
         apply_error_report = outcome.error_report
+        apply_test_failed = bool(getattr(outcome, "test_failed", False))
     else:
         apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
         apply_phase = "apply"
         apply_error_report = "" if apply_exit_code == 0 else apply_message
+        apply_test_failed = False
     applied = apply_exit_code == 0
     if applied:
         bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
@@ -112,6 +114,7 @@ def run_terminal_auto_apply(
         "apply_phase": apply_phase,
         "apply_message": apply_message,
         "apply_error_report": apply_error_report,
+        "apply_test_failed": apply_test_failed,
         "message": success_message if applied else apply_message,
     }
 
@@ -276,6 +279,8 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             review_prompt=review_prompt,
             remaining_auto_tabs=next_remaining,
             check_error=check_error_report or None,
+            source_command_notice=check_message if check_attempted else "",
+            source_command_is_error=check_attempted and (not check_passed),
         )
         bridge._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, next_remaining)
         if dedup_key:

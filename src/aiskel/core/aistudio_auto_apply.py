@@ -20,6 +20,7 @@ class AutoApplyOutcome:
     message: str
     phase: str = ""
     error_report: str = ""
+    test_failed: bool = False
 
 
 class _AutoApplyTeeIO:
@@ -109,6 +110,57 @@ def extract_apply_error_detail(
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
+
+def extract_apply_success_summary(
+    stdout_text: str,
+    stderr_text: str,
+    max_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
+) -> Tuple[str, bool]:
+    """aiskel check / apply 成功時の出力から件数・テスト・コミット等の要約とテスト失敗有無を抽出する。"""
+    clean_out = _strip_ansi(stdout_text or "")
+    clean_err = _strip_ansi(stderr_text or "")
+    parts: List[str] = []
+    test_failed = False
+
+    success_matches = re.findall(r"✔\s*成功:\s*(\d+)\s*箇所", clean_out)
+    if success_matches:
+        parts.append(f"成功: {success_matches[-1]}箇所")
+    skip_matches = re.findall(r"⏭\s*スキップ[^:]*:\s*(\d+)\s*箇所", clean_out)
+    if skip_matches and int(skip_matches[-1]) > 0:
+        parts.append(f"スキップ: {skip_matches[-1]}箇所")
+
+    if "❌ 検証テストが失敗しました" in clean_err or "❌ 検証テストが失敗しました" in clean_out:
+        test_failed = True
+        parts.append("テスト失敗")
+    elif "✅ 検証テストに成功しました" in clean_out:
+        parts.append("テスト成功")
+
+    if "✔ コミットが完了しました" in clean_out:
+        parts.append("コミット完了")
+    elif "コミットに失敗しました" in clean_out or "コミットに失敗しました" in clean_err:
+        parts.append("コミット失敗")
+    elif "変更内容が既存コードと同一のため、コミットをスキップしました" in clean_out:
+        parts.append("変更なし")
+    elif (
+        "コミットを保留しました" in clean_out
+        or "コミットは保留しました" in clean_out
+        or "コミットを拒否（スキップ）しました" in clean_out
+    ):
+        parts.append("コミット保留")
+
+    bloat_matches = re.findall(r"⚠\s*肥大化ファイルを検出しました\s*\((\d+)件", clean_out)
+    if bloat_matches:
+        parts.append(f"肥大化警告: {bloat_matches[-1]}件")
+
+    if not parts:
+        return "", test_failed
+    summary = " / ".join(parts)
+    if len(summary) > max_chars:
+        if max_chars <= 3:
+            summary = summary[: max(0, max_chars)]
+        else:
+            summary = summary[: max_chars - 3] + "..."
+    return summary, test_failed
 
 def extract_apply_error_report(
     stderr_text: str,
@@ -234,7 +286,9 @@ def _execute_patch_command_phase(
 ) -> AutoApplyOutcome:
     exit_code, out, err, note = _run_captured_command(command_runner, argv)
     if exit_code == 0:
-        return AutoApplyOutcome(exit_code=0, message=success_message, phase=phase)
+        summary, test_failed = extract_apply_success_summary(out, err, max_chars=max_error_chars)
+        final_msg = f"{success_message} ({summary})" if (success_message and summary) else (success_message or summary)
+        return AutoApplyOutcome(exit_code=0, message=final_msg, phase=phase, test_failed=test_failed)
 
     detail = extract_apply_error_detail(
         err,

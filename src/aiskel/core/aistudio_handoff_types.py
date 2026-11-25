@@ -29,6 +29,8 @@ class TabHandoffPayload:
     remaining_auto_tabs: int = 0
     handoff_kind: str = HandoffKind.PATCH_REVIEW.value
     target_file: str = ""
+    source_command_notice: str = ""
+    source_command_is_error: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -42,4 +44,6 @@ class TabHandoffPayload:
             "remaining_auto_tabs": self.remaining_auto_tabs,
             "handoff_kind": self.handoff_kind,
             "target_file": self.target_file,
+            "source_command_notice": self.source_command_notice,
+            "source_command_is_error": self.source_command_is_error,
         }

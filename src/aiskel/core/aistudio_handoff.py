@@ -197,6 +197,8 @@ class PatchHandoffManager:
                     remaining_auto_tabs=next_rem,
                     handoff_kind=item.handoff_kind,
                     target_file=item.target_file,
+                    source_command_notice=item.source_command_notice,
+                    source_command_is_error=item.source_command_is_error,
                 )
 
     def _prune_expired_locked(self, now: float) -> None:
@@ -224,6 +226,8 @@ class PatchHandoffManager:
         target_file: str = "",
         raw_combined_text: Optional[str] = None,
         check_error: Optional[str] = None,
+        source_command_notice: str = "",
+        source_command_is_error: bool = False,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
@@ -254,6 +258,8 @@ class PatchHandoffManager:
             remaining_auto_tabs=max(0, int(remaining_auto_tabs)),
             handoff_kind=kind_val,
             target_file=target_file,
+            source_command_notice=str(source_command_notice or ""),
+            source_command_is_error=bool(source_command_is_error),
         )
         with self._lock:
             self._prune_expired_locked(now)
@@ -297,6 +303,8 @@ class PatchHandoffManager:
                 remaining_auto_tabs=existing.remaining_auto_tabs,
                 handoff_kind=existing.handoff_kind,
                 target_file=existing.target_file,
+                source_command_notice=existing.source_command_notice,
+                source_command_is_error=existing.source_command_is_error,
             )
             self._entries[clean_hid] = updated
             # unbind・リロード後も自動生成タブの残り回数を保持するため記録
@@ -329,6 +337,8 @@ class PatchHandoffManager:
                         remaining_auto_tabs=item.remaining_auto_tabs,
                         handoff_kind=item.handoff_kind,
                         target_file=item.target_file,
+                        source_command_notice=item.source_command_notice,
+                        source_command_is_error=item.source_command_is_error,
                     )
                     self._entries[clean_hid] = item
                 if clean_tid:

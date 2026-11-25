@@ -194,6 +194,10 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             }
         bridge._handoff_manager.clear_tab_patch(req_tab_id)
         max_tabs = bridge.get_patch_handoff_max_tabs()
+        raw_notice = payload.get("source_command_notice")
+        cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
+        source_notice = (cleaned_notice[:357] + "...") if len(cleaned_notice) > 360 else cleaned_notice
+        source_is_error = bool(payload.get("source_command_is_error"))
         handoff = bridge._handoff_manager.create(
             source_tab_id="",
             new_chat_url=new_chat_url,
@@ -203,6 +207,8 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             handoff_kind=HandoffKind.FILE_SPLIT,
             target_file=str(target_info["rel_path"]),
             raw_combined_text=combined_text,
+            source_command_notice=source_notice,
+            source_command_is_error=source_is_error,
         )
 
     timestamp = datetime.now().strftime("%H:%M:%S")
