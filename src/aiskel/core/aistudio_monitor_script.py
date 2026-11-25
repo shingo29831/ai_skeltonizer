@@ -106,6 +106,7 @@ def build_monitor_core_js(
         "    isCurrentTabBound: !hasBindingTransport,\n"
         "    projectName: '',\n"
         "    projectRoot: '',\n"
+        "    commandCwd: '',\n"
         "    boundTabTitle: '',\n"
         "    boundTabId: '',\n"
         "    currentTabId: '',\n"

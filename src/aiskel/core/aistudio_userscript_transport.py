@@ -155,6 +155,7 @@ def build_userscript_binding_transport_js(
         "    },\n"
         "    getBloatTargets: (cb) => gmRequest('/api/bloat/targets', 'POST', { tab_id: getUserscriptTabId() }, cb),\n"
         "    getSplitPrompt: (payload, cb) => gmRequest('/api/split/prompt', 'POST', Object.assign({}, payload || {}, { tab_id: getUserscriptTabId() }), cb),\n"
+        "    runCommand: (command, cb) => gmRequest('/api/run_command', 'POST', { command: String(command || ''), tab_id: getUserscriptTabId() }, cb),\n"
         "    onUpdate: (handler) => { userscriptUpdateHandler = handler; },\n"
         "  };\n"
     )
