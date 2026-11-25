@@ -29,6 +29,7 @@ from .aistudio_handoff import (
     load_project_summary_text,
 )
 from .aistudio_prompts import PromptPattern, list_prompt_patterns, load_prompt_for_pattern
+from .browser_paste import trigger_browser_prompt_run
 from .clipboard import set_clipboard_text
 from .aistudio_extension import (
     DEFAULT_BRIDGE_HOST,
@@ -75,6 +76,7 @@ class BridgeExecutionResult:
     pasted: bool = False
     auto_run: bool = False
     auto_run_allowed: bool = False
+    paste_reason: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -86,6 +88,7 @@ class BridgeExecutionResult:
             "pasted": self.pasted,
             "auto_run": self.auto_run,
             "auto_run_allowed": self.auto_run_allowed,
+            "paste_reason": self.paste_reason,
         }
 
 
@@ -183,11 +186,13 @@ class AiskelBridgeServer:
         auto_run: Optional[bool] = None,
         structured_command_runner: Optional[Callable[..., Any]] = None,
         clipboard_writer: Optional[Callable[[str], None]] = None,
+        prompt_run_trigger: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.command_runner = command_runner
         self.structured_command_runner = structured_command_runner
         self.clipboard_writer: Callable[[str], None] = clipboard_writer or set_clipboard_text
+        self.prompt_run_trigger: Callable[..., Any] = prompt_run_trigger or trigger_browser_prompt_run
         self.host = host
         self.port = port
         self._token: Optional[str] = None
@@ -396,6 +401,7 @@ class AiskelBridgeServer:
             tee_stderr = _TeeTextIO(sys.stderr)
             system_exit_note = ""
             exec_pasted = False
+            exec_paste_reason = ""
             with contextlib.redirect_stderr(tee_stderr):
                 try:
                     if self.structured_command_runner is not None:
@@ -412,6 +418,7 @@ class AiskelBridgeServer:
                     else:
                         exit_code = int(getattr(raw_res, "exit_code", 1))
                         exec_pasted = bool(getattr(raw_res, "pasted", False))
+                        exec_paste_reason = str(getattr(raw_res, "paste_reason", "") or "")
                 except SystemExit as e:
                     # argparse等のSystemExitでブリッジワーカーループが崩壊するのを防止
                     exit_code = _normalize_system_exit_code(e)
@@ -421,12 +428,10 @@ class AiskelBridgeServer:
             if exit_code == 0 and dedup_key:
                 self._recent_keys.append(dedup_key)
 
-            pasted = (
-                exit_code == 0
-                and not effective_no_focus
-                and not effective_no_paste
-                and exec_pasted
-            )
+            # なぜ必要か: aiskel c失敗時に自動コピーされたエラー内容も成功時同様に貼り付け・自動送信可能にするため
+            paste_suppressed = effective_no_focus or effective_no_paste
+            pasted = (not paste_suppressed) and exec_pasted
+            paste_reason = "" if (pasted or paste_suppressed) else exec_paste_reason
             auto_run_allowed = pasted and (self._auto_run_mode != "disabled")
             auto_run = pasted and (self._auto_run_mode == "enabled")
 
@@ -449,12 +454,38 @@ class AiskelBridgeServer:
                 pasted=pasted,
                 auto_run=auto_run,
                 auto_run_allowed=auto_run_allowed,
+                paste_reason=paste_reason,
             )
+
+    def handle_trigger_run_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """JS側のクリック送信が反応しない場合のOSネイティブCtrl+Enter送信フォールバックを実行する。"""
+        tab_error = self._binding_manager.validate_execute_payload(payload)
+        if tab_error is not None:
+            return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+        if self._auto_run_mode == "disabled" or self.no_focus or self.no_paste:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "自動送信は無効化されています"}
+        # page_focused欠落時の誤爆を防ぐため明示的にTrueのときのみ許可する
+        if payload.get("page_focused") is not True:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": "タブが非アクティブのため自動送信を中止しました"}
+
+        target_title_keywords = self._resolve_target_title_keywords(payload)
+        with self._exec_lock:
+            res = self.prompt_run_trigger(
+                interactive_only=True,
+                allowed_title_keywords=target_title_keywords,
+            )
+            ok = bool(getattr(res, "success", False))
+            reason = str(getattr(res, "reason", "") or "")
+            return int(HTTPStatus.OK), {
+                "ok": ok,
+                "message": "Ctrl+Enterを送信しました" if ok else (reason or "OSショートカット送信に失敗しました"),
+            }
 
     @staticmethod
     def _make_job_result(action: str, ok: bool, message: str, exit_code: int = 1) -> Any:
-        # /api/handoffはdictをJSON直列化するため、actionに応じて戻り値型を厳密に揃える
-        if action == "handoff":
+        # /api/handoff, /api/trigger_runはdictをJSON直列化するため、actionに応じて戻り値型を厳密に揃える
+        if action in ("handoff", "trigger_run"):
             return {"ok": ok, "message": message}
         return BridgeExecutionResult(
             ok=ok,
@@ -620,6 +651,8 @@ class AiskelBridgeServer:
         if run_inline or job is None:
             if action == "handoff":
                 return self.handle_handoff_create(payload)
+            if action == "trigger_run":
+                return self.handle_trigger_run_payload(payload)
             return self.handle_execute_payload(payload)
 
         if not job.done_event.wait(timeout=EXECUTION_WAIT_TIMEOUT_SEC):
@@ -639,6 +672,9 @@ class AiskelBridgeServer:
 
     def _dispatch_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="handoff")
+
+    def _dispatch_trigger_run_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="trigger_run")
 
     def _drain_pending_jobs_locked(self) -> None:
         while True:
@@ -707,6 +743,8 @@ class AiskelBridgeServer:
                 try:
                     if job.action == "handoff":
                         status_code, result = self.handle_handoff_create(job.payload)
+                    elif job.action == "trigger_run":
+                        status_code, result = self.handle_trigger_run_payload(job.payload)
                     else:
                         status_code, result = self.handle_execute_payload(job.payload)
                     job.status_code = status_code

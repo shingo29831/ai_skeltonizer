@@ -1,10 +1,13 @@
 """Module: @role: CLI引数の解析、実行オプションの検証、および各サブコマンドのディスパッチを担当する。"""
 import argparse
+import contextlib
+import io
 import os
 import sys
 import subprocess
 import platform
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple, Union
@@ -61,6 +64,38 @@ _prompt_user_confirmation = prompt_user_confirmation
 _rollback_modified_files = rollback_modified_files
 
 
+_PASTE_RETRY_DELAYS: Tuple[float, ...] = (0.15, 0.3, 0.5)
+_KNOWN_NON_COPY_SUBCOMMANDS = frozenset({
+    "apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t",
+    "bloat", "b", "size", "docs", "d", "watch", "w", "listen", "l", "start", "s",
+})
+
+
+class _TeeStderr:
+    def __init__(self, wrapped) -> None:
+        self._wrapped = wrapped
+        self._buffer = io.StringIO()
+
+    def write(self, text: str) -> int:
+        self._buffer.write(text)
+        if self._wrapped is not None:
+            return self._wrapped.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._wrapped is not None:
+            self._wrapped.flush()
+
+    def isatty(self) -> bool:
+        return getattr(self._wrapped, "isatty", lambda: False)() if self._wrapped is not None else False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._wrapped, name)
+
+    def getvalue(self) -> str:
+        return self._buffer.getvalue()
+
+
 @dataclass(frozen=True)
 class CopyCommandResult:
     """aiskel c コマンドの構造化実行結果を保持する。"""
@@ -69,6 +104,126 @@ class CopyCommandResult:
     pasted: bool = False
     paste_reason: str = ""
     copied_chars: int = 0
+    error_message: str = ""
+
+
+def _focus_and_paste_clipboard(
+    *,
+    no_focus: bool,
+    no_paste: bool,
+    focus_browser: bool,
+    allowed_title_keywords: Optional[Sequence[str]] = None,
+) -> Tuple[bool, str]:
+    """クリップボード保存済みの内容をブラウザ入力欄へ貼り付け、(成功可否, 理由)を返す。"""
+    if no_focus:
+        return False, ""
+    target_window: Optional[Union[int, str]] = None
+    can_attempt_paste = False
+    if focus_browser:
+        target_window = focus_default_browser_target(interactive_only=True)
+        if target_window is not None:
+            print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
+            can_attempt_paste = True
+        else:
+            return False, "起動済みのデフォルトブラウザを検出できませんでした"
+    else:
+        # ブリッジ経由で対象タブが既に最前面のときは別ブラウザへのフォーカス奪取を防ぐ
+        can_attempt_paste = True
+
+    if not can_attempt_paste or no_paste:
+        return False, ""
+
+    paste_res = paste_to_browser_prompt(
+        interactive_only=True,
+        target_window=target_window,
+        allowed_title_keywords=allowed_title_keywords,
+    )
+    if getattr(paste_res, "target_window", None) is not None:
+        target_window = paste_res.target_window
+    # 一時的なUI遷移・フォーカス揺らぎによる貼り付け失敗を吸収する短時間リトライ
+    for delay in _PASTE_RETRY_DELAYS:
+        if paste_res.success or not getattr(paste_res, "retryable", False):
+            break
+        time.sleep(delay)
+        if focus_browser and getattr(paste_res, "error_kind", None) and str(getattr(paste_res.error_kind, "value", "")) == "window_lost":
+            refocused = focus_default_browser_target(interactive_only=True)
+            if refocused is not None:
+                target_window = refocused
+        paste_res = paste_to_browser_prompt(
+            interactive_only=True,
+            target_window=target_window,
+            allowed_title_keywords=allowed_title_keywords,
+        )
+        if getattr(paste_res, "target_window", None) is not None:
+            target_window = paste_res.target_window
+
+    if paste_res.success:
+        print("   📝 プロンプト入力欄に貼り付けて自動入力しました。")
+        return True, ""
+    if paste_res.reason:
+        print(f"   ℹ 自動貼り付けをスキップしました: {paste_res.reason}")
+        return False, paste_res.reason
+    return False, ""
+
+
+def _is_copy_invocation(raw_args: Sequence[str]) -> bool:
+    if not raw_args:
+        return False
+    if any(tok in ("-h", "--help") for tok in raw_args):
+        return False
+    if raw_args[0] in ("copy", "c", "cp"):
+        return True
+    if raw_args[0] in _KNOWN_NON_COPY_SUBCOMMANDS:
+        return False
+    return any(tok in ("-c", "--copy") for tok in raw_args)
+
+
+def _handle_copy_parse_failure(
+    raw_args: Sequence[str],
+    stderr_text: str,
+    exit_code: int,
+    *,
+    focus_browser: bool,
+    allowed_title_keywords: Optional[Sequence[str]],
+) -> CopyCommandResult:
+    detail = " ".join(line.strip() for line in stderr_text.splitlines() if line.strip()) or f"終了コード {exit_code}"
+    cmd_text = "aiskel " + " ".join(raw_args)
+    error_report = (
+        f"[aiskel c コマンド引数エラー]\n"
+        f"コマンド: {cmd_text}\n"
+        f"失敗原因: {detail}\n\n"
+        f"上記エラーを解消するための正しい aiskel c コマンド（オプションや対象指定）を提示してください。"
+    )
+    no_error_clipboard = "--no-error-clipboard" in raw_args
+    no_focus = "--no-focus" in raw_args
+    no_paste = "--no-paste" in raw_args
+
+    copied_ok = False
+    pasted = False
+    paste_reason = ""
+    if not no_error_clipboard:
+        try:
+            set_clipboard_text(error_report)
+            copied_ok = True
+            print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
+        except Exception:
+            copied_ok = False
+
+    if copied_ok:
+        pasted, paste_reason = _focus_and_paste_clipboard(
+            no_focus=no_focus,
+            no_paste=no_paste,
+            focus_browser=focus_browser,
+            allowed_title_keywords=allowed_title_keywords,
+        )
+
+    return CopyCommandResult(
+        exit_code=exit_code,
+        pasted=pasted,
+        paste_reason="" if pasted else (paste_reason or detail),
+        copied_chars=len(error_report) if copied_ok else 0,
+        error_message=detail,
+    )
 
 
 def _execute_copy_command(
@@ -80,6 +235,8 @@ def _execute_copy_command(
 ) -> CopyCommandResult:
     max_chars = parsed_args.max_chars
     with_deps = getattr(parsed_args, "deps", False)
+    no_focus = getattr(parsed_args, "no_focus", False)
+    no_paste = getattr(parsed_args, "no_paste", False)
     try:
         formatted_text, est_tokens, item_count = extract_and_format_snippets(
             copy_specs, project_root, max_chars=max_chars, with_deps=with_deps
@@ -91,32 +248,12 @@ def _execute_copy_command(
         print(f"   - 推定トークン: 約 {est_tokens:,} tokens")
         print("   AIチャットへそのままペーストしてご利用いただけます。")
 
-        pasted = False
-        paste_reason = ""
-        if not getattr(parsed_args, "no_focus", False):
-            target_window: Optional[Union[int, str]] = None
-            can_attempt_paste = False
-            if focus_browser:
-                target_window = focus_default_browser_target(interactive_only=True)
-                if target_window is not None:
-                    print("   🌐 起動済みのデフォルトブラウザを最前面に表示しました。")
-                    can_attempt_paste = True
-            else:
-                # ブリッジ経由で対象タブが既に最前面のときは別ブラウザへのフォーカス奪取を防ぐ
-                can_attempt_paste = True
-
-            if can_attempt_paste and not getattr(parsed_args, "no_paste", False):
-                paste_res = paste_to_browser_prompt(
-                    interactive_only=True,
-                    target_window=target_window,
-                    allowed_title_keywords=allowed_title_keywords,
-                )
-                if paste_res.success:
-                    pasted = True
-                    print("   📝 プロンプト入力欄に貼り付けて自動入力しました。")
-                elif paste_res.reason:
-                    paste_reason = paste_res.reason
-                    print(f"   ℹ 自動貼り付けをスキップしました: {paste_res.reason}")
+        pasted, paste_reason = _focus_and_paste_clipboard(
+            no_focus=no_focus,
+            no_paste=no_paste,
+            focus_browser=focus_browser,
+            allowed_title_keywords=allowed_title_keywords,
+        )
         return CopyCommandResult(
             exit_code=0,
             pasted=pasted,
@@ -133,14 +270,31 @@ def _execute_copy_command(
             f"失敗原因: {e}\n\n"
             f"上記エラーを解消するための正しい対象指定（ファイルパスやノード名）を提示してください。"
         )
-        # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存(非フォーカス時等はスキップ)
+        # なぜ必要か: 失敗時にAIへ即座に相談できるようエラー詳細を自動保存し成功時と同様に貼り付ける
+        copied_ok = False
+        pasted = False
+        paste_reason = ""
         if not getattr(parsed_args, "no_error_clipboard", False):
             try:
                 set_clipboard_text(error_report)
+                copied_ok = True
                 print("📋 失敗原因をクリップボードに保存しました (AIチャットにそのままペースト可能)。", file=sys.stderr)
             except Exception:
-                pass
-        return CopyCommandResult(exit_code=1, pasted=False, paste_reason=str(e))
+                copied_ok = False
+        if copied_ok:
+            pasted, paste_reason = _focus_and_paste_clipboard(
+                no_focus=no_focus,
+                no_paste=no_paste,
+                focus_browser=focus_browser,
+                allowed_title_keywords=allowed_title_keywords,
+            )
+        return CopyCommandResult(
+            exit_code=1,
+            pasted=pasted,
+            paste_reason="" if pasted else (paste_reason or str(e)),
+            copied_chars=len(error_report) if copied_ok else 0,
+            error_message=str(e),
+        )
 
 
 def run_structured_command(
@@ -150,8 +304,11 @@ def run_structured_command(
     allowed_title_keywords: Optional[Sequence[str]] = None,
 ) -> CopyCommandResult:
     """CLIコマンドを実行し、copy系コマンド時は貼り付け成否を含む構造化結果を返す。"""
+    raw_args = list(args) if args is not None else sys.argv[1:]
+    tee_stderr = _TeeStderr(sys.stderr)
     try:
-        parsed_args = parse_arguments(args)
+        with contextlib.redirect_stderr(tee_stderr):
+            parsed_args = parse_arguments(args)
         is_copy_cmd = hasattr(parsed_args, "command") and parsed_args.command in ("copy", "c", "cp")
         copy_specs = parsed_args.specs if is_copy_cmd else getattr(parsed_args, "copy", None)
         if copy_specs:
@@ -163,15 +320,41 @@ def run_structured_command(
                 focus_browser=focus_browser,
                 allowed_title_keywords=allowed_title_keywords,
             )
+    except SystemExit as e:
+        exit_code = int(e.code) if isinstance(e.code, int) else 1
+        if exit_code != 0 and _is_copy_invocation(raw_args):
+            return _handle_copy_parse_failure(
+                raw_args,
+                tee_stderr.getvalue(),
+                exit_code,
+                focus_browser=focus_browser,
+                allowed_title_keywords=allowed_title_keywords,
+            )
+        raise
     except Exception as e:
         print(f"\n致命的なエラーが発生しました: {e}", file=sys.stderr)
-        return CopyCommandResult(exit_code=1, pasted=False, paste_reason=str(e))
+        return CopyCommandResult(exit_code=1, pasted=False, paste_reason=str(e), error_message=str(e))
     return CopyCommandResult(exit_code=main(args), pasted=False)
 
 
 def main(args: Optional[List[str]] = None) -> int:
+    raw_args = list(args) if args is not None else sys.argv[1:]
+    tee_stderr = _TeeStderr(sys.stderr)
     try:
-        parsed_args = parse_arguments(args)
+        try:
+            with contextlib.redirect_stderr(tee_stderr):
+                parsed_args = parse_arguments(args)
+        except SystemExit as e:
+            exit_code = int(e.code) if isinstance(e.code, int) else 1
+            if exit_code != 0 and _is_copy_invocation(raw_args):
+                return _handle_copy_parse_failure(
+                    raw_args,
+                    tee_stderr.getvalue(),
+                    exit_code,
+                    focus_browser=True,
+                    allowed_title_keywords=None,
+                ).exit_code
+            raise
 
         if hasattr(parsed_args, "command") and parsed_args.command in ("bloat", "b", "size"):
             project_root: Path = parsed_args.project_dir.resolve()

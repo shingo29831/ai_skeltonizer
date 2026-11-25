@@ -647,3 +647,114 @@ def paste_macos_browser_prompt(
         return PasteOutcome(False, "ブラウザUI探索がタイムアウトしました", True, PasteErrorKind.TRANSIENT, target_window=resolved_id)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         return PasteOutcome(False, f"macOSブラウザ操作エラー: {e}", False, PasteErrorKind.FAILED)
+
+
+_MACOS_TRIGGER_RUN_JXA = r"""
+function run(argv) {
+    var payload = JSON.parse(argv[0]);
+    var bundleId = payload.bundleId;
+    var titleKeywords = payload.titleKeywords || [];
+    var loginRe = payload.loginRegex ? new RegExp(payload.loginRegex, "i") : null;
+    var loadingRe = payload.loadingRegex ? new RegExp(payload.loadingRegex, "i") : null;
+    var se = Application("System Events");
+    var procs = se.applicationProcesses.whose({bundleIdentifier: bundleId})();
+    if (procs.length === 0) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "failed", reason: "対象ブラウザプロセスが見つかりません"});
+    }
+    var appProc = procs[0];
+    if (!appProc.frontmost()) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: "対象ブラウザが最前面にありません"});
+    }
+    var wins = appProc.windows();
+    if (wins.length === 0) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "failed", reason: "ブラウザウィンドウが存在しません"});
+    }
+    var winTitle = "";
+    try { winTitle = String(wins[0].name() || ""); } catch (e) {}
+    if (winTitle && loginRe && loginRe.test(winTitle)) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "login_required", reason: "認証・ログイン画面のため自動送信を中断しました (title: " + winTitle + ")"});
+    }
+    if (loadingRe && loadingRe.test(winTitle.trim())) {
+        return JSON.stringify({ok: false, retryable: true, errorKind: "transient", reason: "サイトを読み込み中のため自動送信をスキップしました (title: " + winTitle + ")"});
+    }
+    if (titleKeywords.length > 0) {
+        var titleLower = winTitle.toLowerCase();
+        var allowed = titleKeywords.some(function(kw) {
+            var k = String(kw || "").trim().toLowerCase();
+            return k && titleLower.indexOf(k) !== -1;
+        });
+        if (!allowed) {
+            return JSON.stringify({ok: false, retryable: false, errorKind: "user_aborted", reason: "許可対象外のページのため自動送信をスキップしました (title: " + winTitle + ")"});
+        }
+    }
+    // アドレスバー等へのCmd+Enter誤爆を防ぐためWebコンテンツ領域内の入力フォーカスを確認する
+    try { appProc.attributes.byName("AXManualAccessibility").value = true; } catch (e) {}
+    var focusedEl = null;
+    try { focusedEl = appProc.attributes.byName("AXFocusedUIElement").value(); } catch (e) {}
+    if (!focusedEl) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "failed", reason: "フォーカス中の入力要素を検出できませんでした"});
+    }
+    var inWebArea = false;
+    var cur = focusedEl;
+    for (var step = 0; step < 48; step++) {
+        var role = "";
+        try { role = String(cur.role() || ""); } catch (e) { break; }
+        if (role === "AXWebArea") {
+            inWebArea = true;
+            break;
+        }
+        if (role === "AXWindow" || role === "AXApplication" || role === "AXToolbar") break;
+        try { cur = cur.attributes.byName("AXParent").value(); } catch (e) { cur = null; }
+        if (!cur) break;
+    }
+    if (!inWebArea) {
+        return JSON.stringify({ok: false, retryable: false, errorKind: "failed", reason: "Webコンテンツ領域外にフォーカスがあるため自動送信を中止しました"});
+    }
+    se.keyCode(36, {using: "command down"});
+    return JSON.stringify({ok: true, retryable: false, errorKind: "none", reason: ""});
+}
+"""
+
+def trigger_macos_browser_run(
+    prompt_labels: Sequence[str],
+    target_bundle_id: Optional[str] = None,
+    allowed_title_keywords: Sequence[str] = (),
+) -> PasteOutcome:
+    """最前面のmacOSブラウザ対象ページでCmd+Enterを送信する。"""
+    del prompt_labels
+    resolved_id = target_bundle_id
+    if not resolved_id:
+        bundle_id = _get_macos_default_browser_bundle_id()
+        resolved_id = _resolve_running_macos_bundle_id(bundle_id)
+    if not resolved_id:
+        return PasteOutcome(False, "起動中のデフォルトブラウザが特定できませんでした", False, PasteErrorKind.FAILED)
+
+    payload = json.dumps(
+        {
+            "bundleId": resolved_id,
+            "titleKeywords": list(allowed_title_keywords),
+            "loginRegex": LOGIN_TITLE_REGEX_PATTERN,
+            "loadingRegex": LOADING_TITLE_REGEX_PATTERN,
+        }
+    )
+    try:
+        res = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-", payload],
+            input=_MACOS_TRIGGER_RUN_JXA,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            err_msg = (res.stderr or "").strip()
+            return PasteOutcome(False, f"osascript実行に失敗しました: {err_msg or f'code={res.returncode}'}", False, PasteErrorKind.FAILED)
+        out = (res.stdout or "").strip()
+        if not out:
+            return PasteOutcome(False, "osascriptから応答がありませんでした", False, PasteErrorKind.FAILED)
+        parsed = json.loads(out)
+        ok = bool(parsed.get("ok"))
+        reason = str(parsed.get("reason", ""))
+        error_kind = _parse_macos_error_kind(parsed.get("errorKind"), ok)
+        return PasteOutcome(ok, reason, False, error_kind, target_window=resolved_id)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as e:
+        return PasteOutcome(False, f"macOSブラウザ送信エラー: {e}", False, PasteErrorKind.FAILED)

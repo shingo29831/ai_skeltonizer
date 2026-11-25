@@ -71,6 +71,7 @@ _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
 _KEYEVENTF_KEYUP = 0x0002
 
+_VK_RETURN = 0x0D
 _VK_SHIFT = 0x10
 _VK_CONTROL = 0x11
 _VK_MENU = 0x12
@@ -285,7 +286,7 @@ def _send_key_release_if_pressed(user32: Any, inputs: List[_INPUT], vk: int) -> 
         inputs.append(ev)
 
 
-def _send_ctrl_v_clean(user32: Any) -> bool:
+def _send_ctrl_key_clean(user32: Any, target_vk: int) -> bool:
     inputs: List[_INPUT] = []
     # コマンド実行直後にユーザーが押下している修飾キーによる誤結合(Ctrl+Shift+V等)を防止する
     for mod_vk in (
@@ -297,11 +298,11 @@ def _send_ctrl_v_clean(user32: Any) -> bool:
         _send_key_release_if_pressed(user32, inputs, mod_vk)
 
     scan_ctrl = user32.MapVirtualKeyW(_VK_CONTROL, 0)
-    scan_v = user32.MapVirtualKeyW(_VK_V, 0)
+    scan_key = user32.MapVirtualKeyW(target_vk, 0)
     for vk, scan, flags in (
         (_VK_CONTROL, scan_ctrl, 0),
-        (_VK_V, scan_v, 0),
-        (_VK_V, scan_v, _KEYEVENTF_KEYUP),
+        (target_vk, scan_key, 0),
+        (target_vk, scan_key, _KEYEVENTF_KEYUP),
         (_VK_CONTROL, scan_ctrl, _KEYEVENTF_KEYUP),
     ):
         ev = _INPUT(type=_INPUT_KEYBOARD)
@@ -314,6 +315,14 @@ def _send_ctrl_v_clean(user32: Any) -> bool:
         time.sleep(0.05)
         return True
     return False
+
+
+def _send_ctrl_v_clean(user32: Any) -> bool:
+    return _send_ctrl_key_clean(user32, _VK_V)
+
+
+def _send_ctrl_enter_clean(user32: Any) -> bool:
+    return _send_ctrl_key_clean(user32, _VK_RETURN)
 
 
 def _click_safe_region_preserving_cursor(user32: Any, el: ctypes.c_void_p, oleaut32: Any) -> bool:
@@ -581,6 +590,107 @@ def paste_windows_browser_prompt(
         return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=hwnd)
     finally:
         _com_release(target_el)
+        _com_release(root_el)
+        _com_release(p_uia)
+        if should_uninit:
+            ole32.CoUninitialize()
+
+
+def trigger_windows_browser_run(
+    prompt_labels: Sequence[str],
+    target_hwnd: Optional[int] = None,
+    allowed_title_keywords: Sequence[str] = (),
+) -> PasteOutcome:
+    """最前面のWindowsブラウザ対象ページで入力欄へフォーカスし、Ctrl+Enterを送信する。"""
+    exe_names = set(_get_windows_default_browser_exe_names())
+    if not exe_names:
+        return PasteOutcome(False, "デフォルトブラウザの実行ファイルが特定できませんでした", False, PasteErrorKind.UNSUPPORTED)
+
+    user32, kernel32, ole32, oleaut32 = _init_paste_win32_apis()
+    fg_hwnd_ptr = user32.GetForegroundWindow()
+    fg_hwnd = int(fg_hwnd_ptr) if fg_hwnd_ptr else 0
+    if not fg_hwnd:
+        return PasteOutcome(False, "対象ブラウザが最前面にありません", True, PasteErrorKind.WINDOW_LOST)
+
+    fg_exe = _get_hwnd_process_exe_name(fg_hwnd, user32, kernel32)
+    hwnd = target_hwnd if (target_hwnd and fg_hwnd == target_hwnd) else fg_hwnd
+    if target_hwnd and fg_hwnd != target_hwnd:
+        return PasteOutcome(False, "別ウィンドウが最前面のため自動送信を中断しました", False, PasteErrorKind.USER_ABORTED)
+    if fg_exe not in exe_names:
+        return PasteOutcome(False, f"最前面ウィンドウ ({fg_exe}) がデフォルトブラウザではありません", False, PasteErrorKind.USER_ABORTED)
+
+    title = _get_window_title(hwnd, user32)
+    if is_login_or_auth_title(title):
+        return PasteOutcome(False, f"認証・ログイン画面のため自動送信を中断しました (title: {title})", False, PasteErrorKind.LOGIN_REQUIRED, target_window=hwnd)
+    if is_loading_or_unready_title(title):
+        return PasteOutcome(False, f"サイトを読み込み中のため自動送信をスキップしました (title: {title})", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
+    if allowed_title_keywords:
+        title_lower = title.lower()
+        if not any(kw in title_lower for kw in allowed_title_keywords):
+            return PasteOutcome(False, f"許可対象外のページのため自動送信をスキップしました (title: {title})", False, PasteErrorKind.USER_ABORTED, target_window=hwnd)
+
+    hr_co = ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED)
+    should_uninit = hr_co in (0, 1)
+    if hr_co < 0 and hr_co != _RPC_E_CHANGED_MODE:
+        return PasteOutcome(False, f"COM初期化に失敗しました (HRESULT={hr_co:#x})", False, PasteErrorKind.FAILED, target_window=hwnd)
+
+    p_uia = ctypes.c_void_p()
+    root_el = ctypes.c_void_p()
+    target_el: Optional[ctypes.c_void_p] = None
+    doc_el: Optional[ctypes.c_void_p] = None
+    try:
+        hr_create = ole32.CoCreateInstance(
+            ctypes.byref(_CLSID_CUIAutomation),
+            None,
+            _CLSCTX_INPROC_SERVER,
+            ctypes.byref(_IID_IUIAutomation),
+            ctypes.byref(p_uia),
+        )
+        if hr_create < 0 or not p_uia.value:
+            return PasteOutcome(False, f"UI Automationの初期化に失敗しました (HRESULT={hr_create:#x})", False, PasteErrorKind.FAILED, target_window=hwnd)
+
+        hr_el = _com_call(
+            p_uia, 6, ctypes.c_long, (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
+            ctypes.c_void_p(hwnd), ctypes.byref(root_el),
+        )
+        if hr_el < 0 or not root_el.value:
+            return PasteOutcome(False, f"ブラウザウィンドウのUIA要素取得に失敗しました (HRESULT={hr_el:#x})", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
+
+        target_el, _, _ = _find_best_prompt_element(p_uia, root_el, oleaut32, prompt_labels, quick_probe=True)
+        if target_el is not None:
+            if not _verify_element_focused(p_uia, target_el, oleaut32):
+                _com_call(target_el, 3, ctypes.c_long, ())
+                time.sleep(0.04)
+                if not _verify_element_focused(p_uia, target_el, oleaut32):
+                    _click_safe_region_preserving_cursor(user32, target_el, oleaut32)
+                    time.sleep(0.05)
+                    if not _verify_element_focused(p_uia, target_el, oleaut32):
+                        return PasteOutcome(False, "プロンプト入力欄へのフォーカス設定に失敗しました", True, PasteErrorKind.TRANSIENT, target_window=hwnd)
+        else:
+            # プレースホルダー変化時はDocument領域にフォーカスがあることを確認しアドレスバー誤爆を防ぐ
+            doc_el = _find_visible_active_document(p_uia, root_el, oleaut32)
+            if doc_el is None or not _verify_element_focused(p_uia, doc_el, oleaut32):
+                return PasteOutcome(False, "送信対象のプロンプト入力欄を特定できませんでした", False, PasteErrorKind.FAILED, target_window=hwnd)
+
+        fg_err = _validate_foreground_hwnd(
+            hwnd,
+            user32,
+            kernel32,
+            exe_names,
+            "送信直前にフォアグラウンドウィンドウが失われました",
+            "対象ブラウザウィンドウが切り替わったため中断しました",
+            "送信直前に別ウィンドウへ切り替わったため中断しました",
+        )
+        if fg_err is not None:
+            return fg_err
+
+        if not _send_ctrl_enter_clean(user32):
+            return PasteOutcome(False, "Ctrl+Enterキーイベントの送信に失敗しました", False, PasteErrorKind.FAILED, target_window=hwnd)
+
+        return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=hwnd)
+    finally:
+        _com_release(target_el)
+        _com_release(doc_el)
         _com_release(root_el)
         _com_release(p_uia)
         if should_uninit:

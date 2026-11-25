@@ -6,10 +6,10 @@ import subprocess
 import sys
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
-from .browser_paste_linux import paste_linux_browser_prompt
-from .browser_paste_macos import paste_macos_browser_prompt
+from .browser_paste_linux import paste_linux_browser_prompt, trigger_linux_browser_run
+from .browser_paste_macos import paste_macos_browser_prompt, trigger_macos_browser_run
 from .browser_paste_types import PasteErrorKind, PasteOutcome, PasteResult
-from .browser_paste_windows import paste_windows_browser_prompt
+from .browser_paste_windows import paste_windows_browser_prompt, trigger_windows_browser_run
 
 __all__ = [
     "DEFAULT_ALLOWED_TITLE_KEYWORDS",
@@ -17,12 +17,15 @@ __all__ = [
     "PasteErrorKind",
     "PasteResult",
     "paste_to_browser_prompt",
+    "trigger_browser_prompt_run",
 ]
 
 DEFAULT_PROMPT_LABELS: Tuple[str, ...] = (
     "Enter a prompt",
     "プロンプトを入力",
     "Start typing a prompt to see what our models can do",
+    "Start typing a prompt",
+    "Type something",
     "Ask Gemini",
     "Message ChatGPT",
     "Reply to Claude",
@@ -133,3 +136,55 @@ def paste_to_browser_prompt(
         return PasteResult(False, f"未対応のOS ({system}) です", False, PasteErrorKind.UNSUPPORTED)
     except (OSError, subprocess.SubprocessError) as e:
         return PasteResult(False, f"ブラウザ操作エラー: {e}", False, PasteErrorKind.FAILED)
+
+
+def trigger_browser_prompt_run(
+    interactive_only: bool = False,
+    prompt_labels: Optional[Sequence[str]] = None,
+    target_window: Optional[Union[int, str]] = None,
+    allowed_title_keywords: Optional[Sequence[str]] = None,
+) -> PasteResult:
+    """最前面ブラウザの対象プロンプト上で送信ショートカット(Ctrl+Enter / Cmd+Enter)を実行する。"""
+    if interactive_only and (not (sys.stdout is not None and sys.stdout.isatty()) or bool(os.environ.get("CI"))):
+        return PasteResult(False, "非対話環境またはCI環境のためスキップしました", False, PasteErrorKind.UNSUPPORTED)
+
+    raw_labels = DEFAULT_PROMPT_LABELS if prompt_labels is None else prompt_labels
+    labels = tuple(label.strip() for label in raw_labels if label and label.strip())
+    if not labels:
+        return PasteResult(False, "プロンプトラベルが指定されていません", False, PasteErrorKind.FAILED)
+
+    raw_keywords = DEFAULT_ALLOWED_TITLE_KEYWORDS if allowed_title_keywords is None else allowed_title_keywords
+    title_keywords = tuple(kw.strip().lower() for kw in raw_keywords if kw and kw.strip())
+
+    system = platform.system()
+    try:
+        if system == "Windows":
+            target_hwnd = target_window if isinstance(target_window, int) and not isinstance(target_window, bool) else None
+            return _to_paste_result(
+                trigger_windows_browser_run(
+                    labels,
+                    target_hwnd=target_hwnd,
+                    allowed_title_keywords=title_keywords,
+                )
+            )
+        if system == "Darwin":
+            bundle_id = target_window if isinstance(target_window, str) else None
+            return _to_paste_result(
+                trigger_macos_browser_run(
+                    labels,
+                    target_bundle_id=bundle_id,
+                    allowed_title_keywords=title_keywords,
+                )
+            )
+        if system == "Linux":
+            win_id = target_window if isinstance(target_window, str) else None
+            return _to_paste_result(
+                trigger_linux_browser_run(
+                    labels,
+                    target_window_id=win_id,
+                    allowed_title_keywords=title_keywords,
+                )
+            )
+        return PasteResult(False, f"未対応のOS ({system}) です", False, PasteErrorKind.UNSUPPORTED)
+    except (OSError, subprocess.SubprocessError) as e:
+        return PasteResult(False, f"ブラウザ送信操作エラー: {e}", False, PasteErrorKind.FAILED)

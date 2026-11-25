@@ -324,6 +324,20 @@ def build_bridge_request_handler_class(
                 self._send_json(status_code, body)
                 return
 
+            if req_path == "/api/trigger_run":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_trigger_run_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 自動Run送信処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
             if req_path != "/api/execute":
                 self._send_json(int(HTTPStatus.NOT_FOUND), {"ok": False, "message": "Not Found"})
                 return

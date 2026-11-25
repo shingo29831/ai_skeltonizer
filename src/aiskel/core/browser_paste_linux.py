@@ -773,3 +773,110 @@ def paste_linux_browser_prompt(
         return win_err_final
 
     return _send_linux_ctrl_v(is_wayland_only=(has_wayland and not has_x11), target_window=resolved_win_id)
+
+
+def _send_linux_ctrl_enter(is_wayland_only: bool, target_window: Optional[str] = None) -> PasteOutcome:
+    if is_wayland_only:
+        if shutil.which("wtype"):
+            res = subprocess.run(["wtype", "-M", "ctrl", "-k", "Return", "-m", "ctrl"], capture_output=True, timeout=2)
+            if res.returncode == 0:
+                return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=target_window)
+            return PasteOutcome(False, "wtypeでのCtrl+Enter送信に失敗しました", False, PasteErrorKind.FAILED, target_window=target_window)
+        if shutil.which("ydotool"):
+            # keycode 29=LEFTCTRL, 28=ENTER
+            res = subprocess.run(["ydotool", "key", "29:1", "28:1", "28:0", "29:0"], capture_output=True, timeout=2)
+            if res.returncode == 0:
+                return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=target_window)
+            return PasteOutcome(False, "ydotoolでのCtrl+Enter送信に失敗しました", False, PasteErrorKind.FAILED, target_window=target_window)
+        return PasteOutcome(False, "純粋Wayland環境で送信ツール(wtype/ydotool)が利用できません", False, PasteErrorKind.UNSUPPORTED)
+
+    if not shutil.which("xdotool"):
+        return PasteOutcome(False, "xdotoolがインストールされていません", False, PasteErrorKind.UNSUPPORTED)
+
+    res = subprocess.run(
+        ["xdotool", "key", "--clearmodifiers", "ctrl+Return"],
+        capture_output=True,
+        timeout=2,
+    )
+    if res.returncode == 0:
+        return PasteOutcome(True, "", False, PasteErrorKind.NONE, target_window=target_window)
+    return PasteOutcome(False, "xdotoolでのCtrl+Enter送信に失敗しました", False, PasteErrorKind.FAILED, target_window=target_window)
+
+
+def _has_focused_atspi_document(root_win: Any, atspi_mod: Any, max_nodes: int = 800) -> bool:
+    doc_roles = {atspi_mod.Role.DOCUMENT_WEB, atspi_mod.Role.DOCUMENT_FRAME}
+    queue: Deque[Tuple[Any, int]] = deque([(root_win, 0)])
+    visited = 0
+    while queue and visited < max_nodes:
+        node, depth = queue.popleft()
+        if node is None:
+            continue
+        visited += 1
+        try:
+            _clear_atspi_single_cache(node)
+            if node.get_role() in doc_roles:
+                states = node.get_state_set()
+                if states.contains(atspi_mod.StateType.VISIBLE) and states.contains(atspi_mod.StateType.SHOWING):
+                    if _verify_atspi_node_focused(node, atspi_mod):
+                        return True
+                continue
+            if depth >= 16:
+                continue
+            for i in range(node.get_child_count()):
+                child = node.get_child_at_index(i)
+                if child is not None:
+                    queue.append((child, depth + 1))
+        except Exception:
+            continue
+    return False
+
+def trigger_linux_browser_run(
+    prompt_labels: Sequence[str],
+    target_window_id: Optional[str] = None,
+    allowed_title_keywords: Sequence[str] = (),
+) -> PasteOutcome:
+    """Linuxのアクティブブラウザ対象ページで入力欄へフォーカスし、Ctrl+Enterを送信する。"""
+    has_x11 = bool(os.environ.get("DISPLAY"))
+    has_wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
+    if not has_x11 and not has_wayland:
+        return PasteOutcome(False, "GUIディスプレイ環境変数が設定されていません", False, PasteErrorKind.UNSUPPORTED)
+
+    browser_hints = _get_linux_browser_wm_hints()
+    if not browser_hints:
+        return PasteOutcome(False, "デフォルトブラウザの実行情報が特定できませんでした", False, PasteErrorKind.UNSUPPORTED)
+
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+    except (ImportError, ValueError) as e:
+        return PasteOutcome(False, f"PyGObject (Atspi 2.0) が利用できません: {e}", False, PasteErrorKind.UNSUPPORTED)
+
+    active_win, win_err, _, err_kind = _wait_active_atspi_window(
+        Atspi, allowed_title_keywords, browser_hints, timeout_sec=0.5
+    )
+    if active_win is None:
+        return PasteOutcome(False, win_err, False, err_kind)
+
+    target_x11_id = _parse_x11_window_id(target_window_id)
+    if has_x11 and target_x11_id is not None:
+        active_x11_id = _get_x11_active_window_id()
+        if active_x11_id is not None and active_x11_id != target_x11_id:
+            return PasteOutcome(False, "別ウィンドウが最前面のため自動送信を中断しました", False, PasteErrorKind.USER_ABORTED)
+
+    labels_lower = [lbl.strip().lower() for lbl in prompt_labels if lbl.strip()]
+    roles = {Atspi.Role.ENTRY, Atspi.Role.TEXT}
+    found = _find_atspi_prompt_node(active_win, labels_lower, roles, Atspi)
+    if found is not None:
+        if not _verify_atspi_node_focused(found[0], Atspi):
+            comp = found[0].get_component_iface()
+            if comp is not None:
+                comp.grab_focus()
+                time.sleep(0.05)
+            if not _verify_atspi_node_focused(found[0], Atspi):
+                return PasteOutcome(False, "プロンプト入力欄へのフォーカス設定に失敗しました", False, PasteErrorKind.FAILED, target_window=target_window_id)
+    elif not _has_focused_atspi_document(active_win, Atspi):
+        return PasteOutcome(False, "送信対象のプロンプト入力欄を特定できませんでした", False, PasteErrorKind.FAILED, target_window=target_window_id)
+
+    return _send_linux_ctrl_enter(is_wayland_only=(has_wayland and not has_x11), target_window=target_window_id)
