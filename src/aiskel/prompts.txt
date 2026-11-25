@@ -9,6 +9,7 @@
 #   - review_patch_format_rules : 新タブレビュー時のセクション2置換ルール
 #   - file_split                : 肥大化ファイル自動分割用プロンプト
 #   - dir_organize              : 過密ディレクトリ自動階層整理用プロンプト
+#   - config_infer              : 設定ファイル(ai_meta/config.json)推論・作成用プロンプト
 # ※ パッチパーサとの衝突を防ぐため例示内のメタ記号は {{<<<<}} {{====}} {{>>>>}}
 #    {{FILE_HEADER}} {{DELETE_HEADER}} {{MOVE_HEADER}} {{COMMIT_OPEN}} {{COMMIT_CLOSE}} を使用し、
 #    読込時に本来の記号へ自動展開されます。
@@ -201,6 +202,33 @@ refactor: streamline value handling and drop obsolete logic
 - 新規サブディレクトリを作成する場合、Pythonパッケージ等では基本規約に従い直下に `__init__.py`（`@role` 記述）を配置し、既存の公開API・インポート参照・テスト・設定参照が壊れないよう同一パッチ内で整合更新すること。
 - パッチ記述順序: `{{MOVE_HEADER}} old -> new`（または許可時 `名前変更: old -> new`）を先に記述し、続けて新規 `__init__.py` 作成や移動先・参照元ファイルの編集ブロック（`{{FILE_HEADER}} ...` + `{{<<<<}} {{====}} {{>>>>}}`）を記述すること。
 - パッチ末尾に必ず `{{COMMIT_OPEN}}...{{COMMIT_CLOSE}}` を含めること。
+
+=== 基本規約 ===
+{{BASE_RULES}}
+
+=== [PROMPT: config_infer] 設定ファイル(ai_meta/config.json)推論・作成用プロンプト ===
+【依頼タスク: プロジェクトに最適な {{CONFIG_REL_PATH}} の設定推論・更新】
+対象ファイル: `{{CONFIG_REL_PATH}}` ({{CONFIG_STATUS_LABEL}})
+下記の「基本規約」と `<ai_architecture_bundle>` を分析し、このプロジェクトの構成・言語・ツールチェイン・運用安全性に最適な `{{CONFIG_REL_PATH}}` の設定内容を推論して更新パッチを出力せよ。
+
+=== {{CONFIG_REL_PATH}} で利用可能な設定キーと仕様 ===
+- `bundle_filename` (string): 要約バンドルの出力ファイル名（デフォルト: `"architecture_bundle.txt"`。既存設定がある場合は原則維持）。
+- `test_command` (string[]): `aiskel a -T` / `aiskel t` 実行時に呼ばれるテスト・検証コマンド一覧（例: `["pytest -q"]`, `["npm test"]`）。テスト機構がない・未確認の場合は `[]` とし、架空のコマンドは記述しないこと。
+- `static_analysis_command` (string[]): `aiskel a` 適用後に毎回自動実行される静的コード解析コマンド一覧（構文・型・Lintチェック等、例: `["python -m compileall -q src"]`, `["npx tsc --noEmit"]`）。**注意: 失敗するとパッチ変更が自動ロールバックされる**ため、設定ファイル等で実在・導入済みと確認できた確実なコマンドのみ設定し、未導入ツールや既存コードで失敗するコマンドは含めないこと（該当なし時は `[]`）。
+- `exclude_paths` (string[]): 肥大化検出(`aiskel b`)や階層整理の対象外とするパス・Globパターン一覧（ビルド成果物、キャッシュ、ロックファイル、生成コード、データ等）。
+- `write_paths_mode` (string): 書き込み可能パス制御モード。`"auto"` / `"whitelist"` / `"blacklist"` / `"both"` / `"disabled"` のいずれか。
+- `allowed_write_paths` (string[]): 書き込み許可パス・Glob一覧（ディレクトリは `"src/"` のように末尾 `/` 推奨）。空配列 `[]` の場合、`"whitelist"` / `"both"` では全パス拒否になるため注意すること（制限しない場合は `"auto"` や `"blacklist"` を使用）。
+- `denied_write_paths` (string[]): 書き込み禁止パス・Glob一覧（例: `[".env", "*.secret.*"]` や編集させたくない機密・ロック・環境設定ファイル等）。
+- `patch_handoff_max_tabs` (integer): パッチ出力検知時の新規タブ自動レビュー上限回数（0以上の整数。既存値がある場合は原則維持、未設定時は `1`）。
+- 任意閾値設定（変更が必要な場合のみ記載・通常は省略可）: `bloat_max_lines` (integer, デフォルト500), `bloat_max_chars` (integer, デフォルト25000), `organize_max_files` (integer, デフォルト10)。
+- `description` (string): 説明文字列（既存の `description` がある場合は維持してよい）。
+
+=== 設定推論モードの実行ルール ===
+- `<ai_architecture_bundle>` だけでは使用中のテストランナー・Linter・型チェッカー・ビルド構成が確定できない場合は、推測で書かず `aiskel c`（1行ワンライナー、例: `aiskel c pyproject.toml` や `aiskel c package.json`）で実際の設定ファイルを取得・確認してから推論せよ。
+- 変更対象は **`{{CONFIG_REL_PATH}}` のみ** とし、プロジェクト内の他ファイルは一切変更・削除・移動しないこと。
+- `{{CONFIG_REL_PATH}}` の現在内容は末尾に添付済みのため、`{{CONFIG_REL_PATH}}` 自体に対する `aiskel c` は不要である。
+- 出力は必ず有効な JSON 構文（コメント・末尾カンマ不可、ダブルクォート使用）とし、未適用の現行ファイルに対してそのまま `aiskel a` 適用できるパッチ形式（`{{FILE_HEADER}} {{CONFIG_REL_PATH}}`、`{{<<<<}} {{====}} {{>>>>}}`、最末尾 `{{COMMIT_OPEN}}...{{COMMIT_CLOSE}}`）で出力せよ。
+- モードA（変更対象を `{{<<<<}}` と `{{====}}` に正確に記載）またはモードB（`{{<<<<}}` と `{{====}}` の間を空行にし、`{{====}}` と `{{>>>>}}` の間に新しい完全な JSON 全文を記載）のどちらを用いてもよい。
 
 === 基本規約 ===
 {{BASE_RULES}}

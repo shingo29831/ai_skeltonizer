@@ -13,6 +13,7 @@ _REQUIRED_BUILTIN_KEYS: Tuple[str, ...] = (
     "review_patch_format_rules",
     "file_split",
     "dir_organize",
+    "config_infer",
 )
 
 _UNIFIED_PROMPT_FILENAMES: Tuple[str, ...] = (

@@ -2,6 +2,7 @@
 
 from .aistudio_auto_organize_script import build_auto_organize_js
 from .aistudio_auto_split_script import build_auto_split_js
+from .aistudio_config_infer_script import build_config_infer_js
 from .aistudio_handoff_script import build_patch_handoff_js
 from .aistudio_monitor_autorun_script import build_monitor_autorun_js
 from .aistudio_monitor_binding_script import build_monitor_binding_js
@@ -22,6 +23,7 @@ def build_monitor_core_js(
     tab_ui_js = build_tab_binding_ui_js() if binding_transport_snippet else ""
     auto_split_js = build_auto_split_js() if binding_transport_snippet else ""
     auto_organize_js = build_auto_organize_js() if binding_transport_snippet else ""
+    config_infer_js = build_config_infer_js() if binding_transport_snippet else ""
     autorun_js = build_monitor_autorun_js()
     lifecycle_js = build_monitor_lifecycle_js()
     binding_js = build_monitor_binding_js()
@@ -126,6 +128,8 @@ def build_monitor_core_js(
         "    autoSplitCurrentIndex: 0,\n"
         "    autoSplitTotalCount: 0,\n"
         "    autoSplitCurrentFile: '',\n"
+        "    configInferActive: false,\n"
+        "    configInferTargetFile: '',\n"
         "  };\n"
         "  let bindingUi = null;\n"
         "  let summaryPromptInsertInFlight = false;\n"
@@ -277,6 +281,7 @@ def build_monitor_core_js(
         "  }\n\n"
         f"{auto_split_js}"
         f"{auto_organize_js}"
+        f"{config_infer_js}"
         f"{autorun_js}"
         f"{lifecycle_js}"
         f"{tab_ui_js}"

@@ -14,6 +14,7 @@ class HandoffKind(str, Enum):
     PATCH_REVIEW = "patch_review"
     FILE_SPLIT = "file_split"
     DIR_ORGANIZE = "dir_organize"
+    CONFIG_INFER = "config_infer"
 
 @dataclass(frozen=True)
 class TabHandoffPayload:
@@ -33,6 +34,7 @@ class TabHandoffPayload:
     source_command_notice: str = ""
     source_command_is_error: bool = False
     allow_rename: Optional[bool] = None
+    config_infer_target: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -49,4 +51,5 @@ class TabHandoffPayload:
             "source_command_notice": self.source_command_notice,
             "source_command_is_error": self.source_command_is_error,
             "allow_rename": self.allow_rename,
+            "config_infer_target": self.config_infer_target,
         }

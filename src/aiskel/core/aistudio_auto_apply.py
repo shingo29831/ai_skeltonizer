@@ -342,10 +342,18 @@ def execute_auto_check_patch_detailed(
     command_runner: Callable[[List[str]], Any],
     max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
     max_report_chars: int = DEFAULT_CHAT_ERROR_REPORT_CHARS,
+    *,
+    allow_config_write: bool = False,
+    config_target: Optional[str] = None,
 ) -> AutoApplyOutcome:
     """一時ファイル経由で非対話の aiskel a --check を実行し、検証結果を返す。"""
     with _temporary_patch_file(patch_text) as tmp_path:
-        check_argv = ["apply", "--check", "--dir", str(project_root), "--non-interactive", str(tmp_path)]
+        check_argv = ["apply", "--check", "--dir", str(project_root), "--non-interactive"]
+        if allow_config_write:
+            check_argv.append("--allow-config-write")
+            if config_target:
+                check_argv.extend(["--config-target", config_target])
+        check_argv.append(str(tmp_path))
         return _execute_patch_command_phase(
             command_runner,
             check_argv,
@@ -362,10 +370,20 @@ def execute_auto_apply_patch_detailed(
     command_runner: Callable[[List[str]], Any],
     max_error_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
     max_report_chars: int = DEFAULT_CHAT_ERROR_REPORT_CHARS,
+    *,
+    no_test: bool = False,
+    no_static_analysis: bool = False,
+    allow_config_write: bool = False,
+    config_target: Optional[str] = None,
 ) -> AutoApplyOutcome:
     """一時ファイル経由で事前検証(check)を行い、成功時のみ aiskel apply を実行する。"""
     with _temporary_patch_file(patch_text) as tmp_path:
-        check_argv = ["check", "--dir", str(project_root), "--non-interactive", str(tmp_path)]
+        check_argv = ["check", "--dir", str(project_root), "--non-interactive"]
+        if allow_config_write:
+            check_argv.append("--allow-config-write")
+            if config_target:
+                check_argv.extend(["--config-target", config_target])
+        check_argv.append(str(tmp_path))
         check_outcome = _execute_patch_command_phase(
             command_runner,
             check_argv,
@@ -378,7 +396,16 @@ def execute_auto_apply_patch_detailed(
         if check_outcome.exit_code != 0:
             return check_outcome
 
-        apply_argv = ["apply", "--dir", str(project_root), "--non-interactive", "--yes", "--no-push", str(tmp_path)]
+        apply_argv = ["apply", "--dir", str(project_root), "--non-interactive", "--yes", "--no-push"]
+        if no_test:
+            apply_argv.append("--no-test")
+        if no_static_analysis:
+            apply_argv.append("--no-static-analysis")
+        if allow_config_write:
+            apply_argv.append("--allow-config-write")
+            if config_target:
+                apply_argv.extend(["--config-target", config_target])
+        apply_argv.append(str(tmp_path))
         return _execute_patch_command_phase(
             command_runner,
             apply_argv,

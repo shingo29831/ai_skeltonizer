@@ -17,6 +17,10 @@ from .aistudio_auto_split import (
     format_bloat_targets_payload,
     validate_split_target_request,
 )
+from .aistudio_config_infer import (
+    build_config_infer_combined_text,
+    load_project_summary_for_config_infer,
+)
 from .aistudio_handoff import (
     HandoffKind,
     format_summary_prompt_text,
@@ -148,6 +152,7 @@ def handle_split_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, D
         if req_tab_id:
             bridge._handoff_manager.clear_tab_patch(req_tab_id)
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+            bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -201,6 +206,7 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             }
         bridge._handoff_manager.clear_tab_patch(req_tab_id)
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         raw_notice = payload.get("source_command_notice")
         cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
@@ -306,6 +312,7 @@ def handle_organize_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int
         if req_tab_id:
             bridge._handoff_manager.clear_tab_patch(req_tab_id)
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, allow_rename)
+            bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -372,6 +379,7 @@ def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[in
             }
         bridge._handoff_manager.clear_tab_patch(req_tab_id)
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         raw_notice = payload.get("source_command_notice")
         cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
@@ -408,4 +416,110 @@ def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[in
         "file_count": target_info["file_count"],
         "allow_rename": allow_rename,
         "message": "次ディレクトリの階層整理を新規タブへ引き継ぎます",
+    }
+
+def handle_config_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+    """aiskel同期を実行し、現在の空タブへ設定ファイル推論プロンプト・要約・config.jsonを統合して返す。"""
+    req_tab_id, tab_err = bridge._validate_optional_tab_id(payload, required=bridge._binding_manager.require_binding)
+    if tab_err is not None or req_tab_id is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+    tab_error = bridge._binding_manager.validate_execute_payload(payload)
+    if tab_error is not None:
+        return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+    with bridge._exec_lock:
+        try:
+            summary_text = load_project_summary_for_config_infer(bridge.project_root, bridge.output_dir)
+            combined_text, target_rel_path, config_exists = build_config_infer_combined_text(
+                bridge.project_root,
+                summary_text,
+                output_dir=bridge.output_dir,
+            )
+        except (OSError, ValueError, RuntimeError) as e:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                "ok": False,
+                "message": f"設定推論プロンプトの生成に失敗しました: {e}",
+            }
+        if req_tab_id:
+            bridge._handoff_manager.clear_tab_patch(req_tab_id)
+            bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+            bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, target_rel_path)
+            bridge._handoff_manager.consume_auto_tab_if_tracked(
+                req_tab_id,
+                bridge.get_patch_handoff_max_tabs(),
+            )
+        else:
+            bridge._handoff_manager.clear_tab_patch("")
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(
+        f"\n[{timestamp}] ⚙ 設定推論開始: aiskel 同期完了 -> {target_rel_path} を推論します",
+        flush=True,
+    )
+    return int(HTTPStatus.OK), {
+        "ok": True,
+        "target_file": target_rel_path,
+        "config_exists": config_exists,
+        "combined_text": combined_text,
+    }
+
+def handle_config_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+    """aiskel同期を実行し、設定ファイル推論タスクを新しいチャットタブへ引き継ぐレコードを作成する。"""
+    req_tab_id, tab_err = bridge._validate_optional_tab_id(payload, required=bridge._binding_manager.require_binding)
+    if tab_err is not None or req_tab_id is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+    tab_error = bridge._binding_manager.validate_execute_payload(payload)
+    if tab_error is not None:
+        return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+    new_chat_url = str(payload.get("new_chat_url") or DEFAULT_NEW_CHAT_URL).strip()
+    parsed_url = urlsplit(new_chat_url)
+    if parsed_url.scheme.lower() != "https" or (parsed_url.hostname or "").lower() != "aistudio.google.com":
+        new_chat_url = DEFAULT_NEW_CHAT_URL
+
+    with bridge._exec_lock:
+        try:
+            summary_text = load_project_summary_for_config_infer(bridge.project_root, bridge.output_dir)
+            combined_text, target_rel_path, config_exists = build_config_infer_combined_text(
+                bridge.project_root,
+                summary_text,
+                output_dir=bridge.output_dir,
+            )
+        except (OSError, ValueError, RuntimeError) as e:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                "ok": False,
+                "message": f"設定推論プロンプトの生成に失敗しました: {e}",
+            }
+        bridge._handoff_manager.clear_tab_patch(req_tab_id)
+        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
+        max_tabs = bridge.get_patch_handoff_max_tabs()
+        handoff = bridge._handoff_manager.create(
+            source_tab_id="",
+            new_chat_url=new_chat_url,
+            response_text="",
+            summary_text=summary_text,
+            remaining_auto_tabs=max_tabs,
+            handoff_kind=HandoffKind.CONFIG_INFER,
+            target_file=target_rel_path,
+            raw_combined_text=combined_text,
+            config_infer_target=target_rel_path,
+        )
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(
+        f"\n[{timestamp}] ⚙ 設定推論引き継ぎ: aiskel 同期完了 -> {target_rel_path} を新規タブで推論します (自動新タブ上限: {max_tabs})",
+        flush=True,
+    )
+    return int(HTTPStatus.OK), {
+        "ok": True,
+        "skipped": False,
+        "remaining_auto_tabs": max_tabs,
+        "handoff_id": handoff.handoff_id,
+        "new_chat_url": handoff.new_chat_url,
+        "target_file": target_rel_path,
+        "config_exists": config_exists,
+        "message": "設定ファイル推論を新規タブへ引き継ぎます",
     }

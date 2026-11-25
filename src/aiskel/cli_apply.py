@@ -66,6 +66,8 @@ def handle_apply_command(
     is_revert = getattr(parsed_args, "revert", False) or parsed_args.command in ("revert", "r")
     is_check = getattr(parsed_args, "check", False) or parsed_args.command in ("check", "chk", "verify")
     is_dry_run = getattr(parsed_args, "dry_run", False)
+    allow_config_write = bool(getattr(parsed_args, "allow_config_write", False))
+    raw_config_target = getattr(parsed_args, "config_target", None)
     test_option = None if is_check else (getattr(parsed_args, "test", None) or getattr(parsed_args, "exec_cmd", None))
     project_root: Path = parsed_args.dir.resolve()
     if not is_check and test_option is None and not getattr(parsed_args, "no_test", False):
@@ -136,10 +138,26 @@ def handle_apply_command(
     last_fail = 0
     iteration = 0
 
+    config_allowed_paths = None
+    if allow_config_write:
+        from .core.aistudio_config_infer import resolve_target_config_file
+
+        config_target_path, _ = resolve_target_config_file(project_root)
+        if isinstance(raw_config_target, str) and raw_config_target.strip():
+            try:
+                candidate_target = (project_root / raw_config_target.strip()).resolve()
+                if candidate_target.is_relative_to(project_root) and candidate_target.name == "config.json":
+                    config_target_path = candidate_target
+            except (OSError, ValueError):
+                pass
+        config_allowed_paths = [config_target_path]
+
     while True:
         iteration += 1
         # テストモックとの互換性を保つためcheckモード時のみshow_diffを明示抑止する
         apply_kwargs = {"show_diff": False} if (is_check and not is_dry_run) else {}
+        if config_allowed_paths is not None:
+            apply_kwargs["allowed_write_paths"] = config_allowed_paths
         patch_result = apply_patch(
             session.current_patch,
             project_root,

@@ -47,6 +47,10 @@ def execute_bridge_action(bridge: Any, action: str, payload: Dict[str, object]) 
         return bridge.handle_organize_prompt_payload(payload)
     if action == "organize_handoff":
         return bridge.handle_organize_handoff_payload(payload)
+    if action == "config_prompt":
+        return bridge.handle_config_prompt_payload(payload)
+    if action == "config_handoff":
+        return bridge.handle_config_handoff_payload(payload)
     if action == "run_command":
         return bridge.handle_run_command_payload(payload)
     return bridge.handle_execute_payload(payload)

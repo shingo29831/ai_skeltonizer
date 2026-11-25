@@ -8,6 +8,7 @@ from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs
 from .aistudio_auto_apply import AutoApplyOutcome, execute_auto_check_patch_detailed
 from .aistudio_auto_organize import validate_patch_against_rename_policy
 from .aistudio_bridge_types import MAX_ERROR_DETAIL_CHARS, MAX_PATCH_HANDOFF_MAX_TABS
+from .aistudio_config_infer import resolve_target_config_file, validate_config_infer_patch
 from .aistudio_handoff import (
     has_applicable_patch_in_text,
     has_handoff_stop_signal_in_text,
@@ -73,6 +74,29 @@ def _resolve_organize_allow_rename(bridge: Any, payload: Dict[str, object], req_
         return True, tracked
     return is_organize_mode, None
 
+def _resolve_config_infer_target(bridge: Any, payload: Dict[str, object], req_tab_id: str) -> Optional[str]:
+    # クライアントが設定推論モードを明示停止した場合はサーバー側の残留記録も解除する
+    if payload.get("config_infer_mode") is False:
+        if req_tab_id:
+            bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
+        return None
+    tracked = bridge._handoff_manager.get_tab_config_infer_target(req_tab_id)
+    if tracked:
+        return tracked
+    if payload.get("config_infer_mode") is True:
+        raw_target = payload.get("config_infer_target")
+        if isinstance(raw_target, str) and raw_target.strip():
+            resolved_root = bridge.project_root.resolve()
+            try:
+                candidate = (resolved_root / raw_target.strip()).resolve()
+                if candidate.is_relative_to(resolved_root) and candidate.name == "config.json":
+                    return candidate.relative_to(resolved_root).as_posix()
+            except (OSError, ValueError):
+                pass
+        _, default_rel = resolve_target_config_file(bridge.project_root, bridge.output_dir)
+        return default_rel
+    return None
+
 def run_terminal_auto_apply(
     bridge: Any,
     *,
@@ -85,6 +109,7 @@ def run_terminal_auto_apply(
     success_message: str,
     log_banner: str,
     allow_rename: Optional[bool] = None,
+    config_infer_target: Optional[str] = None,
 ) -> Tuple[int, Dict[str, object]]:
     """最終フェーズ到達時のクリップボード保存およびaiskel a自動適用を実行する。"""
     copied_to_clipboard = False
@@ -97,17 +122,30 @@ def run_terminal_auto_apply(
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"\n[{timestamp}] {log_banner}", flush=True)
     policy_violation = (
-        validate_patch_against_rename_policy(target_patch, bridge.project_root, allow_rename=False)
-        if allow_rename is False
-        else None
+        validate_config_infer_patch(target_patch, bridge.project_root, target_rel_path=config_infer_target)
+        if config_infer_target
+        else (
+            validate_patch_against_rename_policy(target_patch, bridge.project_root, allow_rename=False)
+            if allow_rename is False
+            else None
+        )
     )
     if policy_violation is not None:
         apply_exit_code = 1
         apply_message, apply_error_report = policy_violation
-        apply_phase = "organize_policy"
+        apply_phase = "config_policy" if config_infer_target else "organize_policy"
         apply_test_failed = False
     elif hasattr(bridge, "_execute_auto_apply_detailed"):
-        outcome = bridge._execute_auto_apply_detailed(target_patch)
+        if config_infer_target:
+            outcome = bridge._execute_auto_apply_detailed(
+                target_patch,
+                no_test=True,
+                no_static_analysis=True,
+                allow_config_write=True,
+                config_target=config_infer_target,
+            )
+        else:
+            outcome = bridge._execute_auto_apply_detailed(target_patch)
         apply_exit_code = outcome.exit_code
         apply_message = outcome.message
         apply_phase = outcome.phase
@@ -122,6 +160,7 @@ def run_terminal_auto_apply(
     if applied:
         bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
     return int(HTTPStatus.OK), {
         "ok": True,
         "skipped": True,
@@ -188,6 +227,9 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         is_organize_mode, allow_rename = _resolve_organize_allow_rename(bridge, payload, req_tab_id)
         if is_organize_mode and allow_rename is not None and req_tab_id:
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, allow_rename)
+        config_infer_target = _resolve_config_infer_target(bridge, payload, req_tab_id)
+        if config_infer_target and req_tab_id:
+            bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, config_infer_target)
 
         max_tabs = bridge.get_patch_handoff_max_tabs()
         remaining_before = bridge._handoff_manager.get_remaining_auto_tabs(req_tab_id, default_limit=max_tabs)
@@ -196,6 +238,9 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 bridge._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
             target_patch = response_text if has_patch else bridge._handoff_manager.get_last_detected_patch(req_tab_id)
             if not target_patch:
+                if req_tab_id:
+                    bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+                    bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
                 if dedup_key:
                     bridge._recent_keys.append(dedup_key)
                 timestamp = datetime.now().strftime("%H:%M:%S")
@@ -230,6 +275,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 success_message="完了合図を検知したため最後に検知した置換コードを aiskel a で適用しました",
                 log_banner=f"✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 最後に検知した置換コードを aiskel a で実行します",
                 allow_rename=allow_rename,
+                config_infer_target=config_infer_target,
             )
             if dedup_key:
                 bridge._recent_keys.append(dedup_key)
@@ -253,6 +299,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 success_message="新規タブ自動作成の回数制限に達したため最後に検知した置換コードを aiskel a で適用しました",
                 log_banner="📋 パッチ出力(<<<< ==== >>>>)を検知（新規タブ自動作成の回数制限到達） -> 最後に検知した置換コードを aiskel a で実行します",
                 allow_rename=allow_rename,
+                config_infer_target=config_infer_target,
             )
             body["self_stop_ignored"] = ignored_self_stop
             if dedup_key:
@@ -263,7 +310,15 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         if hasattr(bridge, "_execute_auto_check"):
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
-            check_outcome = bridge._execute_auto_check(response_text)
+            check_outcome = (
+                bridge._execute_auto_check(
+                    response_text,
+                    allow_config_write=True,
+                    config_target=config_infer_target,
+                )
+                if config_infer_target
+                else bridge._execute_auto_check(response_text)
+            )
         elif getattr(bridge, "command_runner", None) is not None:
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
@@ -272,6 +327,8 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 patch_text=response_text,
                 command_runner=bridge.command_runner,
                 max_error_chars=MAX_ERROR_DETAIL_CHARS,
+                allow_config_write=bool(config_infer_target),
+                config_target=config_infer_target,
             )
 
         check_attempted = check_outcome is not None
@@ -283,9 +340,13 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             check_error_report = check_outcome.error_report or check_outcome.message
 
         policy_violation = (
-            validate_patch_against_rename_policy(response_text, bridge.project_root, allow_rename=False)
-            if allow_rename is False
-            else None
+            validate_config_infer_patch(response_text, bridge.project_root, target_rel_path=config_infer_target)
+            if config_infer_target
+            else (
+                validate_patch_against_rename_policy(response_text, bridge.project_root, allow_rename=False)
+                if allow_rename is False
+                else None
+            )
         )
         if policy_violation is not None:
             policy_short, policy_report = policy_violation
@@ -312,7 +373,15 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         bridge._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
         next_remaining = remaining_before - 1
         review_prompt = load_prompt_for_pattern(bridge.project_root, PromptPattern.PATCH_REVIEW)
-        if is_organize_mode and allow_rename is not None:
+        if config_infer_target:
+            config_note = (
+                f"=== 設定ファイル推論モード補足 ({config_infer_target}) ===\n"
+                f"現在は `{config_infer_target}` のみを更新する設定推論モードです。"
+                "有効なJSON構文であること、プロジェクトに実在しない架空のテスト/静的解析コマンドを設定していないこと、"
+                "および他ファイルへの変更が含まれていないことを必ず確認してください。"
+            )
+            review_prompt = f"{review_prompt}\n\n{config_note}"
+        elif is_organize_mode and allow_rename is not None:
             policy_note = (
                 "=== 階層整理モード補足（ファイル名変更許可）===\n"
                 "現在はファイル名変更許可の階層整理モードです。移動・リネームに伴うimport更新漏れがないか確認してください。"
@@ -332,6 +401,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             source_command_notice=check_message if (check_attempted or policy_violation is not None) else "",
             source_command_is_error=(check_attempted or policy_violation is not None) and (not check_passed),
             allow_rename=allow_rename,
+            config_infer_target=config_infer_target,
         )
         bridge._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, next_remaining)
         if dedup_key:

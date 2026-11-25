@@ -245,3 +245,31 @@ def build_dir_organize_prompt(
             "{{BASE_RULES}}": base_rules,
         },
     )
+
+def build_config_infer_prompt(
+    default_prompt: str,
+    target_rel_path: str = "ai_meta/config.json",
+    *,
+    config_exists: bool = True,
+    project_root: Optional[Path] = None,
+) -> str:
+    """プロジェクトに最適な ai_meta/config.json を推論・更新するための専用プロンプトを組み立てる。"""
+    builtin_sections = _load_builtin_sections()
+    project_sections = _load_project_sections(project_root)
+    config_template = project_sections.get("config_infer") or builtin_sections["config_infer"]
+
+    status_label = (
+        "既存ファイルを更新"
+        if config_exists
+        else "未存在のため新規作成"
+    )
+    stripped = (default_prompt or "").strip()
+    base_rules = stripped if stripped else builtin_sections["default"]
+    return _render_template(
+        config_template,
+        {
+            "{{CONFIG_REL_PATH}}": target_rel_path,
+            "{{CONFIG_STATUS_LABEL}}": status_label,
+            "{{BASE_RULES}}": base_rules,
+        },
+    )

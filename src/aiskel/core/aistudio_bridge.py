@@ -35,6 +35,8 @@ from .aistudio_bridge_handoff import (
 from .aistudio_bridge_prompts import (
     get_prompt_response,
     handle_bloat_targets,
+    handle_config_handoff,
+    handle_config_prompt,
     handle_organize_handoff,
     handle_organize_prompt,
     handle_organize_targets,
@@ -247,6 +249,14 @@ class AiskelBridgeServer:
         """次の階層整理対象ディレクトリを新しいチャットタブへ最新要約とともに引き継ぐレコードを作成する。"""
         return handle_organize_handoff(self, payload)
 
+    def handle_config_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """aiskel同期を実行し、現在の空タブへ設定ファイル推論プロンプト・要約・config.jsonを統合して返す。"""
+        return handle_config_prompt(self, payload)
+
+    def handle_config_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """aiskel同期を実行し、設定ファイル推論タスクを新しいチャットタブへ引き継ぐレコードを作成する。"""
+        return handle_config_handoff(self, payload)
+
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
         return self._enrich_binding_info(self._binding_manager.get_info())
@@ -326,12 +336,20 @@ class AiskelBridgeServer:
     def _validate_optional_tab_id(self, payload: Dict[str, object], required: bool = False) -> Tuple[Optional[str], Optional[str]]:
         return validate_optional_tab_id(self._binding_manager, payload, required=required)
 
-    def _execute_auto_check(self, patch_text: str) -> AutoApplyOutcome:
+    def _execute_auto_check(
+        self,
+        patch_text: str,
+        *,
+        allow_config_write: bool = False,
+        config_target: Optional[str] = None,
+    ) -> AutoApplyOutcome:
         return execute_auto_check_patch_detailed(
             project_root=self.project_root,
             patch_text=patch_text,
             command_runner=self.command_runner,
             max_error_chars=MAX_ERROR_DETAIL_CHARS,
+            allow_config_write=allow_config_write,
+            config_target=config_target,
         )
 
     def _execute_auto_apply(self, patch_text: str) -> Tuple[int, str]:
@@ -342,7 +360,15 @@ class AiskelBridgeServer:
             max_error_chars=MAX_ERROR_DETAIL_CHARS,
         )
 
-    def _execute_auto_apply_detailed(self, patch_text: str) -> AutoApplyOutcome:
+    def _execute_auto_apply_detailed(
+        self,
+        patch_text: str,
+        *,
+        no_test: bool = False,
+        no_static_analysis: bool = False,
+        allow_config_write: bool = False,
+        config_target: Optional[str] = None,
+    ) -> AutoApplyOutcome:
         # テストモック等で _execute_auto_apply や execute_auto_apply_patch が差し替えられている場合は互換性を維持
         if (
             getattr(self._execute_auto_apply, "__func__", None) is not AiskelBridgeServer._execute_auto_apply
@@ -355,6 +381,10 @@ class AiskelBridgeServer:
             patch_text=patch_text,
             command_runner=self.command_runner,
             max_error_chars=MAX_ERROR_DETAIL_CHARS,
+            no_test=no_test,
+            no_static_analysis=no_static_analysis,
+            allow_config_write=allow_config_write,
+            config_target=config_target,
         )
 
     def _run_terminal_auto_apply(
@@ -369,6 +399,7 @@ class AiskelBridgeServer:
         success_message: str,
         log_banner: str,
         allow_rename: Optional[bool] = None,
+        config_infer_target: Optional[str] = None,
     ) -> Tuple[int, Dict[str, object]]:
         return _run_terminal_auto_apply_impl(
             self,
@@ -381,6 +412,7 @@ class AiskelBridgeServer:
             success_message=success_message,
             log_banner=log_banner,
             allow_rename=allow_rename,
+            config_infer_target=config_infer_target,
         )
 
     def handle_handoff_create(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
@@ -430,6 +462,12 @@ class AiskelBridgeServer:
 
     def _dispatch_organize_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="organize_handoff")
+
+    def _dispatch_config_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="config_prompt")
+
+    def _dispatch_config_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="config_handoff")
 
     def _dispatch_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="run_command")

@@ -158,6 +158,8 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
     apply_parser.add_argument("--no-bloat", action="store_true", help="置換適用後のファイル肥大化自動チェックをスキップします")
     apply_parser.add_argument("--non-interactive", action="store_true", help="対話確認や継続待機プロンプトを表示せず非対話で実行します")
+    apply_parser.add_argument("--allow-config-write", action="store_true", help=argparse.SUPPRESS)
+    apply_parser.add_argument("--config-target", type=str, default=None, help=argparse.SUPPRESS)
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
     revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス")
@@ -177,6 +179,8 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     check_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に検証を実行します")
     check_parser.add_argument("--revert", action="store_true", help="リバート処理が成功するか検証します")
     check_parser.add_argument("--non-interactive", action="store_true", help="対話確認を表示せず非対話で実行します")
+    check_parser.add_argument("--allow-config-write", action="store_true", help=argparse.SUPPRESS)
+    check_parser.add_argument("--config-target", type=str, default=None, help=argparse.SUPPRESS)
 
     commit_parser = subparsers.add_parser("commit", aliases=["cm", "ci"], help="前回 aiskel apply でコミットしなかった変更を、保持されたコミットメッセージで後からコミットします")
     commit_parser.add_argument("-m", "--message", type=str, default=None, help="保持されたメッセージを上書きするコミットメッセージ")
