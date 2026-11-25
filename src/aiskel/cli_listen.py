@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-from .core.aistudio_bridge import run_bridge_server
+from .core.aistudio_bridge import MAX_PATCH_HANDOFF_MAX_TABS, run_bridge_server
 from .core.aistudio_extension import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
@@ -84,6 +84,18 @@ def handle_listen_command(
         print("⚠ --no-focus または --no-paste 指定時は --auto-run を無効化します。", file=sys.stderr)
         auto_run = False
 
+    patch_handoff_max_tabs = getattr(parsed_args, "patch_handoff_max_tabs", None)
+    if patch_handoff_max_tabs is not None and (
+        isinstance(patch_handoff_max_tabs, bool)
+        or not isinstance(patch_handoff_max_tabs, int)
+        or not (0 <= patch_handoff_max_tabs <= MAX_PATCH_HANDOFF_MAX_TABS)
+    ):
+        print(
+            f"エラー: --max-auto-tabs は 0〜{MAX_PATCH_HANDOFF_MAX_TABS} の整数で指定してください: {patch_handoff_max_tabs}",
+            file=sys.stderr,
+        )
+        return 1
+
     project_root: Path = parsed_args.project_dir.resolve()
     return run_bridge_server(
         project_root=project_root,
@@ -96,4 +108,5 @@ def handle_listen_command(
         no_paste=no_paste,
         auto_run=auto_run,
         structured_command_runner=on_run_structured,
+        patch_handoff_max_tabs=patch_handoff_max_tabs,
     )

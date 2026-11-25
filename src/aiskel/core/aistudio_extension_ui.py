@@ -2,6 +2,17 @@
 import json
 from typing import Optional
 
+from .aistudio_extension_popup import build_popup_html, build_popup_js
+
+__all__ = [
+    "build_extension_binding_transport_js",
+    "build_extension_handoff_transport_js",
+    "build_userscript_binding_transport_js",
+    "build_userscript_handoff_transport_js",
+    "build_popup_html",
+    "build_popup_js",
+]
+
 
 def build_extension_binding_transport_js() -> str:
     """Chrome/Edge/Firefox拡張機能Content Script用のタブ紐づけ通信アダプタを生成する。"""
@@ -93,6 +104,25 @@ def build_extension_binding_transport_js() -> str:
         "    getSummaryPrompt: (pattern, cb) => {\n"
         "      try {\n"
         "        chrome.runtime.sendMessage({ type: 'AISKEL_GET_SUMMARY_PROMPT', pattern: pattern || 'default' }, (res) => {\n"
+        "          if (chrome.runtime.lastError || !res) {\n"
+        "            cb({ reachable: false, connected: false, status: 0, data: {}, error: '' });\n"
+        "            return;\n"
+        "          }\n"
+        "          cb({\n"
+        "            reachable: Boolean(res.reachable),\n"
+        "            connected: Boolean(res.connected),\n"
+        "            status: res.status || 0,\n"
+        "            data: res.data || {},\n"
+        "            error: res.error || '',\n"
+        "          });\n"
+        "        });\n"
+        "      } catch (_err) {\n"
+        "        cb({ reachable: false, connected: false, status: 0, data: {}, error: '' });\n"
+        "      }\n"
+        "    },\n"
+        "    setPatchHandoffMaxTabs: (maxTabs, cb) => {\n"
+        "      try {\n"
+        "        chrome.runtime.sendMessage({ type: 'AISKEL_SET_HANDOFF_MAX_TABS', patch_handoff_max_tabs: maxTabs }, (res) => {\n"
         "          if (chrome.runtime.lastError || !res) {\n"
         "            cb({ reachable: false, connected: false, status: 0, data: {}, error: '' });\n"
         "            return;\n"
@@ -362,6 +392,14 @@ def build_userscript_binding_transport_js(
         "    },\n"
         "    getPrompt: (pattern, cb) => gmRequest('/api/prompt?pattern=' + encodeURIComponent(pattern || 'default'), 'GET', null, cb),\n"
         "    getSummaryPrompt: (pattern, cb) => gmRequest('/api/summary_prompt', 'POST', { pattern: pattern || 'default' }, cb),\n"
+        "    setPatchHandoffMaxTabs: (maxTabs, cb) => {\n"
+        "      gmRequest('/api/handoff/max_tabs', 'POST', { patch_handoff_max_tabs: maxTabs, tab_id: getUserscriptTabId() }, (res) => {\n"
+        "        if (userscriptSyncChannel && res && res.connected && res.data) {\n"
+        "          try { userscriptSyncChannel.postMessage({ type: 'binding_updated', binding: res.data }); } catch (_e) {}\n"
+        "        }\n"
+        "        cb(res);\n"
+        "      });\n"
+        "    },\n"
         "    onUpdate: (handler) => { userscriptUpdateHandler = handler; },\n"
         "  };\n"
     )

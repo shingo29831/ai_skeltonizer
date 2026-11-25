@@ -57,6 +57,7 @@ MAX_DEDUP_HISTORY = 100
 EXECUTION_WAIT_TIMEOUT_SEC = 120.0
 SOCKET_TIMEOUT_SEC = 10.0
 MAX_ERROR_DETAIL_CHARS = 240
+MAX_PATCH_HANDOFF_MAX_TABS = 999
 ALLOWED_EXTENSION_SCHEMES = frozenset({"chrome-extension", "moz-extension", "edge-extension"})
 
 
@@ -201,7 +202,7 @@ class AiskelBridgeServer:
         self.project_root = project_root.resolve()
         self.output_dir = output_dir.resolve() if output_dir is not None else None
         self._explicit_patch_handoff_max_tabs: Optional[int] = (
-            max(0, int(patch_handoff_max_tabs))
+            max(0, min(MAX_PATCH_HANDOFF_MAX_TABS, int(patch_handoff_max_tabs)))
             if patch_handoff_max_tabs is not None and not isinstance(patch_handoff_max_tabs, bool)
             else None
         )
@@ -262,8 +263,41 @@ class AiskelBridgeServer:
             return self._explicit_patch_handoff_max_tabs
         configured = load_patch_handoff_max_tabs_from_meta(self.project_root, self.output_dir)
         if configured is not None:
-            return configured
+            return max(0, min(MAX_PATCH_HANDOFF_MAX_TABS, configured))
         return DEFAULT_PATCH_HANDOFF_MAX_TABS
+
+    def set_patch_handoff_max_tabs(self, max_tabs: int) -> Dict[str, object]:
+        """パッチ検知時の新規タブ自動作成上限回数を動的に更新し、最新の紐づけ情報を返す。"""
+        normalized = max(0, min(MAX_PATCH_HANDOFF_MAX_TABS, int(max_tabs)))
+        with self._exec_lock:
+            old_limit = self.get_patch_handoff_max_tabs()
+            self._explicit_patch_handoff_max_tabs = normalized
+            self._handoff_manager.adjust_auto_tab_limits(old_limit, normalized)
+            return self.get_binding_info()
+
+    def handle_handoff_max_tabs_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """ブラウザUI等からの新規タブ自動作成上限回数の変更リクエストを検証・反映する。"""
+        raw_val = payload.get("patch_handoff_max_tabs")
+        if raw_val is None and "max_tabs" in payload:
+            raw_val = payload.get("max_tabs")
+        if isinstance(raw_val, bool) or not isinstance(raw_val, int):
+            return int(HTTPStatus.BAD_REQUEST), {
+                "ok": False,
+                "message": "patch_handoff_max_tabs を整数で指定してください",
+            }
+        if raw_val < 0 or raw_val > MAX_PATCH_HANDOFF_MAX_TABS:
+            return int(HTTPStatus.BAD_REQUEST), {
+                "ok": False,
+                "message": f"patch_handoff_max_tabs は 0〜{MAX_PATCH_HANDOFF_MAX_TABS} の範囲で指定してください",
+            }
+        _, tab_err = self._validate_optional_tab_id(payload, required=False)
+        if tab_err is not None:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err}
+
+        info = self.set_patch_handoff_max_tabs(raw_val)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[{timestamp}] ⚙ パッチ自動新タブ上限を変更しました: {raw_val} 回", flush=True)
+        return int(HTTPStatus.OK), info
 
     def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
         enriched = dict(info)
@@ -1041,6 +1075,7 @@ def run_bridge_server(
         if not loopback:
             print("   ⚠ ループバック以外のインターフェースで待受中です。認証トークンが有効化されています。")
         print(f"   - 対象プロジェクト       : {project_root}")
+        print(f"   - パッチ自動新タブ上限   : {server.get_patch_handoff_max_tabs()} 回")
         print(f"   - Chrome/Edge拡張フォルダ: {exported_dir}")
         print(f"   - Firefox拡張マニフェスト: {firefox_dir / 'manifest.json'}")
         if extension_updated or firefox_updated:

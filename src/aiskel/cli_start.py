@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from .cli_parser import process_comma_separated_args
 from .cli_sync import resolve_output_dir, run_sync
 from .config import SkeletonConfig, load_bundle_filename_from_meta
-from .core.aistudio_bridge import run_bridge_server
+from .core.aistudio_bridge import MAX_PATCH_HANDOFF_MAX_TABS, run_bridge_server
 from .core.aistudio_extension import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 from .core.browser_focus import focus_browser_target, focus_default_browser, focus_default_browser_target
 from .core.browser_paste import PasteErrorKind, PasteResult, paste_to_browser_prompt
@@ -296,6 +296,18 @@ def handle_start_command(
         print(f"エラー: ポート番号は 0〜65535 の範囲で指定してください: {port}", file=sys.stderr)
         return 1
 
+    patch_handoff_max_tabs = getattr(parsed_args, "patch_handoff_max_tabs", None)
+    if patch_handoff_max_tabs is not None and (
+        isinstance(patch_handoff_max_tabs, bool)
+        or not isinstance(patch_handoff_max_tabs, int)
+        or not (0 <= patch_handoff_max_tabs <= MAX_PATCH_HANDOFF_MAX_TABS)
+    ):
+        print(
+            f"エラー: --max-auto-tabs は 0〜{MAX_PATCH_HANDOFF_MAX_TABS} の整数で指定してください: {patch_handoff_max_tabs}",
+            file=sys.stderr,
+        )
+        return 1
+
     no_browser = getattr(parsed_args, "no_browser", False)
     target_url = ""
     if not no_browser:
@@ -519,4 +531,5 @@ def handle_start_command(
         structured_command_runner=on_run_structured,
         on_ready=_on_bridge_ready if not no_browser else None,
         output_dir=output_dir,
+        patch_handoff_max_tabs=patch_handoff_max_tabs,
     )

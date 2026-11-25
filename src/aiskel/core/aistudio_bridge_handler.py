@@ -170,6 +170,7 @@ def build_bridge_request_handler_class(
                                 "unbind": "/api/unbind",
                                 "prompt": "/api/prompt",
                                 "summary_prompt": "/api/summary_prompt",
+                                "handoff_max_tabs": "/api/handoff/max_tabs",
                                 "execute": "/api/execute",
                             },
                         },
@@ -323,6 +324,20 @@ def build_bridge_request_handler_class(
                     return
                 status_code, body = bridge.handle_handoff_ack(payload)
                 self._send_json(status_code, body)
+                return
+
+            if req_path == "/api/handoff/max_tabs":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge.handle_handoff_max_tabs_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 自動新タブ上限更新中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 
             if req_path == "/api/trigger_run":

@@ -239,15 +239,21 @@ class PatchHandoffManager:
         self._lock = threading.Lock()
         self._entries: Dict[str, TabHandoffPayload] = {}
         self._auto_tab_remaining: "OrderedDict[str, int]" = OrderedDict()
+        # 上限を下げた後に再度上げた際の使用済み回数超過を維持するため符号付き残高を保持
+        self._auto_tab_balance: Dict[str, int] = {}
+        self._entry_balances: Dict[str, int] = {}
 
-    def _record_auto_tab_locked(self, tab_id: str, remaining: int) -> None:
+    def _record_auto_tab_locked(self, tab_id: str, remaining: int, balance: Optional[int] = None) -> None:
         clean_tid = (tab_id or "").strip()
         if not clean_tid:
             return
-        self._auto_tab_remaining[clean_tid] = max(0, int(remaining))
+        clamped = max(0, int(remaining))
+        self._auto_tab_remaining[clean_tid] = clamped
+        self._auto_tab_balance[clean_tid] = int(balance) if balance is not None else clamped
         self._auto_tab_remaining.move_to_end(clean_tid)
         while len(self._auto_tab_remaining) > MAX_TRACKED_AUTO_TABS:
-            self._auto_tab_remaining.popitem(last=False)
+            evicted_tid, _ = self._auto_tab_remaining.popitem(last=False)
+            self._auto_tab_balance.pop(evicted_tid, None)
 
     def get_remaining_auto_tabs(self, tab_id: str, default_limit: int) -> int:
         """対象タブの残り自動生成回数を返す（自動生成タブ以外は設定値を返す）。"""
@@ -274,6 +280,34 @@ class PatchHandoffManager:
             if clean_tid in self._auto_tab_remaining:
                 self._record_auto_tab_locked(clean_tid, next_remaining)
 
+    def adjust_auto_tab_limits(self, old_limit: int, new_limit: int) -> None:
+        """上限設定変更の差分を追跡中タブおよび待機中引き継ぎの残り回数へ整合反映する。"""
+        delta = int(new_limit) - int(old_limit)
+        if delta == 0:
+            return
+        with self._lock:
+            for tid in list(self._auto_tab_remaining.keys()):
+                prev_balance = self._auto_tab_balance.get(tid, self._auto_tab_remaining[tid])
+                next_balance = prev_balance + delta
+                self._auto_tab_balance[tid] = next_balance
+                self._auto_tab_remaining[tid] = max(0, next_balance)
+            for hid, item in list(self._entries.items()):
+                prev_entry_balance = self._entry_balances.get(hid, item.remaining_auto_tabs)
+                next_entry_balance = prev_entry_balance + delta
+                self._entry_balances[hid] = next_entry_balance
+                next_rem = max(0, next_entry_balance)
+                self._entries[hid] = TabHandoffPayload(
+                    handoff_id=item.handoff_id,
+                    source_tab_id=item.source_tab_id,
+                    new_chat_url=item.new_chat_url,
+                    response_text=item.response_text,
+                    summary_text=item.summary_text,
+                    combined_text=item.combined_text,
+                    created_at=item.created_at,
+                    assigned_tab_id=item.assigned_tab_id,
+                    remaining_auto_tabs=next_rem,
+                )
+
     def _prune_expired_locked(self, now: float) -> None:
         expired = [
             hid for hid, item in self._entries.items()
@@ -281,9 +315,11 @@ class PatchHandoffManager:
         ]
         for hid in expired:
             self._entries.pop(hid, None)
+            self._entry_balances.pop(hid, None)
         while len(self._entries) > MAX_PENDING_HANDOFFS:
             oldest_id = next(iter(self._entries))
             self._entries.pop(oldest_id, None)
+            self._entry_balances.pop(oldest_id, None)
 
     def create(
         self,
@@ -311,6 +347,7 @@ class PatchHandoffManager:
         with self._lock:
             self._prune_expired_locked(now)
             self._entries[handoff_id] = item
+            self._entry_balances[handoff_id] = item.remaining_auto_tabs
         return item
 
     def assign_tab(self, handoff_id: str, tab_id: str) -> Optional[TabHandoffPayload]:
@@ -338,7 +375,11 @@ class PatchHandoffManager:
             )
             self._entries[clean_hid] = updated
             # unbind・リロード後も自動生成タブの残り回数を保持するため記録
-            self._record_auto_tab_locked(clean_tid, existing.remaining_auto_tabs)
+            self._record_auto_tab_locked(
+                clean_tid,
+                existing.remaining_auto_tabs,
+                balance=self._entry_balances.get(clean_hid, existing.remaining_auto_tabs),
+            )
             return updated
 
     def claim(self, handoff_id: str = "", tab_id: str = "") -> Optional[TabHandoffPayload]:
@@ -368,12 +409,20 @@ class PatchHandoffManager:
                     )
                     self._entries[clean_hid] = item
                 if clean_tid:
-                    self._record_auto_tab_locked(clean_tid, item.remaining_auto_tabs)
+                    self._record_auto_tab_locked(
+                        clean_tid,
+                        item.remaining_auto_tabs,
+                        balance=self._entry_balances.get(clean_hid, item.remaining_auto_tabs),
+                    )
                 return item
             if clean_tid:
                 for item in reversed(list(self._entries.values())):
                     if item.assigned_tab_id == clean_tid:
-                        self._record_auto_tab_locked(clean_tid, item.remaining_auto_tabs)
+                        self._record_auto_tab_locked(
+                            clean_tid,
+                            item.remaining_auto_tabs,
+                            balance=self._entry_balances.get(item.handoff_id, item.remaining_auto_tabs),
+                        )
                         return item
         return None
 
@@ -386,6 +435,7 @@ class PatchHandoffManager:
                 item = self._entries[clean_hid]
                 if not item.assigned_tab_id or not clean_tid or item.assigned_tab_id == clean_tid:
                     self._entries.pop(clean_hid, None)
+                    self._entry_balances.pop(clean_hid, None)
                     return True
                 return False
             if clean_tid:
@@ -393,6 +443,7 @@ class PatchHandoffManager:
                 for hid in list(self._entries.keys()):
                     if self._entries[hid].assigned_tab_id == clean_tid:
                         self._entries.pop(hid, None)
+                        self._entry_balances.pop(hid, None)
                         removed = True
                 return removed
         return False
