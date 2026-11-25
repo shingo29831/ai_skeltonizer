@@ -1,6 +1,6 @@
 """Module: @role: macOSブラウザの既存空チャットタブ探索・選択・復元を実行するJXAスクリプトを組み立てる。"""
-from .browser_tab_reuse_macos_title import build_macos_tab_title_helpers_js
-from .browser_tab_reuse_macos_webarea import build_macos_webarea_helpers_js
+from .macos_title import build_macos_tab_title_helpers_js
+from .macos_webarea import build_macos_webarea_helpers_js
 
 _JXA_HEADER = r"""function run(argv) {
     var payload = JSON.parse(argv[0]);

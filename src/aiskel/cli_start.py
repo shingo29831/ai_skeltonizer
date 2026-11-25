@@ -44,7 +44,7 @@ from .core.aistudio_extension import DEFAULT_BRIDGE_HOST, DEFAULT_BRIDGE_PORT
 from .core.browser_focus import focus_browser_target, focus_default_browser, focus_default_browser_target
 from .core.browser_paste import PasteResult, paste_to_browser_prompt
 from .core.browser_tab_reuse import focus_existing_empty_chat_tab
-from .core.browser_tab_reuse_types import is_new_chat_target_url
+from .core.browser_tab_reuse.types import is_new_chat_target_url
 from .core.clipboard import set_clipboard_text
 from .core.token_counter import estimate_tokens
 

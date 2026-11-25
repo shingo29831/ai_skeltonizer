@@ -3,8 +3,8 @@ import json
 import subprocess
 from typing import Optional, Sequence
 
-from .browser_focus_macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
-from .browser_paste_types import (
+from ..browser_focus_macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
+from ..browser_paste_types import (
     BROWSER_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
     BROWSER_STANDALONE_PROFILE_REGEX_PATTERN,
     BROWSER_TITLE_SUFFIX_REGEX_PATTERN,
@@ -13,14 +13,14 @@ from .browser_paste_types import (
     LOGIN_TITLE_REGEX_PATTERN,
     SERVICE_TITLE_KEYWORDS_REGEX_PATTERN,
 )
-from .browser_tab_reuse_types import (
+from .types import (
     CHAT_TURN_ACTION_BUTTON_KEYWORDS,
     NEW_CHAT_BUTTON_NAMES,
     TAB_STATUS_SUFFIX_REGEX_PATTERN,
     get_empty_chat_service_and_phrases,
     get_empty_chat_titles_for_url,
 )
-from .browser_tab_reuse_macos_jxa import build_macos_find_and_activate_empty_tab_jxa
+from .macos_jxa import build_macos_find_and_activate_empty_tab_jxa
 
 _MACOS_FIND_AND_ACTIVATE_EMPTY_TAB_JXA = build_macos_find_and_activate_empty_tab_jxa()
 
