@@ -175,6 +175,7 @@ def build_bridge_request_handler_class(
                                 "split_prompt": "/api/split/prompt",
                                 "split_handoff": "/api/split/handoff",
                                 "execute": "/api/execute",
+                                "run_command": "/api/run_command",
                             },
                         },
                     )
@@ -214,6 +215,7 @@ def build_bridge_request_handler_class(
                 {
                     "ok": True,
                     "project_root": str(bridge.project_root),
+                    "command_cwd": str(getattr(bridge, "command_cwd", bridge.project_root)),
                     "project_name": bridge.project_root.name,
                     "binding": binding_info,
                 },
@@ -410,6 +412,21 @@ def build_bridge_request_handler_class(
                     self._send_json(status_code, body)
                 except Exception as e:
                     print(f"✖ 自動分割引き継ぎ処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/run_command":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False)
+                if payload is None:
+                    return
+                try:
+                    # 外部サブプロセス待機でメインスレッドキューを占有しないようHTTPスレッドで直接実行
+                    status_code, body = bridge.handle_run_command_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ コマンド実行中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
                     self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 

@@ -1,10 +1,11 @@
 """Module: @role: コーディング開始時のスケルトン同期・バンドルコピー・既存空タブ再利用・AI Studio監視ブリッジ起動を統合制御する。"""
 import argparse
+import inspect
 import sys
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from .cli_parser import process_comma_separated_args
 from .cli_start_browser import (
@@ -106,6 +107,7 @@ def handle_start_command(
     on_run_structured: Optional[Callable[..., Any]] = None,
 ) -> int:
     """プロジェクト同期・バンドルコピー・既存空タブ再利用・AI Studio監視ブリッジ待機を一括開始する。"""
+    launch_cwd: Path = Path.cwd().resolve()
     project_root: Path = parsed_args.project_dir.resolve()
     valid, output_dir, port, patch_handoff_max_tabs, no_browser, target_url = validate_start_arguments(
         parsed_args,
@@ -225,18 +227,28 @@ def handle_start_command(
     if printed_prior:
         print()
 
-    return run_bridge_server(
-        project_root=project_root,
-        on_run_command=on_run_command,
-        host=getattr(parsed_args, "host", DEFAULT_BRIDGE_HOST),
-        port=port,
-        explicit_token=getattr(parsed_args, "token", None),
-        extension_dir_arg=getattr(parsed_args, "extension_dir", None),
-        no_focus=bridge_no_focus,
-        no_paste=bridge_no_paste,
-        auto_run=auto_run,
-        structured_command_runner=on_run_structured,
-        on_ready=_on_bridge_ready if not no_browser else None,
-        output_dir=output_dir,
-        patch_handoff_max_tabs=patch_handoff_max_tabs,
-    )
+    bridge_kwargs: Dict[str, Any] = {
+        "project_root": project_root,
+        "on_run_command": on_run_command,
+        "host": getattr(parsed_args, "host", DEFAULT_BRIDGE_HOST),
+        "port": port,
+        "explicit_token": getattr(parsed_args, "token", None),
+        "extension_dir_arg": getattr(parsed_args, "extension_dir", None),
+        "no_focus": bridge_no_focus,
+        "no_paste": bridge_no_paste,
+        "auto_run": auto_run,
+        "structured_command_runner": on_run_structured,
+        "on_ready": _on_bridge_ready if not no_browser else None,
+        "output_dir": output_dir,
+        "patch_handoff_max_tabs": patch_handoff_max_tabs,
+    }
+    try:
+        sig = inspect.signature(run_bridge_server)
+        if "command_cwd" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            bridge_kwargs["command_cwd"] = launch_cwd
+    except (TypeError, ValueError):
+        pass
+
+    return run_bridge_server(**bridge_kwargs)

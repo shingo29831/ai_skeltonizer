@@ -1,8 +1,9 @@
 """Module: @role: Google AI Studio推論監視ブリッジ(aiskel listen)の起動、拡張機能出力およびライフサイクル管理を担当する。"""
 import argparse
+import inspect
 import sys
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .core.aistudio_bridge import MAX_PATCH_HANDOFF_MAX_TABS, run_bridge_server
 from .core.aistudio_extension import (
@@ -22,6 +23,7 @@ def handle_listen_command(
     on_run_structured: Optional[Callable[..., Any]] = None,
 ) -> int:
     """ローカルブリッジサーバーを起動し、Google AI Studio推論完了時のaiskel c自動実行を待機する。"""
+    launch_cwd: Path = Path.cwd().resolve()
     host: str = getattr(parsed_args, "host", DEFAULT_BRIDGE_HOST)
     port: int = getattr(parsed_args, "port", DEFAULT_BRIDGE_PORT)
     explicit_token = getattr(parsed_args, "token", None)
@@ -97,16 +99,26 @@ def handle_listen_command(
         return 1
 
     project_root: Path = parsed_args.project_dir.resolve()
-    return run_bridge_server(
-        project_root=project_root,
-        on_run_command=on_run_command,
-        host=host,
-        port=port,
-        explicit_token=explicit_token,
-        extension_dir_arg=ext_dir_arg,
-        no_focus=no_focus,
-        no_paste=no_paste,
-        auto_run=auto_run,
-        structured_command_runner=on_run_structured,
-        patch_handoff_max_tabs=patch_handoff_max_tabs,
-    )
+    bridge_kwargs: Dict[str, Any] = {
+        "project_root": project_root,
+        "on_run_command": on_run_command,
+        "host": host,
+        "port": port,
+        "explicit_token": explicit_token,
+        "extension_dir_arg": ext_dir_arg,
+        "no_focus": no_focus,
+        "no_paste": no_paste,
+        "auto_run": auto_run,
+        "structured_command_runner": on_run_structured,
+        "patch_handoff_max_tabs": patch_handoff_max_tabs,
+    }
+    try:
+        sig = inspect.signature(run_bridge_server)
+        if "command_cwd" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            bridge_kwargs["command_cwd"] = launch_cwd
+    except (TypeError, ValueError):
+        pass
+
+    return run_bridge_server(**bridge_kwargs)

@@ -41,6 +41,8 @@ def execute_bridge_action(bridge: Any, action: str, payload: Dict[str, object]) 
         return bridge.handle_split_prompt_payload(payload)
     if action == "split_handoff":
         return bridge.handle_split_handoff_payload(payload)
+    if action == "run_command":
+        return bridge.handle_run_command_payload(payload)
     return bridge.handle_execute_payload(payload)
 
 def dispatch_bridge_job(bridge: Any, payload: Dict[str, object], action: str) -> Tuple[int, Any]:
@@ -172,6 +174,9 @@ def serve_bridge_forever(
 def shutdown_bridge_server(bridge: Any) -> None:
     """起動中サーバーを安全に停止・クローズする。"""
     bridge._stop_event.set()
+    terminate_procs = getattr(bridge, "_terminate_active_shell_procs", None)
+    if callable(terminate_procs):
+        terminate_procs()
     with bridge._queue_state_lock:
         bridge._shutting_down = True
         bridge._use_main_thread_queue = False

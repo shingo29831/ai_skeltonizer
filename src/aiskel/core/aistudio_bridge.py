@@ -5,11 +5,13 @@ import threading
 from collections import deque
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 from .aistudio_auto_apply import execute_auto_apply_patch
 from .aistudio_bridge_execution import (
+    _terminate_process_tree,
     handle_execute_command,
+    handle_run_shell_command,
     handle_trigger_run,
     normalize_incoming_commands,
 )
@@ -84,15 +86,6 @@ __all__ = [
     "run_bridge_server",
 ]
 
-class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
-    address_family = socket.AF_INET6
-
-def _is_ipv6_literal(host: str) -> bool:
-    try:
-        return isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
-    except ValueError:
-        return False
-
 
 class AiskelBridgeServer:
     """Google AI Studio監視クライアントからの通知を受理し、メインスレッドでaiskel cを自動実行するHTTPサーバー。"""
@@ -113,8 +106,10 @@ class AiskelBridgeServer:
         prompt_run_trigger: Optional[Callable[..., Any]] = None,
         output_dir: Optional[Path] = None,
         patch_handoff_max_tabs: Optional[int] = None,
+        command_cwd: Optional[Path] = None,
     ) -> None:
         self.project_root = project_root.resolve()
+        self.command_cwd = command_cwd.resolve() if command_cwd is not None else self.project_root
         self.output_dir = output_dir.resolve() if output_dir is not None else None
         self._explicit_patch_handoff_max_tabs: Optional[int] = (
             max(0, min(MAX_PATCH_HANDOFF_MAX_TABS, int(patch_handoff_max_tabs)))
@@ -140,6 +135,9 @@ class AiskelBridgeServer:
         self._binding_manager = TabBindingManager(self.project_root, require_binding=require_tab_binding)
         self._handoff_manager = PatchHandoffManager()
         self._exec_lock = threading.Lock()
+        self._shell_cmd_lock = threading.Lock()
+        self._active_shell_procs_lock = threading.Lock()
+        self._active_shell_procs: Set[Any] = set()
         self._queue_state_lock = threading.Lock()
         self._recent_keys: Deque[str] = deque(maxlen=MAX_DEDUP_HISTORY)
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -193,6 +191,7 @@ class AiskelBridgeServer:
             is_auto_tab and self._auto_run_mode != "disabled"
         )
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
+        enriched["command_cwd"] = str(self.command_cwd)
         max_tabs = self.get_patch_handoff_max_tabs()
         enriched["patch_handoff_max_tabs"] = max_tabs
         if bound_tab_id:
@@ -280,6 +279,24 @@ class AiskelBridgeServer:
         """JS側のクリック送信が反応しない場合のOSネイティブCtrl+Enter送信フォールバックを実行する。"""
         return handle_trigger_run(self, payload)
 
+    def handle_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """拡張機能等からの任意コマンドをaiskel起動パス上で排他実行する。"""
+        return handle_run_shell_command(self, payload)
+
+    def _register_shell_proc(self, proc: Any) -> None:
+        with self._active_shell_procs_lock:
+            self._active_shell_procs.add(proc)
+
+    def _unregister_shell_proc(self, proc: Any) -> None:
+        with self._active_shell_procs_lock:
+            self._active_shell_procs.discard(proc)
+
+    def _terminate_active_shell_procs(self) -> None:
+        with self._active_shell_procs_lock:
+            procs = list(self._active_shell_procs)
+        for proc in procs:
+            _terminate_process_tree(proc)
+
     @staticmethod
     def _make_job_result(action: str, ok: bool, message: str, exit_code: int = 1) -> Any:
         return make_bridge_job_result(action, ok, message, exit_code=exit_code)
@@ -358,6 +375,9 @@ class AiskelBridgeServer:
     def _dispatch_split_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="split_handoff")
 
+    def _dispatch_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="run_command")
+
     def _drain_pending_jobs_locked(self) -> None:
         drain_pending_jobs_locked(self)
 
@@ -402,6 +422,7 @@ def run_bridge_server(
     structured_command_runner: Optional[Callable[..., Any]] = None,
     output_dir: Optional[Path] = None,
     patch_handoff_max_tabs: Optional[int] = None,
+    command_cwd: Optional[Path] = None,
 ) -> int:
     """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
     if not project_root.exists() or not project_root.is_dir():
@@ -425,6 +446,7 @@ def run_bridge_server(
         structured_command_runner=structured_command_runner,
         output_dir=output_dir,
         patch_handoff_max_tabs=patch_handoff_max_tabs,
+        command_cwd=command_cwd,
     )
 
     return run_bridge_lifecycle(

@@ -15,7 +15,7 @@ MAX_PATCH_HANDOFF_MAX_TABS = 999
 ALLOWED_EXTENSION_SCHEMES = frozenset({"chrome-extension", "moz-extension", "edge-extension"})
 
 _DICT_RESPONSE_ACTIONS = frozenset(
-    {"handoff", "trigger_run", "summary_prompt", "bloat_targets", "split_prompt", "split_handoff"}
+    {"handoff", "trigger_run", "summary_prompt", "bloat_targets", "split_prompt", "split_handoff", "run_command"}
 )
 
 @dataclass(frozen=True)
