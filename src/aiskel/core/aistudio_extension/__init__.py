@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from .aistudio_extension_background import build_background_js
-from .aistudio_extension_network import (
+from .background import build_background_js
+from .network import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
     EXTENSION_DIR_NAME,
@@ -19,8 +19,8 @@ from .aistudio_extension_network import (
     normalize_bind_host,
     resolve_client_host,
 )
-from .aistudio_extension_scripts import build_content_js, build_userscript_js
-from .aistudio_extension_ui import (
+from .scripts import build_content_js, build_userscript_js
+from .ui import (
     build_extension_binding_transport_js,
     build_extension_handoff_transport_js,
     build_popup_html,
@@ -28,7 +28,7 @@ from .aistudio_extension_ui import (
     build_userscript_binding_transport_js,
     build_userscript_handoff_transport_js,
 )
-from .aistudio_monitor_script import build_monitor_core_js
+from ..aistudio_monitor_script import build_monitor_core_js
 
 FIREFOX_GECKO_ID_PREFIX = "aiskel-aistudio-bridge"
 FIREFOX_MIN_VERSION = "109.0"

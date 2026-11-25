@@ -2,11 +2,11 @@
 import json
 from typing import Optional
 
-from .aistudio_extension_background_handlers import (
+from .background_handlers import (
     build_background_binding_handlers_js,
     build_background_handoff_handlers_js,
 )
-from .aistudio_extension_network import (
+from .network import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
     format_host_for_url,
