@@ -406,8 +406,19 @@ def handle_start_command(
         if stop_event.is_set():
             return
 
-        reused_existing_tab = False
-        focus_result: Optional[Union[bool, int, str]] = None
+        if not should_focus_on_start:
+            if paste_requested_on_start and supported_paste_url and (no_focus or no_start_focus):
+                print("ℹ --no-focus / --no-start-focus が指定されているため、起動時の既存空チャットタブ検出・自動貼り付けをスキップしました。", flush=True)
+            return
+
+        if not supported_paste_url:
+            if paste_requested_on_start:
+                print(f"ℹ 自動貼り付け対応外のURLのため起動時の既存空チャットタブ検出・自動貼り付けをスキップしました: {target_url}", flush=True)
+            return
+
+        if not is_new_chat_url:
+            print(f"ℹ 新規チャットURLではないため起動時の既存空チャットタブ検出・自動貼り付けをスキップしました: {target_url}", flush=True)
+            return
 
         # ブラウザ起動・フォーカスがモック注入されていない実制御時のみ実ブラウザの空タブ再利用を行う
         can_probe_real_empty_tab = (
@@ -417,33 +428,40 @@ def handle_start_command(
             and not has_custom_focus_monkeypatch
             and is_interactive_environment()
         )
-        if (
-            should_focus_on_start
-            and supported_paste_url
-            and is_new_chat_url
-            and (existing_tab_focuser is not None or can_probe_real_empty_tab)
-        ):
-            try:
-                reused_focus = (
-                    existing_tab_focuser(target_url, allowed_title_keywords)
-                    if existing_tab_focuser is not None
-                    else focus_existing_empty_chat_tab(
-                        target_url=target_url,
-                        allowed_title_keywords=allowed_title_keywords,
-                        interactive_only=True,
-                    )
-                )
-                if stop_event.is_set():
-                    return
-                if _is_focus_success(reused_focus):
-                    reused_existing_tab = True
-                    focus_result = reused_focus
-                    print("🌐 起動済みの空チャットタブを検出し、最前面に表示しました。", flush=True)
-            except Exception as e:
-                if not stop_event.is_set():
-                    print(f"⚠ 起動済み空チャットタブの検出に失敗しました: {e}", file=sys.stderr, flush=True)
+        if existing_tab_focuser is None and not can_probe_real_empty_tab:
+            if not is_interactive_environment():
+                print("ℹ 非対話環境（非TTYまたはCI）のため起動時の既存空チャットタブ検出をスキップしました。", flush=True)
+            return
 
-        if stop_event.is_set() or not reused_existing_tab:
+        reused_existing_tab = False
+        probe_failed = False
+        focus_result: Optional[Union[bool, int, str]] = None
+        try:
+            reused_focus = (
+                existing_tab_focuser(target_url, allowed_title_keywords)
+                if existing_tab_focuser is not None
+                else focus_existing_empty_chat_tab(
+                    target_url=target_url,
+                    allowed_title_keywords=allowed_title_keywords,
+                    interactive_only=True,
+                )
+            )
+            if stop_event.is_set():
+                return
+            if _is_focus_success(reused_focus):
+                reused_existing_tab = True
+                focus_result = reused_focus
+                print("🌐 起動済みの空チャットタブを検出し、最前面に表示しました。", flush=True)
+        except Exception as e:
+            probe_failed = True
+            if not stop_event.is_set():
+                print(f"⚠ 起動済み空チャットタブの検出に失敗しました: {e}", file=sys.stderr, flush=True)
+
+        if stop_event.is_set():
+            return
+        if not reused_existing_tab:
+            if not probe_failed:
+                print("ℹ 起動済みの空チャットタブが見つからなかったため、起動時の自動貼り付けをスキップしました。", flush=True)
             return
 
         if should_paste_on_start and _is_focus_success(focus_result) and not stop_event.is_set():
@@ -453,10 +471,9 @@ def handle_start_command(
                 try:
                     # Pythonのboolはint継承のためTrueをHWNDとして渡さないよう除外する
                     target_window = None if isinstance(focus_result, bool) else focus_result
+                    refocus_fn: Callable[[], Union[bool, int, str, None]]
                     if target_window is not None and browser_focuser is None:
-                        refocus_fn: Callable[[], Union[bool, int, str, None]] = lambda: focus_browser_target(
-                            target_window, interactive_only=True
-                        )
+                        refocus_fn = lambda: focus_browser_target(target_window, interactive_only=True)
                     elif existing_tab_focuser is not None and browser_focuser is None:
                         refocus_fn = lambda: existing_tab_focuser(target_url, allowed_title_keywords)
                     elif browser_focuser is not None:
