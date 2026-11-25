@@ -125,6 +125,7 @@ def build_monitor_core_js(
         "    autoOrganizeAllowRename: false,\n"
         "    autoOrganizeCurrentFileCount: 0,\n"
         "    autoOrganizeTotalFileCount: 0,\n"
+        "    autoOrganizeBatchIndex: 0,\n"
         "    autoSplitCurrentIndex: 0,\n"
         "    autoSplitTotalCount: 0,\n"
         "    autoSplitCurrentFile: '',\n"

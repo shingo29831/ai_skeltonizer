@@ -381,14 +381,29 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 "および他ファイルへの変更が含まれていないことを必ず確認してください。"
             )
             review_prompt = f"{review_prompt}\n\n{config_note}"
-        elif is_organize_mode and allow_rename is not None:
-            policy_note = (
-                "=== 階層整理モード補足（ファイル名変更許可）===\n"
-                "現在はファイル名変更許可の階層整理モードです。移動・リネームに伴うimport更新漏れがないか確認してください。"
-                if allow_rename
-                else "=== 階層整理モード補足（ファイル名変更禁止）===\n"
-                "現在はファイル名変更不許可の階層整理モードです。ファイル名（basename）を変更せずディレクトリ移動のみになっているか必ず確認してください。"
+        elif is_organize_mode:
+            if allow_rename is True:
+                policy_title = "ファイル名変更許可・段階的整理"
+                policy_detail = (
+                    "現在は**段階的階層整理モード（ファイル名変更許可）**です。"
+                    "移動・リネームに伴うimport・参照更新漏れがないか確認してください。"
+                )
+            elif allow_rename is False:
+                policy_title = "ファイル名変更禁止・段階的整理"
+                policy_detail = (
+                    "現在は**段階的階層整理モード（ファイル名変更禁止）**です。"
+                    "ファイル名（basename）を変更せずディレクトリ移動のみになっているか必ず確認してください。"
+                )
+            else:
+                policy_title = "段階的整理"
+                policy_detail = "現在は**段階的階層整理モード**です。"
+            # レビューAIが未選択の残存ファイルまで一括移動させようとする暴走を防止
+            incremental_note = (
+                "対象ディレクトリの負荷とトークン消費を抑えるため、AIが**1つの責務グループのみを選択して少しずつ整理する段階的整理**を行っています。\n"
+                "- 対象ディレクトリ直下に未選択のファイルが多数残っていてもそれは意図通り（後続ステップで整理）であるため、未選択ファイルを勝手に追加移動させないでください。\n"
+                "- 今回選択されたファイル群の移動先の妥当性、新規サブディレクトリ直下の `__init__.py`（`@role` 記述）、およびプロジェクト全体の `import`・参照更新漏れがないかのみを厳密に検証してください。"
             )
+            policy_note = f"=== 階層整理モード補足（{policy_title}）===\n{policy_detail}\n{incremental_note}"
             review_prompt = f"{review_prompt}\n\n{policy_note}"
         handoff = bridge._handoff_manager.create(
             source_tab_id=req_tab_id,

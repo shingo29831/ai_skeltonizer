@@ -206,6 +206,7 @@ def build_dir_organize_prompt(
     dir_index: int = 1,
     total_dirs: int = 1,
     total_target_files: int = 1,
+    batch_index: int = 1,
     project_root: Optional[Path] = None,
 ) -> str:
     """過密な単一ディレクトリを責務別サブディレクトリへ階層整理するための専用プロンプトを組み立てる。"""
@@ -229,6 +230,9 @@ def build_dir_organize_prompt(
             "- 移動に伴う関連ファイルの `import`・参照パス・再エクスポートの更新は必ず同一パッチ内で行うこと。"
         )
 
+    # 移動先サブディレクトリ自体が閾値超過しないよう1バッチ上限を制限
+    group_max = max(1, min(8, max_files - 1)) if max_files > 1 else 1
+    group_min = 1 if group_max <= 2 else min(3, group_max)
     stripped = (default_prompt or "").strip()
     base_rules = stripped if stripped else builtin_sections["default"]
     return _render_template(
@@ -240,6 +244,9 @@ def build_dir_organize_prompt(
             "{{DIR_INDEX}}": str(dir_index),
             "{{TOTAL_DIRS}}": str(total_dirs),
             "{{TOTAL_TARGET_FILES}}": str(total_target_files),
+            "{{BATCH_INDEX}}": str(max(1, int(batch_index))),
+            "{{GROUP_MIN}}": str(group_min),
+            "{{GROUP_MAX}}": str(group_max),
             "{{RENAME_POLICY_TITLE}}": rename_title,
             "{{RENAME_POLICY_RULES}}": rename_rules,
             "{{BASE_RULES}}": base_rules,

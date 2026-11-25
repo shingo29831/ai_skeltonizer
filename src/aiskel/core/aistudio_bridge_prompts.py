@@ -323,7 +323,7 @@ def handle_organize_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int
     timestamp = datetime.now().strftime("%H:%M:%S")
     rename_label = "リネーム許可" if allow_rename else "リネーム禁止"
     print(
-        f"\n[{timestamp}] 📁 階層整理開始 ({target_info['dir_index']}/{target_info['total_dirs']}): "
+        f"\n[{timestamp}] 📁 階層整理開始 ({target_info['dir_index']}/{target_info['total_dirs']} · ステップ {target_info['batch_index']}): "
         f"{target_info['rel_dir']} ({target_info['file_count']} ファイル / {rename_label})",
         flush=True,
     )
@@ -331,6 +331,8 @@ def handle_organize_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int
         "ok": True,
         "target_dir": target_info["rel_dir"],
         "file_count": target_info["file_count"],
+        "max_files": target_info["max_files"],
+        "batch_index": target_info["batch_index"],
         "allow_rename": allow_rename,
         "combined_text": combined_text,
     }
@@ -402,7 +404,7 @@ def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[in
     timestamp = datetime.now().strftime("%H:%M:%S")
     rename_label = "リネーム許可" if allow_rename else "リネーム禁止"
     print(
-        f"\n[{timestamp}] 📁 階層整理引き継ぎ ({target_info['dir_index']}/{target_info['total_dirs']}): "
+        f"\n[{timestamp}] 📁 階層整理引き継ぎ ({target_info['dir_index']}/{target_info['total_dirs']} · ステップ {target_info['batch_index']}): "
         f"{target_info['rel_dir']} ({target_info['file_count']} ファイル / {rename_label}) -> 新規タブへ移行します (自動新タブ上限: {max_tabs})",
         flush=True,
     )
@@ -414,8 +416,10 @@ def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[in
         "new_chat_url": handoff.new_chat_url,
         "target_dir": target_info["rel_dir"],
         "file_count": target_info["file_count"],
+        "max_files": target_info["max_files"],
+        "batch_index": target_info["batch_index"],
         "allow_rename": allow_rename,
-        "message": "次ディレクトリの階層整理を新規タブへ引き継ぎます",
+        "message": "階層整理の次ステップを新規タブへ引き継ぎます",
     }
 
 def handle_config_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:

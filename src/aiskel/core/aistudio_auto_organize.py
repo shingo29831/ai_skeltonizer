@@ -130,7 +130,8 @@ def _collect_direct_files_in_dir(
             continue
         lines, chars = metrics
         items.append((file_path.name, lines, chars))
-    items.sort(key=lambda x: (-x[2], -x[1], x[0].lower()))
+    # 同一プレフィックスの機能グループを視認しやすくするためファイル名順で整列
+    items.sort(key=lambda x: x[0].lower())
     return items
 
 def validate_organize_target_request(
@@ -172,6 +173,7 @@ def validate_organize_target_request(
     total_dirs = _parse_positive_int(payload.get("total_dirs"), 1)
     dir_index = max(1, min(total_dirs, _parse_positive_int(payload.get("dir_index"), 1)))
     total_target_files = _parse_positive_int(payload.get("total_target_files"), max(1, len(direct_files)))
+    batch_index = _parse_positive_int(payload.get("batch_index"), 1)
     allow_rename = bool(payload.get("allow_rename"))
 
     return {
@@ -182,6 +184,7 @@ def validate_organize_target_request(
         "dir_index": dir_index,
         "total_dirs": total_dirs,
         "total_target_files": total_target_files,
+        "batch_index": batch_index,
         "allow_rename": allow_rename,
     }, None
 
@@ -210,6 +213,7 @@ def build_organize_combined_text(
         dir_index=int(target_info["dir_index"]),
         total_dirs=int(target_info["total_dirs"]),
         total_target_files=int(target_info["total_target_files"]),
+        batch_index=int(target_info.get("batch_index") or 1),
         project_root=project_root,
     )
     prompt_and_summary = format_summary_prompt_text(organize_prompt, summary_text)
