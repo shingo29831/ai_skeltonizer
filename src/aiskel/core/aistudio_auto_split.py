@@ -1,4 +1,5 @@
 """Module: @role: 自動分割モード向けの肥大化ファイル抽出・対象検証・プロンプト統合を担当する。"""
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,6 +13,7 @@ from .bloat_detector import (
     count_file_metrics,
     scan_project_files,
 )
+from .code_extractor import detect_language
 
 def _resolve_positive_threshold(value: Optional[int], default: int) -> int:
     if value is not None and not isinstance(value, bool) and value > 0:
@@ -96,14 +98,17 @@ def validate_split_target_request(
 
     rel_path = resolved_target.relative_to(resolved_root).as_posix()
     metrics = count_file_metrics(resolved_target)
-    actual_lines, actual_chars = metrics if metrics is not None else (0, 0)
 
     meta_lines, meta_chars, _ = load_bloat_config_from_meta(resolved_root, output_dir)
     default_max_lines = _resolve_positive_threshold(meta_lines, DEFAULT_BLOAT_MAX_LINES)
     default_max_chars = _resolve_positive_threshold(meta_chars, DEFAULT_BLOAT_MAX_CHARS)
 
-    lines = _parse_positive_int(payload.get("lines"), actual_lines or 1)
-    chars = _parse_positive_int(payload.get("chars"), actual_chars or 1)
+    # 先行ファイルの分割で関連ファイル行数が変動しても最新の計測値をプロンプトへ反映する
+    if metrics is not None:
+        lines, chars = metrics
+    else:
+        lines = _parse_positive_int(payload.get("lines"), 1)
+        chars = _parse_positive_int(payload.get("chars"), 1)
     max_lines = _parse_positive_int(payload.get("max_lines"), default_max_lines)
     max_chars = _parse_positive_int(payload.get("max_chars"), default_max_chars)
     total_files = _parse_positive_int(payload.get("total_files"), 1)
@@ -119,16 +124,47 @@ def validate_split_target_request(
         "total_files": total_files,
     }, None
 
+def _read_split_target_text(target_path: Path) -> str:
+    raw = target_path.read_bytes()
+    # CP932等をlatin-1で文字化けさせないようUTF-8/CP932を優先試行してから置換デコードする
+    for encoding in ("utf-8", "cp932"):
+        try:
+            return raw.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+def _build_safe_code_fence(content: str) -> str:
+    # 対象ファイル内のバッククォート列によるMarkdownコードブロック崩壊を防止
+    max_run = 0
+    for match in re.finditer(r"`+", content):
+        if len(match.group(0)) > max_run:
+            max_run = len(match.group(0))
+    return "`" * max(3, max_run + 1)
+
+def _format_split_target_code_section(project_root: Path, rel_path: str) -> str:
+    resolved_root = project_root.resolve()
+    target_path = (resolved_root / rel_path).resolve()
+    if not target_path.is_relative_to(resolved_root) or not target_path.is_file():
+        raise FileNotFoundError(f"分割対象ファイルを読み込めません: {rel_path}")
+    content = _read_split_target_text(target_path)
+    lang = detect_language(target_path)
+    fence = _build_safe_code_fence(content)
+    body = content.rstrip("\r\n")
+    code_block = f"{fence}{lang}\n{body}\n{fence}" if body else f"{fence}{lang}\n{fence}"
+    return f"=== 分割対象ファイル ({rel_path}) ===\nファイルパス: {rel_path}\n{code_block}"
+
 def build_split_combined_text(
     project_root: Path,
     target_info: Dict[str, Any],
     summary_text: str,
 ) -> str:
-    """対象ファイル1件の分割指示プロンプトと最新プロジェクト要約バンドルを統合する。"""
+    """対象ファイル1件の分割指示プロンプト・最新プロジェクト要約バンドル・対象ファイル本文を統合する。"""
+    rel_path = str(target_info["rel_path"])
     default_prompt = load_default_prompt(project_root)
     split_prompt = build_file_split_prompt(
         default_prompt=default_prompt,
-        target_rel_path=str(target_info["rel_path"]),
+        target_rel_path=rel_path,
         lines=int(target_info["lines"]),
         chars=int(target_info["chars"]),
         max_lines=int(target_info["max_lines"]),
@@ -136,4 +172,8 @@ def build_split_combined_text(
         file_index=int(target_info["file_index"]),
         total_files=int(target_info["total_files"]),
     )
-    return format_summary_prompt_text(split_prompt, summary_text)
+    prompt_and_summary = format_summary_prompt_text(split_prompt, summary_text)
+    target_code_section = _format_split_target_code_section(project_root, rel_path)
+    if prompt_and_summary and target_code_section:
+        return f"{prompt_and_summary}\n\n{target_code_section}"
+    return prompt_and_summary or target_code_section

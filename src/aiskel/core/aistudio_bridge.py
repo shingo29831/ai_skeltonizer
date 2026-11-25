@@ -431,12 +431,12 @@ class AiskelBridgeServer:
         with self._exec_lock:
             try:
                 summary_text = load_project_summary_text(self.project_root)
+                combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
             except (OSError, ValueError, RuntimeError) as e:
                 return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
                     "ok": False,
-                    "message": f"要約バンドルの取得に失敗しました: {e}",
+                    "message": f"分割プロンプトの生成に失敗しました: {e}",
                 }
-            combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
             if req_tab_id:
                 self._handoff_manager.clear_tab_patch(req_tab_id)
                 self._handoff_manager.consume_auto_tab_if_tracked(
@@ -484,12 +484,12 @@ class AiskelBridgeServer:
         with self._exec_lock:
             try:
                 summary_text = load_project_summary_text(self.project_root)
+                combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
             except (OSError, ValueError, RuntimeError) as e:
                 return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
                     "ok": False,
-                    "message": f"要約バンドルの取得に失敗しました: {e}",
+                    "message": f"分割プロンプトの生成に失敗しました: {e}",
                 }
-            combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
             self._handoff_manager.clear_tab_patch(req_tab_id)
             max_tabs = self.get_patch_handoff_max_tabs()
             handoff = self._handoff_manager.create(
@@ -884,13 +884,15 @@ class AiskelBridgeServer:
                         "apply_message": "",
                         "message": "完了合図を検知したため新規タブは作成しませんでした（適用対象の置換コードなし）",
                     }
+                # 最終適用フェーズ到達後は適用失敗リトライ時に再度レビュー新タブを開かないよう残数を確定消費
+                self._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, 0)
                 status_code, body = self._run_terminal_auto_apply(
                     req_tab_id=req_tab_id,
                     target_patch=target_patch,
                     has_patch=has_patch,
                     stop_signal_detected=True,
                     limit_reached=False,
-                    remaining_auto_tabs=remaining_before,
+                    remaining_auto_tabs=0,
                     success_message="完了合図を検知したため最後に検知した置換コードを aiskel a で適用しました",
                     log_banner=f"✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 最後に検知した置換コードを aiskel a で実行します",
                 )
