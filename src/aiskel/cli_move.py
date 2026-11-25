@@ -9,7 +9,7 @@ from .cli_commit import execute_git_commit
 from .cli_interaction import prompt_user_confirmation, rollback_modified_files
 from .cli_sync import ensure_gitignore_updated
 from .config import ensure_default_config_file, ensure_write_paths_sample_file
-from .core.patch_applier import apply_patch
+from .core.patch.applier import apply_patch
 
 
 def handle_move_command(

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 from .core.clipboard import get_clipboard_text, set_clipboard_text
-from .core.patch_parser import is_file_deletion_patch, is_file_move_patch
+from .core.patch.parser import is_file_deletion_patch, is_file_move_patch
 
 
 def has_applicable_patch_content(patch_text: str) -> bool:

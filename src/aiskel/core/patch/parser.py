@@ -6,8 +6,8 @@ from pathlib import Path
 import re
 from typing import List, Optional, Tuple
 
-from .block_patcher import FILE_HEADER_PATTERN
-from .syntax_block_editor import (
+from ..block_patcher import FILE_HEADER_PATTERN
+from ..syntax_block_editor import (
     DELETE_DIRECTIVE_PATTERN,
     DELETE_FILE_DIRECTIVE_PATTERN,
 )

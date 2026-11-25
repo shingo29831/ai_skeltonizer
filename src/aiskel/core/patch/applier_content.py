@@ -3,10 +3,10 @@
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from .block_patcher import replace_blocks_in_lines
-from .patch_applier_types import PatchApplyState
-from .patch_matcher import find_and_replace
-from .syntax_block_editor import (
+from ..block_patcher import replace_blocks_in_lines
+from .applier_types import PatchApplyState
+from .matcher import find_and_replace
+from ..syntax_block_editor import (
     BLOCK_PATTERN,
     delete_block_from_lines,
     extract_blocks,

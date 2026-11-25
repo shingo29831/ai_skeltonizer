@@ -4,21 +4,21 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from ..config import (
+from ...config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
-from ..write_path_policy_loader import (
+from ...write_path_policy_loader import (
     ALLOWED_WRITE_PATH_TXT_FILES,
     _collect_meta_dirs,
     iter_meta_config_files,
 )
-from ..write_path_policy_updater import (
+from ...write_path_policy_updater import (
     find_new_top_directories,
     update_write_policy_for_created_dirs,
 )
-from .patch_matcher import generate_diff_display
-from .patch_result import PatchResult
+from .matcher import generate_diff_display
+from .result import PatchResult
 
 
 def validate_python_syntax(

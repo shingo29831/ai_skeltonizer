@@ -43,7 +43,7 @@ from .config import (
     load_test_command_from_meta,
 )
 from .core.clipboard import get_clipboard_text, set_clipboard_text
-from .core.patch_applier import apply_patch
+from .core.patch.applier import apply_patch
 from .core.test_runner import run_static_analysis, run_validation_test
 
 __all__ = [

@@ -3,21 +3,21 @@
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
 
-from ..config import (
+from ...config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
-from .block_patcher import (
+from ..block_patcher import (
     apply_block_replacement,
     replace_blocks_in_lines,
 )
-from .patch_applier_content import (
+from .applier_content import (
     apply_block_deletion_chunk,
     apply_empty_search_chunk,
     apply_new_file_chunk,
     apply_search_replace_chunk,
 )
-from .patch_applier_file_ops import (
+from .applier_file_ops import (
     apply_block_file_delete,
     apply_file_move_chunk,
     apply_standalone_file_delete,
@@ -28,10 +28,10 @@ from .patch_applier_file_ops import (
     is_within_project,
     safe_read_text,
 )
-from .patch_applier_types import PatchApplyState
-from .patch_committer import commit_patch_transaction
-from .patch_matcher import find_and_replace
-from .patch_parser import (
+from .applier_types import PatchApplyState
+from .committer import commit_patch_transaction
+from .matcher import find_and_replace
+from .parser import (
     DELIMITER_END,
     DELIMITER_MID,
     DELIMITER_START,
@@ -41,8 +41,8 @@ from .patch_parser import (
     is_file_move_patch,
     parse_patch_chunks,
 )
-from .patch_result import PatchResult
-from .syntax_block_editor import (
+from .result import PatchResult
+from ..syntax_block_editor import (
     clean_excessive_blank_lines,
     delete_block_from_lines,
     extract_blocks,

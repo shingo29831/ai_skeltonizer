@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from .patch_applier import _find_block_range, _extract_blocks
+from .patch.applier import _find_block_range, _extract_blocks
 from .token_counter import estimate_tokens
 
 DEFAULT_MAX_CHARS = 1_000_000

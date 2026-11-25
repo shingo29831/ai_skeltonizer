@@ -9,15 +9,15 @@ from typing import Dict, Optional, Tuple
 from ..write_path_policy import WritePathMode, normalize_write_path_mode
 from .aistudio_handoff.text import format_summary_prompt_text, load_project_summary_text
 from .aistudio_prompts import build_config_infer_prompt, load_default_prompt
-from .patch_applier_content import (
+from .patch.applier_content import (
     apply_empty_search_chunk,
     apply_new_file_chunk,
     apply_search_replace_chunk,
 )
-from .patch_applier_file_ops import ensure_file_buffer_loaded
-from .patch_applier_types import PatchApplyState
-from .patch_matcher import find_and_replace
-from .patch_parser import has_patch_delimiters, parse_patch_chunks
+from .patch.applier_file_ops import ensure_file_buffer_loaded
+from .patch.applier_types import PatchApplyState
+from .patch.matcher import find_and_replace
+from .patch.parser import has_patch_delimiters, parse_patch_chunks
 
 DEFAULT_CONFIG_REL_PATH = "ai_meta/config.json"
 ALT_CONFIG_REL_PATH = ".ai_meta/config.json"

@@ -3,10 +3,10 @@
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-from ..config import WritePathPolicy
-from ..write_path_policy_updater import find_new_top_directories
-from .patch_applier_types import PatchApplyState
-from .patch_parser import PatchChunk
+from ...config import WritePathPolicy
+from ...write_path_policy_updater import find_new_top_directories
+from .applier_types import PatchApplyState
+from .parser import PatchChunk
 
 def safe_read_text(file_path: Path) -> Tuple[Optional[str], Optional[str]]:
     """バイナリや非UTF-8ファイルを安全に判別してテキストを読み込む。"""

@@ -7,8 +7,8 @@ from ..config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
-from .patch_committer import commit_patch_transaction
-from .patch_result import PatchResult
+from .patch.committer import commit_patch_transaction
+from .patch.result import PatchResult
 from .syntax_block_editor import (
     extract_blocks,
     find_block_range,

@@ -9,7 +9,7 @@ from .aistudio_auto_split import _parse_positive_int, _resolve_positive_threshol
 from .aistudio_handoff import format_summary_prompt_text
 from .aistudio_prompts import build_dir_organize_prompt, load_default_prompt
 from .bloat_detector import count_file_metrics, is_path_excluded
-from .patch_parser import parse_patch_chunks
+from .patch.parser import parse_patch_chunks
 from .scanner import get_target_files
 
 _META_DIR_NAMES = {"ai_meta", ".ai_meta"}

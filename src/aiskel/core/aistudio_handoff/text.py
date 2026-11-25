@@ -5,7 +5,7 @@ from typing import List, Optional, Set, Tuple
 
 from ...config import SkeletonConfig, load_bundle_filename_from_meta
 from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
-from ..patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
+from ..patch.parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
 
 _DEFAULT_BUNDLE_FILENAMES = (
     "architecture_bundle.txt",

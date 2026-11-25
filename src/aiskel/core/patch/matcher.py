@@ -3,7 +3,7 @@ import difflib
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from .syntax_block_editor import clean_excessive_blank_lines
+from ..syntax_block_editor import clean_excessive_blank_lines
 
 def find_and_replace(
     content: str,

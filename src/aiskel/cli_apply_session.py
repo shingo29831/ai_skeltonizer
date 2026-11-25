@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, Union
 from .cli_apply_io import load_patch_text, print_failed_details
 from .cli_interaction import extract_commit_message, prompt_user_command
 from .cli_parser import parse_arguments
-from .core.patch_applier import apply_patch
+from .core.patch.applier import apply_patch
 
 _COMMANDS_WITH_DIR_OPT = {"apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t", "copy", "c", "cp"}
 _BLOAT_VALUE_OPTS = {"-l", "--max-lines", "-c", "-C", "--max-chars", "-n", "--top", "--limit", "-e", "--exclude"}
