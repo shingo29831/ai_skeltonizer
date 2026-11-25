@@ -147,6 +147,7 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     # CLI入力コスト削減のためサブコマンド専用の短縮フラグ -f を提供
     apply_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     apply_parser.add_argument("--revert", action="store_true", help="パッチの変更を元に戻すリバート処理を行います")
+    apply_parser.add_argument("--check", "--verify", action="store_true", help="実際にファイルを変更せず、置換が成功するか事前検証します")
     apply_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビュー(Unified Diff)を表示します")
     apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時はai_metaの設定または自動検出)")
     apply_parser.add_argument("-e", "-r", "--exec", "--run", dest="exec_cmd", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にai_meta内の設定ファイルまたは指定されたコマンドを実行します (省略時は設定ファイルから取得)")
@@ -166,6 +167,15 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     revert_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に置換処理を実行します")
     revert_parser.add_argument("-n", "--dry-run", action="store_true", help="実際にファイルを変更せず、差分プレビューを表示します")
     revert_parser.add_argument("--no-sync", action="store_true", help="リバート成功後のスケルトン・バンドル自動同期をスキップします")
+
+    check_parser = subparsers.add_parser("check", aliases=["chk", "verify"], help="実際にファイルを変更せず、AIパッチの置換が成功するか事前検証します")
+    check_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス (省略時はクリップボードから読み込みます)")
+    check_parser.add_argument("-p", "--paste", action="store_true", help="クリップボードを無視して、手動でのテキストペーストを強制します")
+    check_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    check_parser.add_argument("-t", "--target", type=Path, default=None, help="置換対象のファイルを強制的に指定します")
+    check_parser.add_argument("-f", "--force-replace", action="store_true", help="置換済みのコードでも強制的に検証を実行します")
+    check_parser.add_argument("--revert", action="store_true", help="リバート処理が成功するか検証します")
+    check_parser.add_argument("--non-interactive", action="store_true", help="対話確認を表示せず非対話で実行します")
 
     commit_parser = subparsers.add_parser("commit", aliases=["cm", "ci"], help="前回 aiskel apply でコミットしなかった変更を、保持されたコミットメッセージで後からコミットします")
     commit_parser.add_argument("-m", "--message", type=str, default=None, help="保持されたメッセージを上書きするコミットメッセージ")

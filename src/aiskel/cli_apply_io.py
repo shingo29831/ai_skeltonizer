@@ -19,8 +19,9 @@ def load_patch_text(
     allow_stdin_fallback: bool = True,
     clipboard_reader: Optional[Callable[[], str]] = None,
     non_interactive: bool = False,
+    is_check: bool = False,
 ) -> Optional[str]:
-    action_name = "リバート" if is_revert else "適用"
+    action_name = ("リバート検証" if is_revert else "検証") if is_check else ("リバート" if is_revert else "適用")
     if parsed_args.patch_file:
         patch_file: Path = parsed_args.patch_file.resolve()
         if not patch_file.exists():
@@ -123,8 +124,9 @@ def report_patch_result(
     is_dry_run: bool,
     clipboard_writer: Optional[Callable[[str], None]] = None,
     copy_failure_report: bool = True,
+    is_check: bool = False,
 ) -> None:
-    action_name = "リバート" if is_revert else "適用"
+    action_name = ("リバート検証" if is_revert else "検証") if is_check else ("リバート" if is_revert else "適用")
     mode_prefix = "[DRY-RUN] " if is_dry_run else ""
     print(f"\n=== {mode_prefix}{action_name}結果 ===")
     iter_note = f" (累計: {total_success} 箇所)" if iteration > 1 else ""

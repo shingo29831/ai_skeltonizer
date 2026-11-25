@@ -227,7 +227,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 clipboard_writer=set_clipboard_text,
             )
 
-        if cmd in ("apply", "a", "revert", "r"):
+        if cmd in ("apply", "a", "revert", "r", "check", "chk", "verify"):
             return handle_apply_command(parsed_args, on_auto_sync=_trigger_auto_sync, on_run_command=main)
 
         if cmd in ("commit", "cm", "ci"):

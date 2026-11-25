@@ -14,8 +14,8 @@ from .core.code_extractor import extract_and_format_snippets
 
 PASTE_RETRY_DELAYS: Tuple[float, ...] = (0.15, 0.3, 0.5)
 KNOWN_NON_COPY_SUBCOMMANDS = frozenset({
-    "apply", "a", "revert", "r", "commit", "cm", "ci", "test", "t",
-    "bloat", "b", "size", "docs", "d", "watch", "w", "listen", "l", "start", "s",
+    "apply", "a", "revert", "r", "check", "chk", "verify", "commit", "cm", "ci",
+    "test", "t", "bloat", "b", "size", "docs", "d", "watch", "w", "listen", "l", "start", "s",
 })
 
 class TeeStderr:
