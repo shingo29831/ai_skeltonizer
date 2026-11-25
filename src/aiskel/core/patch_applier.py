@@ -1,36 +1,48 @@
 """Module: @role: インメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入・コードおよびファイル削除を実行する。"""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Dict, Optional, Sequence, Union
 
 from ..config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
 from .block_patcher import (
-    FILE_HEADER_PATTERN,
     apply_block_replacement,
     replace_blocks_in_lines,
 )
+from .patch_applier_content import (
+    apply_block_deletion_chunk,
+    apply_empty_search_chunk,
+    apply_new_file_chunk,
+    apply_search_replace_chunk,
+)
+from .patch_applier_file_ops import (
+    apply_block_file_delete,
+    apply_file_move_chunk,
+    apply_standalone_file_delete,
+    check_move_destination_policy,
+    check_path_with_dynamic_dirs,
+    ensure_file_buffer_loaded,
+    is_under_extra_allowed_dirs,
+    is_within_project,
+    safe_read_text,
+)
+from .patch_applier_types import PatchApplyState
 from .patch_committer import commit_patch_transaction
-from .patch_matcher import find_and_replace, generate_diff_display
+from .patch_matcher import find_and_replace
 from .patch_parser import (
     DELIMITER_END,
     DELIMITER_MID,
     DELIMITER_START,
-    PatchChunk,
     check_and_warn_delimiter,
     has_patch_delimiters,
     is_file_deletion_patch,
     is_file_move_patch,
     parse_patch_chunks,
 )
-from ..write_path_policy_updater import find_new_top_directories
 from .patch_result import PatchResult
 from .syntax_block_editor import (
-    BLOCK_PATTERN,
-    DELETE_DIRECTIVE_PATTERN,
-    DELETE_FILE_DIRECTIVE_PATTERN,
     clean_excessive_blank_lines,
     delete_block_from_lines,
     extract_blocks,
@@ -61,73 +73,11 @@ _DELIMITER_START = DELIMITER_START
 _DELIMITER_MID = DELIMITER_MID
 _DELIMITER_END = DELIMITER_END
 
-
-def _safe_read_text(file_path: Path) -> Tuple[Optional[str], Optional[str]]:
-    # なぜ必要か: バイナリや非UTF-8ファイルを安全に判別しクラッシュを防ぐため
-    try:
-        raw_bytes = file_path.read_bytes()
-    except OSError as e:
-        return None, f"ファイル読み込みエラー: {e}"
-    if b"\x00" in raw_bytes[:8192]:
-        return None, "バイナリファイルのためテキストパッチを適用できません"
-    for enc in ("utf-8", "utf-8-sig", "cp932", "latin-1"):
-        try:
-            return raw_bytes.decode(enc), None
-        except UnicodeDecodeError:
-            continue
-    return None, "テキストとしてデコードできません"
-
-
-def _is_within_project(target_path: Path, project_root: Path) -> bool:
-    try:
-        target_path.resolve().relative_to(project_root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _is_under_extra_allowed_dirs(target_path: Path, extra_dirs: Set[Path]) -> bool:
-    resolved = target_path.resolve()
-    return any(resolved == d or d in resolved.parents for d in extra_dirs)
-
-
-def _check_path_with_dynamic_dirs(
-    write_policy: WritePathPolicy,
-    target_path: Path,
-    extra_allowed_dirs: Set[Path],
-) -> Tuple[bool, str]:
-    denied, deny_reason = write_policy.is_explicitly_denied(target_path)
-    if denied:
-        return False, deny_reason
-    allowed, reject_reason = write_policy.check_path(target_path)
-    if allowed:
-        return True, ""
-    if _is_under_extra_allowed_dirs(target_path, extra_allowed_dirs):
-        return True, ""
-    return False, reject_reason
-
-
-def _check_move_destination_policy(
-    write_policy: WritePathPolicy,
-    dst_path: Path,
-    project_root: Path,
-    extra_allowed_dirs: Set[Path],
-) -> Tuple[bool, str, List[Path]]:
-    if not write_policy.is_active:
-        return True, "", []
-    denied, deny_reason = write_policy.is_explicitly_denied(dst_path)
-    if denied:
-        return False, deny_reason, []
-    allowed, reject_reason = _check_path_with_dynamic_dirs(write_policy, dst_path, extra_allowed_dirs)
-    if allowed:
-        return True, "", []
-    # なぜ必要か: ホワイトリスト適用下でも許可元ファイルの新規ディレクトリ作成を伴う移動整理を成立させるため
-    if _is_within_project(dst_path, project_root) and not dst_path.parent.exists():
-        new_tops = find_new_top_directories([dst_path], project_root)
-        if new_tops and not any(write_policy.is_explicitly_denied(top)[0] for top in new_tops):
-            return True, "", new_tops
-    return False, reject_reason, []
-
+_safe_read_text = safe_read_text
+_is_within_project = is_within_project
+_is_under_extra_allowed_dirs = is_under_extra_allowed_dirs
+_check_path_with_dynamic_dirs = check_path_with_dynamic_dirs
+_check_move_destination_policy = check_move_destination_policy
 
 def apply_patch(
     patch_text: str,
@@ -172,20 +122,10 @@ def apply_patch(
     chunks, parse_failed_details, parse_fail_count = parse_patch_chunks(
         patch_text, project_root, default_target_file=target_file, revert=revert
     )
-
-    success_count = 0
-    fail_count = parse_fail_count
-    skipped_count = 0
-    failed_details: List[str] = list(parse_failed_details)
-    modified_files: Set[Path] = set()
-    files_to_delete: Set[Path] = set()
-
-    file_contents: Dict[Path, Optional[str]] = {}
-    original_contents: Dict[Path, Optional[str]] = {}
-    binary_contents: Dict[Path, bytes] = {}
-    move_sources: Dict[Path, Path] = {}
-    extra_allowed_dirs: Set[Path] = set()
-    case_rename_targets: Set[Path] = set()
+    state = PatchApplyState(
+        fail_count=parse_fail_count,
+        failed_details=list(parse_failed_details),
+    )
 
     for chunk in chunks:
         current_file = chunk.file_path
@@ -198,443 +138,115 @@ def apply_patch(
             disp_path = current_file
 
         if chunk.is_file_move and chunk.move_target_path is not None:
-            src_path = current_file
-            dst_path = chunk.move_target_path
-            if dst_path.exists() and dst_path.is_dir():
-                dst_path = (dst_path / src_path.name)
-
-            try:
-                dst_disp = dst_path.relative_to(project_root)
-            except ValueError:
-                dst_disp = dst_path
-
-            is_case_only_rename = (
-                src_path == dst_path
-                and src_path.exists()
-                and src_path.is_file()
-                and src_path.resolve().name != dst_path.name
+            apply_file_move_chunk(
+                state,
+                chunk,
+                project_root,
+                write_policy,
+                disp_path,
+                force_replace=force_replace,
+                revert=revert,
             )
-            if src_path == dst_path and not is_case_only_rename:
-                print(f"⏭ ファイル移動スキップ (移動元と移動先が同一): {disp_path}")
-                skipped_count += 1
-                continue
-
-            src_allowed, src_reject = _check_path_with_dynamic_dirs(write_policy, src_path, extra_allowed_dirs)
-            if not src_allowed:
-                action_label = "リバート移動" if revert else "ファイル移動"
-                print(f"✖ {action_label}拒否 (許可されていない移動元パス): {disp_path} (パッチ行 {chunk.block_line_no})")
-                failed_details.append(
-                    f"{disp_path}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
-                    f"  -> {src_reject}"
-                )
-                fail_count += 1
-                continue
-
-            dst_allowed, dst_reject, new_top_dirs = _check_move_destination_policy(
-                write_policy, dst_path, project_root, extra_allowed_dirs
-            )
-            if not dst_allowed:
-                action_label = "リバート移動" if revert else "ファイル移動"
-                print(f"✖ {action_label}拒否 (許可されていない移動先パス): {dst_disp} (パッチ行 {chunk.block_line_no})")
-                failed_details.append(
-                    f"{dst_disp}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
-                    f"  -> {dst_reject}"
-                )
-                fail_count += 1
-                continue
-
-            if src_path.exists() and src_path.is_dir():
-                print(f"✖ ファイル移動失敗: 移動元がディレクトリです: {disp_path} (パッチ行 {chunk.block_line_no})")
-                failed_details.append(f"{disp_path}: ディレクトリ全体の移動には対応していません (ファイルパスを指定してください)")
-                fail_count += 1
-                continue
-
-            if not is_case_only_rename and dst_path.exists() and dst_path.is_dir():
-                print(f"✖ ファイル移動失敗: 移動先がディレクトリです: {dst_disp} (パッチ行 {chunk.block_line_no})")
-                failed_details.append(f"{dst_disp}: 移動先と同名のディレクトリが既に存在します")
-                fail_count += 1
-                continue
-
-            src_in_memory = (src_path in file_contents and src_path not in files_to_delete) or (src_path in binary_contents)
-            src_on_disk = src_path.exists() and src_path.is_file() and src_path not in files_to_delete
-            dst_in_memory = (
-                not is_case_only_rename
-                and ((dst_path in file_contents and dst_path not in files_to_delete) or (dst_path in binary_contents))
-            )
-            dst_on_disk = (not is_case_only_rename) and dst_path.exists() and dst_path not in files_to_delete
-
-            if not src_in_memory and not src_on_disk:
-                if dst_in_memory or dst_on_disk:
-                    print(f"⏭ ファイル移動スキップ (既に移動済み): {disp_path} -> {dst_disp}")
-                    skipped_count += 1
-                else:
-                    print(f"✖ ファイル移動失敗: 移動元ファイルが存在しません: {disp_path} (パッチ行 {chunk.block_line_no})")
-                    failed_details.append(f"{disp_path}: 移動元ファイルが存在しません (パッチ行 {chunk.block_line_no})")
-                    fail_count += 1
-                continue
-
-            if (dst_in_memory or dst_on_disk) and not force_replace:
-                print(f"✖ ファイル移動失敗: 移動先に既にファイルが存在します: {dst_disp} (パッチ行 {chunk.block_line_no})")
-                failed_details.append(
-                    f"{dst_disp}: 移動先に既にファイルが存在します (上書きするには -f/--force-replace を指定してください)"
-                )
-                fail_count += 1
-                continue
-
-            extra_allowed_dirs.update(new_top_dirs)
-
-            # なぜ必要か: 連続移動(A->B->C)や往復移動(A->B->A)時に中間ファイル残留や元内容上書きを防ぐため
-            moved_binary: Optional[bytes] = None
-            moved_text: Optional[str] = None
-            if src_path in binary_contents:
-                moved_binary = binary_contents.pop(src_path)
-            elif src_path in file_contents:
-                cached_text = file_contents.pop(src_path)
-                if cached_text is None and src_on_disk:
-                    moved_binary = src_path.read_bytes()
-                else:
-                    moved_text = cached_text or ""
-            else:
-                src_text, _ = _safe_read_text(src_path)
-                original_contents.setdefault(src_path, src_text)
-                if src_text is None:
-                    moved_binary = src_path.read_bytes()
-                else:
-                    moved_text = src_text
-
-            if dst_path not in original_contents:
-                if dst_on_disk and dst_path.is_file():
-                    orig_dst_text, _ = _safe_read_text(dst_path)
-                    original_contents[dst_path] = orig_dst_text
-                else:
-                    original_contents[dst_path] = ""
-
-            root_src = move_sources.pop(src_path, src_path)
-            modified_files.discard(src_path)
-            case_rename_targets.discard(src_path)
-
-            if is_case_only_rename:
-                case_rename_targets.add(dst_path)
-            elif dst_path == root_src:
-                files_to_delete.discard(root_src)
-            elif root_src.exists() and root_src.is_file():
-                files_to_delete.add(root_src)
-                modified_files.add(root_src)
-                file_contents[root_src] = ""
-                move_sources[dst_path] = root_src
-
-            if moved_binary is not None:
-                binary_contents[dst_path] = moved_binary
-                file_contents[dst_path] = None
-            else:
-                binary_contents.pop(dst_path, None)
-                file_contents[dst_path] = moved_text if moved_text is not None else ""
-
-            files_to_delete.discard(dst_path)
-            modified_files.add(dst_path)
-
-            if src_path.parent == dst_path.parent:
-                print(f"✏ ファイル名変更成功: {disp_path} -> {dst_disp}")
-            else:
-                print(f"📦 ファイル移動成功: {disp_path} -> {dst_disp}")
-            success_count += 1
             continue
 
-        allowed, reject_reason = _check_path_with_dynamic_dirs(write_policy, current_file, extra_allowed_dirs)
+        allowed, reject_reason = check_path_with_dynamic_dirs(write_policy, current_file, state.extra_allowed_dirs)
         if not allowed:
             action_label = "リバート" if revert else (
                 "ファイル削除" if (chunk.is_standalone_file_delete or chunk.is_file_deletion) else "書き込み"
             )
             print(f"✖ {action_label}拒否 (許可されていないパス): {disp_path} (パッチ行 {chunk.block_line_no})")
-            failed_details.append(
+            state.failed_details.append(
                 f"{disp_path}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
                 f"  -> {reject_reason}"
             )
-            fail_count += 1
+            state.fail_count += 1
             continue
 
-        # ブロックを伴わない単体ファイル削除ディレクティブの処理
         if chunk.is_standalone_file_delete:
-            in_mem = (current_file in file_contents and current_file not in files_to_delete) or (current_file in binary_contents)
-            on_disk = current_file.exists() and current_file not in files_to_delete
-            if not in_mem and not on_disk:
-                print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
-                skipped_count += 1
-            else:
-                binary_contents.pop(current_file, None)
-                case_rename_targets.discard(current_file)
-                move_sources.pop(current_file, None)
-                if on_disk:
-                    files_to_delete.add(current_file)
-                    modified_files.add(current_file)
-                    file_contents[current_file] = ""
-                    original_contents.setdefault(current_file, "")
-                else:
-                    modified_files.discard(current_file)
-                    file_contents.pop(current_file, None)
-                print(f"🗑 ファイル削除成功: {disp_path}")
-                success_count += 1
+            apply_standalone_file_delete(state, current_file, disp_path)
             continue
 
-        if current_file not in file_contents:
-            if chunk.is_file_deletion:
-                file_contents[current_file] = ""
-                original_contents[current_file] = ""
-            elif current_file.exists() and current_file not in files_to_delete:
-                orig_text, _ = _safe_read_text(current_file)
-                file_contents[current_file] = orig_text
-                original_contents[current_file] = orig_text
-            else:
-                file_contents[current_file] = ""
-                original_contents[current_file] = ""
+        ensure_file_buffer_loaded(state, current_file, is_file_deletion=chunk.is_file_deletion)
 
         search_lines = chunk.search_lines
         replace_lines = chunk.replace_lines
-        block_line_no = chunk.block_line_no
         is_empty_search = not any(line.strip() for line in search_lines)
         is_empty_replace = not any(line.strip() for line in replace_lines)
-        content = file_contents[current_file]
+        content = state.file_contents[current_file]
 
-        # 1. ファイル丸ごと削除判定
         if chunk.is_file_deletion:
-            in_mem = (current_file in file_contents and current_file not in files_to_delete) or (current_file in binary_contents)
-            on_disk = current_file.exists() and current_file not in files_to_delete
-            if not on_disk and not content and not in_mem:
-                print(f"⏭ ファイル削除スキップ (既に存在しません): {disp_path}")
-                skipped_count += 1
-            else:
-                binary_contents.pop(current_file, None)
-                case_rename_targets.discard(current_file)
-                move_sources.pop(current_file, None)
-                if on_disk:
-                    files_to_delete.add(current_file)
-                    modified_files.add(current_file)
-                    file_contents[current_file] = ""
-                else:
-                    modified_files.discard(current_file)
-                    file_contents.pop(current_file, None)
-                print(f"🗑 ファイル削除成功: {disp_path}")
-                success_count += 1
+            apply_block_file_delete(state, current_file, disp_path, content)
             continue
 
         if content is None:
             action_label = "リバート" if revert else "適用"
-            print(f"✖ {action_label}失敗: {disp_path} (パッチ行 {block_line_no})\n  -> バイナリファイルまたは読み込み不能なファイルです")
-            failed_details.append(f"{disp_path}: {action_label}失敗 (パッチ行 {block_line_no})\n  -> バイナリファイルまたは読み込み不能なファイルです")
-            fail_count += 1
+            print(
+                f"✖ {action_label}失敗: {disp_path} (パッチ行 {chunk.block_line_no})\n"
+                "  -> バイナリファイルまたは読み込み不能なファイルです"
+            )
+            state.failed_details.append(
+                f"{disp_path}: {action_label}失敗 (パッチ行 {chunk.block_line_no})\n"
+                "  -> バイナリファイルまたは読み込み不能なファイルです"
+            )
+            state.fail_count += 1
             continue
 
-        # 2. 関数・クラス等の構文ブロック削除ディレクティブ判定
-        del_node_name = chunk.del_node_name
-        if del_node_name and is_empty_replace:
-            content_lines = content.splitlines()
-            ok, new_lines = delete_block_from_lines(content_lines, del_node_name)
-            if ok:
-                new_content = "\n".join(new_lines)
-                if new_content and not new_content.endswith("\n"):
-                    new_content += "\n"
-                file_contents[current_file] = new_content
-                print(f"🗑 関数/クラス削除成功: {del_node_name} ({disp_path})")
-                success_count += 1
-                modified_files.add(current_file)
-            else:
-                target_b_start, _ = find_block_range(content_lines, del_node_name, "function")
-                if target_b_start == -1:
-                    target_b_start, _ = find_block_range(content_lines, del_node_name, "class")
-                if target_b_start == -1:
-                    print(f"⏭ 関数/クラス削除スキップ (既に削除済み): {del_node_name} ({disp_path})")
-                    skipped_count += 1
-                else:
-                    print(f"✖ 関数/クラス削除失敗: {del_node_name} ({disp_path})")
-                    failed_details.append(f"{disp_path}: 削除対象の関数/クラス '{del_node_name}' が見つかりません")
-                    fail_count += 1
+        if chunk.del_node_name and is_empty_replace:
+            apply_block_deletion_chunk(state, current_file, disp_path, content, chunk.del_node_name)
             continue
 
-        # 3. 既存ファイルが存在する場合の処理
-        if (current_file.exists() and current_file not in files_to_delete) or content:
+        if (current_file.exists() and current_file not in state.files_to_delete) or content:
             if is_empty_search:
-                if revert:
-                    print(f"✖ リバート失敗: 空の検索ブロックに対するリバートは行えません: {disp_path}")
-                    failed_details.append(f"{disp_path}: 空の検索ブロックに対するリバートは行えません")
-                    fail_count += 1
-                    continue
-
-                replace_text = "\n".join(replace_lines).strip()
-                if not replace_text:
-                    print(f"✖ 置換失敗: 置換後コードが空です: {disp_path}")
-                    failed_details.append(f"{disp_path}: 置換後コードが空です")
-                    fail_count += 1
-                    continue
-
-                content_lines = content.splitlines()
-                existing_has_imports = has_import_statements(content_lines)
-                replace_has_imports = has_import_statements(replace_lines)
-                blocks = extract_blocks(replace_lines)
-                existing_blocks = extract_blocks(content_lines)
-
-                # なぜ必要か: 新規関数の追加ブロックにimport文が含まれる場合でも、既存ファイル内の他の関数群を誤って全体置換で上書き消去しないよう判定
-                is_partial = False
-                if blocks:
-                    if not replace_has_imports:
-                        if existing_has_imports or existing_blocks or len(content_lines) > len(replace_lines):
-                            is_partial = True
-                    else:
-                        existing_names = {b[1] for b in existing_blocks}
-                        replace_names = {b[1] for b in blocks}
-                        if existing_names and not existing_names.issubset(replace_names):
-                            is_partial = True
-
-                if is_partial:
-                    import_lines = extract_import_lines(replace_lines)
-                    if import_lines:
-                        content_lines = merge_import_lines(content_lines, import_lines)
-
-                    if len(blocks) == 1 and len(replace_lines) <= (blocks[0][3] - blocks[0][2] + 10 + len(import_lines)):
-                        b_type, b_name, _, _ = blocks[0]
-                        import_set = {l.strip() for l in import_lines}
-                        single_block_lines = [l for l in replace_lines if l.strip() not in import_set]
-                        while single_block_lines and not single_block_lines[0].strip():
-                            single_block_lines.pop(0)
-                        while single_block_lines and not single_block_lines[-1].strip():
-                            single_block_lines.pop()
-
-                        t_start, t_end = find_block_range(content_lines, b_name, b_type)
-                        type_label = "クラス" if b_type == "class" else "関数"
-                        block_replace_text = "\n".join(single_block_lines).strip()
-
-                        if t_start != -1:
-                            target_block_text = "\n".join(content_lines[t_start:t_end]).strip()
-                            if not force_replace and target_block_text == block_replace_text:
-                                print(f"⏭ 置換スキップ (適用済み): {disp_path} ({b_name})")
-                                skipped_count += 1
-                            else:
-                                new_lines = content_lines[:t_start] + single_block_lines + content_lines[t_end:]
-                                new_content = "\n".join(new_lines)
-                                if not new_content.endswith("\n"):
-                                    new_content += "\n"
-                                file_contents[current_file] = new_content
-                                print(f"✔ {type_label}部分置換成功: {b_name} ({disp_path})")
-                                success_count += 1
-                                modified_files.add(current_file)
-                        else:
-                            # なぜ必要か: モードBで既存ファイルに存在しない関数・クラスが指定された場合に新規作成として適切な位置に追加する
-                            content_normalized = "\n".join(content_lines)
-                            if not force_replace and block_replace_text in content_normalized:
-                                print(f"⏭ 追加スキップ (適用済み): {disp_path} ({b_name})")
-                                skipped_count += 1
-                            else:
-                                insert_idx = find_new_block_insert_index(content_lines, current_file)
-                                new_lines = insert_block_into_lines(content_lines, single_block_lines, insert_idx)
-                                new_content = "\n".join(new_lines)
-                                if not new_content.endswith("\n"):
-                                    new_content += "\n"
-                                file_contents[current_file] = new_content
-                                print(f"✨ {type_label}新規作成成功: {b_name} ({disp_path})")
-                                success_count += 1
-                                modified_files.add(current_file)
-                    else:
-                        s, f, sk, new_lines, bf = _replace_blocks_in_lines(content_lines, replace_lines, current_file, project_root, allow_create=True, force_replace=force_replace)
-                        failed_details.extend(bf)
-                        if s > 0:
-                            new_content = "\n".join(new_lines)
-                            if not new_content.endswith("\n"):
-                                new_content += "\n"
-                            file_contents[current_file] = new_content
-                            success_count += s
-                            fail_count += f
-                            skipped_count += sk
-                            modified_files.add(current_file)
-                        else:
-                            fail_count += f
-                            skipped_count += sk
-                else:
-                    content_normalized = content.replace("\r\n", "\n").strip()
-                    if not force_replace and content_normalized == replace_text:
-                        print(f"⏭ 全体置換スキップ (適用済み): {disp_path}")
-                        skipped_count += 1
-                    else:
-                        new_content = "\n".join(replace_lines)
-                        if not new_content.endswith("\n"):
-                            new_content += "\n"
-                        file_contents[current_file] = new_content
-                        print(f"✔ ファイル全体置換成功: {disp_path}")
-                        success_count += 1
-                        modified_files.add(current_file)
+                apply_empty_search_chunk(
+                    state,
+                    current_file,
+                    disp_path,
+                    project_root,
+                    content,
+                    replace_lines,
+                    force_replace=force_replace,
+                    revert=revert,
+                    replace_blocks_fn=_replace_blocks_in_lines,
+                )
             else:
-                # モードAでの関数シグネチャ単位での関数丸ごと削除チェック
-                if is_empty_replace:
-                    first_non_empty = next((l for l in search_lines if l.strip()), "")
-                    b_match = BLOCK_PATTERN.match(first_non_empty)
-                    if b_match:
-                        b_type = b_match.group(1) or 'function'
-                        # なぜ必要か: C#等の型修飾子付きメソッド定義(グループ4)の削除失敗・例外を防止
-                        b_name = b_match.group(2) or b_match.group(3) or b_match.group(4)
-                        if b_name:
-                            content_lines = content.splitlines()
-                            ok, new_lines = delete_block_from_lines(content_lines, b_name, b_type)
-                            if ok:
-                                new_content = "\n".join(new_lines)
-                                if new_content and not new_content.endswith("\n"):
-                                    new_content += "\n"
-                                file_contents[current_file] = new_content
-                                print(f"🗑 関数/クラス削除成功: {b_name} ({disp_path})")
-                                success_count += 1
-                                modified_files.add(current_file)
-                                continue
-
-                new_content, error_msg, is_skipped = find_and_replace(content, search_lines, replace_lines, force_replace)
-                if is_skipped:
-                    action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
-                    print(f"⏭ {action_label}スキップ (適用済み): {disp_path}")
-                    skipped_count += 1
-                elif new_content is not None:
-                    file_contents[current_file] = new_content
-                    action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
-                    print(f"✔ {action_label}成功: {disp_path}")
-                    success_count += 1
-                    modified_files.add(current_file)
-                else:
-                    action_label = "リバート" if revert else ("削除" if is_empty_replace else "適用")
-                    print(f"✖ {action_label}失敗: {disp_path} (パッチ行 {block_line_no})\n  -> {error_msg}")
-                    failed_details.append(f"{disp_path}: {action_label}失敗 (パッチ行 {block_line_no})\n  -> {error_msg}")
-                    fail_count += 1
+                apply_search_replace_chunk(
+                    state,
+                    current_file,
+                    disp_path,
+                    content,
+                    search_lines,
+                    replace_lines,
+                    chunk.block_line_no,
+                    force_replace=force_replace,
+                    revert=revert,
+                    find_and_replace_fn=find_and_replace,
+                )
         else:
-            if revert:
-                print(f"✖ リバート失敗: 対象ファイルが存在しません: {disp_path}")
-                failed_details.append(f"{disp_path}: 対象ファイルが存在しません")
-                fail_count += 1
-            else:
-                new_content = "\n".join(replace_lines)
-                if new_content and not new_content.endswith("\n"):
-                    new_content += "\n"
-                file_contents[current_file] = new_content
-                print(f"✨ 新規作成成功: {disp_path}")
-                success_count += 1
-                modified_files.add(current_file)
+            apply_new_file_chunk(state, current_file, disp_path, replace_lines, revert=revert)
 
     commit_kwargs: Dict[str, object] = {}
     if not show_diff:
         commit_kwargs["show_diff"] = False
     if allowed_write_paths is not None:
         commit_kwargs["allowed_write_paths"] = allowed_write_paths
-    if binary_contents:
-        commit_kwargs["binary_contents"] = binary_contents
-    if move_sources:
-        commit_kwargs["move_sources"] = move_sources
-    if extra_allowed_dirs:
-        commit_kwargs["extra_allowed_dirs"] = sorted(extra_allowed_dirs)
-    if case_rename_targets:
-        commit_kwargs["case_rename_targets"] = sorted(case_rename_targets)
+    if state.binary_contents:
+        commit_kwargs["binary_contents"] = state.binary_contents
+    if state.move_sources:
+        commit_kwargs["move_sources"] = state.move_sources
+    if state.extra_allowed_dirs:
+        commit_kwargs["extra_allowed_dirs"] = sorted(state.extra_allowed_dirs)
+    if state.case_rename_targets:
+        commit_kwargs["case_rename_targets"] = sorted(state.case_rename_targets)
     return commit_patch_transaction(
-        file_contents=file_contents,
-        original_contents=original_contents,
-        modified_files=modified_files,
-        files_to_delete=files_to_delete,
+        file_contents=state.file_contents,
+        original_contents=state.original_contents,
+        modified_files=state.modified_files,
+        files_to_delete=state.files_to_delete,
         project_root=project_root,
-        success_count=success_count,
-        fail_count=fail_count,
-        skipped_count=skipped_count,
-        failed_details=failed_details,
+        success_count=state.success_count,
+        fail_count=state.fail_count,
+        skipped_count=state.skipped_count,
+        failed_details=state.failed_details,
         dry_run=dry_run,
         **commit_kwargs,
     )
