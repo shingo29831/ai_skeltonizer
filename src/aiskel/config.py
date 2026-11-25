@@ -7,9 +7,21 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional, Set, Tuple, Union
+from typing import Iterator, List, Optional, Sequence, Set, Tuple, Union
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
 
 DEFAULT_PATCH_HANDOFF_MAX_TABS = 1
+_ALLOWED_WRITE_PATHS_KEYS = (
+    "allowed_write_paths",
+    "writable_paths",
+    "write_allow_paths",
+    "allow_write_paths",
+    "write_paths",
+)
 _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "patch_handoff_max_tabs",
     "handoff_max_tabs",
@@ -140,6 +152,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
             "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
             "exclude_paths": [],
+            "allowed_write_paths": [],
             "patch_handoff_max_tabs": DEFAULT_PATCH_HANDOFF_MAX_TABS,
             "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
@@ -428,3 +441,217 @@ def load_patch_handoff_max_tabs_from_meta(
                     pass
 
     return None
+
+def _strip_matching_quotes(text: str) -> str:
+    s = text.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1].strip()
+    return s
+
+def _extract_paths_from_val(val: object) -> List[str]:
+    paths: List[str] = []
+    if isinstance(val, str):
+        for line in val.splitlines():
+            cleaned = _strip_matching_quotes(line)
+            if cleaned and not cleaned.startswith(("#", "//", ";")):
+                paths.append(cleaned)
+    elif isinstance(val, list):
+        for item in val:
+            if isinstance(item, str):
+                cleaned = _strip_matching_quotes(item)
+                if cleaned:
+                    paths.append(cleaned)
+    return paths
+
+def _split_inline_list_items(inner: str) -> List[str]:
+    # なぜ必要か: クォート内のカンマや空白を保持したまま配列要素と行末コメントを分離するため
+    items: List[str] = []
+    buf: List[str] = []
+    quote_char: Optional[str] = None
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if quote_char:
+            if ch == quote_char:
+                quote_char = None
+            else:
+                buf.append(ch)
+        else:
+            if ch in ('"', "'"):
+                quote_char = ch
+            elif ch == "#":
+                while i < len(inner) and inner[i] != "\n":
+                    i += 1
+                continue
+            elif ch in (",", "\n"):
+                token = "".join(buf).strip()
+                if token:
+                    items.append(token)
+                buf.clear()
+            else:
+                buf.append(ch)
+        i += 1
+    token = "".join(buf).strip()
+    if token:
+        items.append(token)
+    return items
+
+def _parse_allowed_write_paths_from_text(content: str) -> Optional[List[str]]:
+    keys_alt = "|".join(re.escape(k) for k in _ALLOWED_WRITE_PATHS_KEYS)
+    key_re = re.compile(rf"^([ \t]*)(?:{keys_alt})[ \t]*([:=])[ \t]*(.*)$")
+    lines = content.splitlines()
+    for idx, line in enumerate(lines):
+        m = key_re.match(line)
+        if not m:
+            continue
+        base_indent = len(m.group(1).expandtabs(2))
+        rhs = m.group(3).strip()
+
+        if rhs.startswith("["):
+            collected = [rhs]
+            end_idx = idx
+            while "]" not in collected[-1] and end_idx + 1 < len(lines):
+                end_idx += 1
+                collected.append(lines[end_idx])
+            joined = "\n".join(collected)
+            close_pos = joined.find("]")
+            inner = joined[1:close_pos] if close_pos != -1 else joined[1:]
+            return [p for p in (_strip_matching_quotes(x) for x in _split_inline_list_items(inner)) if p]
+
+        rhs_no_comment = rhs.split("#", 1)[0].split(";", 1)[0].strip() if not rhs.startswith(('"', "'")) else rhs
+        if not rhs_no_comment:
+            yaml_items: List[str] = []
+            j = idx + 1
+            while j < len(lines):
+                raw_next = lines[j]
+                stripped_next = raw_next.strip()
+                if not stripped_next or stripped_next.startswith("#"):
+                    j += 1
+                    continue
+                next_indent = len(raw_next[: len(raw_next) - len(raw_next.lstrip(" \t"))].expandtabs(2))
+                if next_indent < base_indent:
+                    break
+                if stripped_next.startswith("- ") or stripped_next == "-":
+                    item_raw = stripped_next[1:].strip()
+                    if item_raw and not item_raw.startswith("#"):
+                        if not item_raw.startswith(('"', "'")):
+                            item_raw = item_raw.split(" #", 1)[0].strip()
+                        cleaned = _strip_matching_quotes(item_raw)
+                        if cleaned:
+                            yaml_items.append(cleaned)
+                    j += 1
+                    continue
+                break
+            return yaml_items
+
+        return [p for p in (_strip_matching_quotes(x) for x in _split_inline_list_items(rhs_no_comment)) if p]
+    return None
+
+def resolve_allowed_write_paths(
+    raw_paths: Sequence[Union[str, Path]],
+    project_root: Path,
+) -> List[Path]:
+    """設定された書き込み許可パス群をproject_root基準の解決済みPathリストへ正規化する。"""
+    base_dir = project_root.resolve()
+    resolved_list: List[Path] = []
+    seen: Set[Path] = set()
+    for raw in raw_paths:
+        if isinstance(raw, Path):
+            p = raw
+        else:
+            cleaned = _strip_matching_quotes(str(raw))
+            if not cleaned:
+                continue
+            p = Path(cleaned)
+        resolved = p.resolve() if p.is_absolute() else (base_dir / p).resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            resolved_list.append(resolved)
+    return resolved_list
+
+def is_write_path_allowed(target_path: Path, allowed_paths: Sequence[Path]) -> bool:
+    """対象ファイルパスが書き込み許可パス群のいずれかに該当・包含されるか判定する。"""
+    if not allowed_paths:
+        return True
+    resolved_target = target_path.resolve()
+    for allowed in allowed_paths:
+        resolved_allowed = allowed.resolve()
+        if resolved_target == resolved_allowed:
+            return True
+        # なぜ必要か: 実在する単一ファイルと同名プレフィックス配下への誤許可を防ぐため
+        if resolved_allowed.is_file():
+            continue
+        if resolved_allowed in resolved_target.parents:
+            return True
+    return False
+
+def load_allowed_write_paths_from_meta(
+    project_root: Path,
+    output_dir: Optional[Path] = None,
+) -> List[Path]:
+    """ai_meta等の設定ファイルから書き込み許可対象のファイル・ディレクトリパス群を取得する。"""
+    for target in _iter_meta_config_files(project_root, output_dir):
+        try:
+            content = target.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+
+        if target.suffix.lower() == ".json" or content.startswith("{"):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for k in _ALLOWED_WRITE_PATHS_KEYS:
+                        if k in data:
+                            return resolve_allowed_write_paths(
+                                _extract_paths_from_val(data[k]), project_root
+                            )
+                continue
+            except Exception:
+                # 明示的な.jsonファイルが構文不正の場合にテキスト正規表現へ誤フォールバックしない
+                if target.suffix.lower() == ".json":
+                    continue
+
+        if target.suffix.lower() == ".toml" and tomllib is not None:
+            try:
+                data = tomllib.loads(content)
+                if isinstance(data, dict):
+                    for k in _ALLOWED_WRITE_PATHS_KEYS:
+                        if k in data:
+                            return resolve_allowed_write_paths(
+                                _extract_paths_from_val(data[k]), project_root
+                            )
+                continue
+            except Exception:
+                continue
+
+        parsed = _parse_allowed_write_paths_from_text(content)
+        if parsed is not None:
+            return resolve_allowed_write_paths(parsed, project_root)
+
+    meta_dirs: List[Path] = []
+    if output_dir:
+        meta_dirs.append(output_dir)
+    meta_dirs.extend([project_root / "ai_meta", project_root / ".ai_meta"])
+    checked_dirs: List[Path] = []
+    for d in meta_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in checked_dirs and resolved.exists() and resolved.is_dir():
+                checked_dirs.append(resolved)
+        except OSError:
+            continue
+
+    for d in checked_dirs:
+        for fname in ("allowed_write_paths.txt", "writable_paths.txt", "allow_write_paths.txt"):
+            target = d / fname
+            if not target.is_file():
+                continue
+            try:
+                text = target.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            return resolve_allowed_write_paths(_extract_paths_from_val(text), project_root)
+
+    return []

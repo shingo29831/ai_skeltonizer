@@ -2,8 +2,13 @@
 import ast
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from ..config import (
+    is_write_path_allowed,
+    load_allowed_write_paths_from_meta,
+    resolve_allowed_write_paths,
+)
 from .patch_matcher import generate_diff_display
 from .patch_result import PatchResult
 
@@ -57,8 +62,33 @@ def commit_patch_transaction(
     skipped_count: int,
     failed_details: List[str],
     dry_run: bool = False,
+    show_diff: bool = True,
+    allowed_write_paths: Optional[Sequence[Union[str, Path]]] = None,
 ) -> PatchResult:
     """構文検証・ドライラン出力・ディスクへのトランザクションコミットを一括実行する。"""
+    effective_allowed_paths = (
+        load_allowed_write_paths_from_meta(project_root)
+        if allowed_write_paths is None
+        else resolve_allowed_write_paths(allowed_write_paths, project_root)
+    )
+    if effective_allowed_paths:
+        disallowed_targets = {
+            p
+            for p in (modified_files | files_to_delete)
+            if not is_write_path_allowed(p, effective_allowed_paths)
+        }
+        for p in sorted(disallowed_targets):
+            try:
+                rel_p = p.relative_to(project_root)
+            except ValueError:
+                rel_p = p
+            modified_files.discard(p)
+            files_to_delete.discard(p)
+            file_contents[p] = original_contents.get(p, "")
+            print(f"✖ 書き込み拒否 (許可されていないパス): {rel_p}")
+            failed_details.append(f"{rel_p}: ai_meta設定の allowed_write_paths により許可されていないパスです")
+            fail_count += 1
+
     err_count, syntax_failed_details, syntax_error_files = validate_python_syntax(
         file_contents, modified_files, original_contents, project_root, files_to_delete
     )
@@ -66,12 +96,13 @@ def commit_patch_transaction(
     failed_details.extend(syntax_failed_details)
 
     if dry_run:
-        print("\n🔍 [DRY-RUN] 差分プレビュー (ディスクは変更されません):")
-        for path in modified_files:
-            orig = original_contents.get(path, "")
-            diff_text = generate_diff_display(path, orig, file_contents.get(path, ""), project_root)
-            if diff_text:
-                print(diff_text)
+        if show_diff:
+            print("\n🔍 [DRY-RUN] 差分プレビュー (ディスクは変更されません):")
+            for path in modified_files:
+                orig = original_contents.get(path, "")
+                diff_text = generate_diff_display(path, orig, file_contents.get(path, ""), project_root)
+                if diff_text:
+                    print(diff_text)
         return PatchResult(success_count, fail_count, skipped_count, modified_files, failed_details)
 
     written_files: Set[Path] = set()

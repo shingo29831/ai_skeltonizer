@@ -1,8 +1,13 @@
 """Module: @role: インメモリ仮想バッファによるトランザクション保証付きファイル置換・新規ノード挿入・コードおよびファイル削除を実行する。"""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from ..config import (
+    is_write_path_allowed,
+    load_allowed_write_paths_from_meta,
+    resolve_allowed_write_paths,
+)
 from .block_patcher import (
     FILE_HEADER_PATTERN,
     apply_block_replacement,
@@ -79,11 +84,19 @@ def apply_patch(
     force_replace: bool = False,
     revert: bool = False,
     dry_run: bool = False,
+    show_diff: bool = True,
+    allowed_write_paths: Optional[Sequence[Union[str, Path]]] = None,
 ) -> PatchResult:
     """
     パッチテキストを解析し、ファイルを書き換える。
     コード削除およびファイル自体の削除操作にも対応する。
     """
+    effective_allowed_paths = (
+        load_allowed_write_paths_from_meta(project_root)
+        if allowed_write_paths is None
+        else resolve_allowed_write_paths(allowed_write_paths, project_root)
+    )
+
     if not has_patch_delimiters(patch_text):
         if is_file_deletion_patch(patch_text):
             pass
@@ -91,8 +104,18 @@ def apply_patch(
             if revert:
                 print("✖ エラー: リバート処理には置換ブロック(<<<< ==== >>>>)が必要です。")
                 return PatchResult(0, 1, 0, set(), ["リバート処理には置換ブロック(<<<< ==== >>>>)が必要です"])
+            # Markdown見出し等の====を除外しつつ<<<<や>>>>の片側欠落による誤フォールバックを防ぐ
+            if DELIMITER_START.search(patch_text) or DELIMITER_END.search(patch_text):
+                err_msg = "置換ブロックの区切り記号(<<<< ==== >>>>)が不完全です"
+                print(f"✖ 適用失敗: {err_msg}")
+                return PatchResult(0, 1, 0, set(), [err_msg])
             print("ℹ 置換ブロック(<<<<)が見つからないため、関数・クラス単位の自動置換を試みます...")
-            return _apply_block_replacement(patch_text, project_root, target_file, dry_run=dry_run)
+            block_kwargs: Dict[str, object] = {"dry_run": dry_run}
+            if not show_diff:
+                block_kwargs["show_diff"] = False
+            if allowed_write_paths is not None:
+                block_kwargs["allowed_write_paths"] = allowed_write_paths
+            return _apply_block_replacement(patch_text, project_root, target_file, **block_kwargs)
 
     chunks, parse_failed_details, parse_fail_count = parse_patch_chunks(
         patch_text, project_root, default_target_file=target_file, revert=revert
@@ -117,6 +140,18 @@ def apply_patch(
             disp_path = current_file.relative_to(project_root)
         except ValueError:
             disp_path = current_file
+
+        if not is_write_path_allowed(current_file, effective_allowed_paths):
+            action_label = "リバート" if revert else (
+                "ファイル削除" if (chunk.is_standalone_file_delete or chunk.is_file_deletion) else "書き込み"
+            )
+            print(f"✖ {action_label}拒否 (許可されていないパス): {disp_path} (パッチ行 {chunk.block_line_no})")
+            failed_details.append(
+                f"{disp_path}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
+                f"  -> ai_meta設定の allowed_write_paths により許可されていないパスです"
+            )
+            fail_count += 1
+            continue
 
         # ブロックを伴わない単体ファイル削除ディレクティブの処理
         if chunk.is_standalone_file_delete:
@@ -359,6 +394,11 @@ def apply_patch(
                 success_count += 1
                 modified_files.add(current_file)
 
+    commit_kwargs: Dict[str, object] = {}
+    if not show_diff:
+        commit_kwargs["show_diff"] = False
+    if allowed_write_paths is not None:
+        commit_kwargs["allowed_write_paths"] = allowed_write_paths
     return commit_patch_transaction(
         file_contents=file_contents,
         original_contents=original_contents,
@@ -370,4 +410,5 @@ def apply_patch(
         skipped_count=skipped_count,
         failed_details=failed_details,
         dry_run=dry_run,
+        **commit_kwargs,
     )
