@@ -9,9 +9,8 @@ from typing import Callable, List, Optional, Set, Tuple
 
 from .cli_interaction import prompt_user_confirmation
 from .cli_sync import ensure_gitignore_updated
+from .config import PENDING_COMMIT_FILENAME
 from .core.test_runner import run_validation_test
-
-PENDING_COMMIT_FILENAME = "pending_commit.json"
 
 
 @dataclass

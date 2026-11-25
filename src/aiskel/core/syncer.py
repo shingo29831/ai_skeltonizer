@@ -2,8 +2,16 @@
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from ..config import SkeletonConfig
+from typing import Dict, List, Optional, Set, Tuple
+from ..config import (
+    ALLOWED_WRITE_PATH_TXT_FILES,
+    DENIED_WRITE_PATH_TXT_FILES,
+    META_CANDIDATE_CONFIG_FILES,
+    PENDING_COMMIT_FILENAME,
+    WRITE_PATHS_SAMPLE_FILENAME,
+    SkeletonConfig,
+)
+from .aistudio_prompt_loader import get_meta_prompt_relative_paths
 from .bundle_builder import TokenStats, build_bundle_file
 from .token_counter import estimate_tokens
 from ..parsers.base_parser import RoleEntry, DependencyEntry, generate_role_map_text, generate_dependency_map_text
@@ -29,8 +37,8 @@ class ProjectSyncer:
         if not self.output_dir.exists():
             return 0
 
-        # なぜ必要か: バンドル群および自動生成・ユーザー設定ファイル(config.json等)の誤削除を防止
-        protected_filenames = {
+        # なぜ必要か: バンドル・自動生成・設定・書き込み制御・カスタムプロンプト等の誤削除を防止
+        protected_filenames: Set[str] = {
             "architecture_bundle.txt",
             "architecture_bundle.xml",
             "architecture_bundle.md",
@@ -42,39 +50,43 @@ class ProjectSyncer:
             "phase2_context_bundle.xml",
             "phase2_context_bundle.markdown",
             "phase2_static_skeleton.txt",
-            "config.json",
-            "settings.json",
-            "aiskel.json",
-            "aiskel_config.json",
-            ".aiskelrc.json",
-            ".aiskelrc",
             "test_command.txt",
             "test_cmd.txt",
             "command.txt",
             "test.txt",
             "run.txt",
-            "config.toml",
-            "settings.toml",
-            "config.yaml",
-            "config.yml",
-            "settings.yaml",
-            "settings.yml",
-            "config.ini",
-            "settings.ini",
             "test.sh",
             "test.bat",
             "test.cmd",
             "run.sh",
+            PENDING_COMMIT_FILENAME,
+            WRITE_PATHS_SAMPLE_FILENAME,
+            *META_CANDIDATE_CONFIG_FILES,
+            *ALLOWED_WRITE_PATH_TXT_FILES,
+            *DENIED_WRITE_PATH_TXT_FILES,
         }
-        if self.config.bundle_filename:
-            protected_filenames.add(self.config.bundle_filename)
+        protected_rel_paths: Set[str] = set(get_meta_prompt_relative_paths())
+
+        if self.config.bundle_filename and self.config.bundle_filename.strip():
+            bundle_rel = Path(self.config.bundle_filename.strip().replace("\\", "/")).as_posix().lstrip("./")
+            if bundle_rel:
+                protected_rel_paths.add(bundle_rel)
+
+        if self.config.policy_path:
+            try:
+                rel_policy = self.config.policy_path.resolve().relative_to(self.output_dir.resolve()).as_posix()
+                protected_rel_paths.add(rel_policy)
+            except (ValueError, OSError):
+                pass
 
         deleted_count = 0
         for root, _, files in os.walk(self.output_dir):
             for file in files:
                 dest_path = Path(root) / file
+                rel_path = dest_path.relative_to(self.output_dir).as_posix()
                 if (
                     dest_path.name in protected_filenames
+                    or rel_path in protected_rel_paths
                     or dest_path.name.startswith("architecture_bundle")
                     or dest_path.name.startswith("phase")
                 ):

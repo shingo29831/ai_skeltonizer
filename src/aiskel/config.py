@@ -18,7 +18,9 @@ from .write_path_policy import (
 )
 from .write_path_policy_loader import (
     ALLOWED_WRITE_PATHS_KEYS as _ALLOWED_WRITE_PATHS_KEYS,
-    META_CANDIDATE_CONFIG_FILES as _META_CANDIDATE_CONFIG_FILES,
+    ALLOWED_WRITE_PATH_TXT_FILES,
+    DENIED_WRITE_PATH_TXT_FILES,
+    META_CANDIDATE_CONFIG_FILES,
     WRITE_PATHS_SAMPLE_FILENAME,
     ensure_write_paths_sample_file,
     extract_paths_from_val as _extract_paths_from_val,
@@ -29,6 +31,8 @@ from .write_path_policy_loader import (
     split_inline_list_items as _split_inline_list_items,
 )
 
+_META_CANDIDATE_CONFIG_FILES = META_CANDIDATE_CONFIG_FILES
+PENDING_COMMIT_FILENAME = "pending_commit.json"
 DEFAULT_PATCH_HANDOFF_MAX_TABS = 1
 _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "patch_handoff_max_tabs",

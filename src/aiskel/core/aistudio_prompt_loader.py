@@ -2,7 +2,7 @@
 import importlib.resources as importlib_resources
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 _PROMPT_FILE_NAME = "prompts.txt"
 
@@ -179,3 +179,18 @@ def _read_first_plain_or_section(
             continue
         return _unescape_prompt_tokens(raw_text)
     return None
+
+def get_meta_prompt_relative_paths() -> Tuple[str, ...]:
+    """ai_meta/.ai_meta 配下に配置され得るプロンプト定義ファイルの相対パス一覧を返す。"""
+    rel_paths: List[str] = []
+    seen: Set[str] = set()
+    for raw_path in _UNIFIED_PROMPT_FILENAMES + _DEFAULT_PROMPT_FILENAMES + _REVIEW_PROMPT_FILENAMES:
+        rel: Optional[str] = None
+        for prefix in ("ai_meta/", ".ai_meta/"):
+            if raw_path.startswith(prefix):
+                rel = raw_path[len(prefix):]
+                break
+        if rel and rel not in seen:
+            seen.add(rel)
+            rel_paths.append(rel)
+    return tuple(rel_paths)
