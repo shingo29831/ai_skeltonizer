@@ -17,6 +17,12 @@ from urllib.parse import urlsplit
 
 from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
 from .aistudio_auto_apply import execute_auto_apply_patch
+from .aistudio_auto_split import (
+    build_split_combined_text,
+    collect_bloat_targets_sorted_by_size,
+    format_bloat_targets_payload,
+    validate_split_target_request,
+)
 from .aistudio_bridge_handler import build_bridge_request_handler_class
 from .aistudio_bridge_state import TabBindingManager
 from .aistudio_command import (
@@ -26,6 +32,7 @@ from .aistudio_command import (
 )
 from .aistudio_handoff import (
     MAX_HANDOFF_PAYLOAD_BYTES,
+    HandoffKind,
     PatchHandoffManager,
     format_summary_prompt_text,
     has_handoff_stop_signal_in_text,
@@ -372,6 +379,146 @@ class AiskelBridgeServer:
             "available_patterns": list(list_prompt_patterns()),
         }
 
+    def handle_bloat_targets_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """aiskel b 基準でプロジェクト内の肥大化ファイルを検出し、ファイルサイズ降順の一覧を返す。"""
+        tab_error = self._binding_manager.validate_execute_payload(payload)
+        if tab_error is not None:
+            return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+        with self._exec_lock:
+            try:
+                bloated, max_lines, max_chars = collect_bloat_targets_sorted_by_size(
+                    self.project_root,
+                    self.output_dir,
+                )
+            except (OSError, ValueError, RuntimeError) as e:
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "message": f"肥大化ファイルの検出に失敗しました: {e}",
+                }
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(
+            f"\n[{timestamp}] 📊 自動分割対象抽出 (aiskel b): {len(bloated)} 件 "
+            f"(基準: 行数 >= {max_lines}, 文字数 >= {max_chars:,})",
+            flush=True,
+        )
+        return int(HTTPStatus.OK), format_bloat_targets_payload(
+            self.project_root,
+            bloated,
+            max_lines=max_lines,
+            max_chars=max_chars,
+        )
+
+    def handle_split_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """現在の空タブで自動分割を開始するための対象1ファイル分割指示+最新要約テキストを返す。"""
+        req_tab_id, tab_err = self._validate_optional_tab_id(payload, required=self._binding_manager.require_binding)
+        if tab_err is not None or req_tab_id is None:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+        tab_error = self._binding_manager.validate_execute_payload(payload)
+        if tab_error is not None:
+            return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+        target_info, target_err = validate_split_target_request(
+            self.project_root,
+            payload,
+            output_dir=self.output_dir,
+        )
+        if target_err is not None or target_info is None:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": target_err or "対象ファイル指定が不正です"}
+
+        with self._exec_lock:
+            try:
+                summary_text = load_project_summary_text(self.project_root)
+            except (OSError, ValueError, RuntimeError) as e:
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "message": f"要約バンドルの取得に失敗しました: {e}",
+                }
+            combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
+            if req_tab_id:
+                self._handoff_manager.clear_tab_patch(req_tab_id)
+                self._handoff_manager.consume_auto_tab_if_tracked(
+                    req_tab_id,
+                    self.get_patch_handoff_max_tabs(),
+                )
+            else:
+                self._handoff_manager.clear_tab_patch("")
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(
+            f"\n[{timestamp}] ✂ 自動分割開始 ({target_info['file_index']}/{target_info['total_files']}): "
+            f"{target_info['rel_path']}",
+            flush=True,
+        )
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "target_file": target_info["rel_path"],
+            "combined_text": combined_text,
+        }
+
+    def handle_split_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """次の分割対象ファイルを新しいチャットタブへ最新要約とともに引き継ぐレコードを作成する。"""
+        req_tab_id, tab_err = self._validate_optional_tab_id(payload, required=self._binding_manager.require_binding)
+        if tab_err is not None or req_tab_id is None:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+        tab_error = self._binding_manager.validate_execute_payload(payload)
+        if tab_error is not None:
+            return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+        target_info, target_err = validate_split_target_request(
+            self.project_root,
+            payload,
+            output_dir=self.output_dir,
+        )
+        if target_err is not None or target_info is None:
+            return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": target_err or "対象ファイル指定が不正です"}
+
+        new_chat_url = str(payload.get("new_chat_url") or "https://aistudio.google.com/prompts/new_chat").strip()
+        parsed_url = urlsplit(new_chat_url)
+        if parsed_url.scheme.lower() != "https" or (parsed_url.hostname or "").lower() != "aistudio.google.com":
+            new_chat_url = "https://aistudio.google.com/prompts/new_chat"
+
+        with self._exec_lock:
+            try:
+                summary_text = load_project_summary_text(self.project_root)
+            except (OSError, ValueError, RuntimeError) as e:
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "message": f"要約バンドルの取得に失敗しました: {e}",
+                }
+            combined_text = build_split_combined_text(self.project_root, target_info, summary_text)
+            self._handoff_manager.clear_tab_patch(req_tab_id)
+            max_tabs = self.get_patch_handoff_max_tabs()
+            handoff = self._handoff_manager.create(
+                source_tab_id="",
+                new_chat_url=new_chat_url,
+                response_text="",
+                summary_text=summary_text,
+                remaining_auto_tabs=max_tabs,
+                handoff_kind=HandoffKind.FILE_SPLIT,
+                target_file=str(target_info["rel_path"]),
+                raw_combined_text=combined_text,
+            )
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(
+            f"\n[{timestamp}] ✂ 自動分割引き継ぎ ({target_info['file_index']}/{target_info['total_files']}): "
+            f"{target_info['rel_path']} -> 新規タブへ移行します (自動新タブ上限: {max_tabs})",
+            flush=True,
+        )
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "skipped": False,
+            "remaining_auto_tabs": max_tabs,
+            "handoff_id": handoff.handoff_id,
+            "new_chat_url": handoff.new_chat_url,
+            "target_file": target_info["rel_path"],
+            "message": "次ファイルの自動分割を新規タブへ引き継ぎます",
+        }
+
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
         return self._enrich_binding_info(self._binding_manager.get_info())
@@ -598,7 +745,7 @@ class AiskelBridgeServer:
     @staticmethod
     def _make_job_result(action: str, ok: bool, message: str, exit_code: int = 1) -> Any:
         # dict応答APIはJSON直列化するため、actionに応じて戻り値型を厳密に揃える
-        if action in ("handoff", "trigger_run", "summary_prompt"):
+        if action in ("handoff", "trigger_run", "summary_prompt", "bloat_targets", "split_prompt", "split_handoff"):
             return {"ok": ok, "message": message}
         return BridgeExecutionResult(
             ok=ok,
@@ -887,6 +1034,12 @@ class AiskelBridgeServer:
                 return self.handle_trigger_run_payload(payload)
             if action == "summary_prompt":
                 return self.handle_summary_prompt_payload(payload)
+            if action == "bloat_targets":
+                return self.handle_bloat_targets_payload(payload)
+            if action == "split_prompt":
+                return self.handle_split_prompt_payload(payload)
+            if action == "split_handoff":
+                return self.handle_split_handoff_payload(payload)
             return self.handle_execute_payload(payload)
 
         if not job.done_event.wait(timeout=EXECUTION_WAIT_TIMEOUT_SEC):
@@ -912,6 +1065,15 @@ class AiskelBridgeServer:
 
     def _dispatch_summary_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="summary_prompt")
+
+    def _dispatch_bloat_targets_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="bloat_targets")
+
+    def _dispatch_split_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="split_prompt")
+
+    def _dispatch_split_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="split_handoff")
 
     def _drain_pending_jobs_locked(self) -> None:
         while True:
@@ -985,6 +1147,12 @@ class AiskelBridgeServer:
                         status_code, result = self.handle_trigger_run_payload(job.payload)
                     elif job.action == "summary_prompt":
                         status_code, result = self.handle_summary_prompt_payload(job.payload)
+                    elif job.action == "bloat_targets":
+                        status_code, result = self.handle_bloat_targets_payload(job.payload)
+                    elif job.action == "split_prompt":
+                        status_code, result = self.handle_split_prompt_payload(job.payload)
+                    elif job.action == "split_handoff":
+                        status_code, result = self.handle_split_handoff_payload(job.payload)
                     else:
                         status_code, result = self.handle_execute_payload(job.payload)
                     job.status_code = status_code

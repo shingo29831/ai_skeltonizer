@@ -279,3 +279,30 @@ def load_prompt_for_pattern(project_root: Path, pattern: Union[PromptPattern, st
         return build_patch_review_prompt(load_default_prompt(resolved))
 
     raise ValueError(f"未対応のプロンプトパターンです: {pattern}")
+
+def build_file_split_prompt(
+    default_prompt: str,
+    target_rel_path: str,
+    lines: int,
+    chars: int,
+    max_lines: int,
+    max_chars: int,
+    file_index: int = 1,
+    total_files: int = 1,
+) -> str:
+    """肥大化した単一ファイルを責務ごとに分割するための専用プロンプトを組み立てる。"""
+    stripped = (default_prompt or "").strip()
+    base_rules = stripped if stripped else BUILTIN_DEFAULT_PROMPT
+    return (
+        f"【依頼タスク: 肥大化ファイルの責務分割 ({file_index}/{total_files})】\n"
+        f"対象ファイル: `{target_rel_path}` (現在: {lines} lines, {chars:,} chars / 閾値: lines < {max_lines}, chars < {max_chars:,})\n"
+        "下記の「基本規約」を厳守し、この対象ファイル1つのみを凝集度の高い適切なモジュール群へ分割せよ。\n\n"
+        "=== 自動分割モードの実行ルール ===\n"
+        f"- 今回の作業対象は `{target_rel_path}` のみとし、他の肥大化ファイルには同時に手を付けないこと。\n"
+        f"- `<ai_architecture_bundle>` はスケルトンのため、実装詳細の確認が必要な場合は必ず `aiskel c -d {target_rel_path}`（関連ファイルを含めた1行ワンライナー）でコードを取得してから分割パッチを作成せよ。\n"
+        f"- 分割後の各ファイルが閾値（{max_lines}行未満 かつ {max_chars:,}文字未満）に収まるよう適切に責務分割せよ。\n"
+        "- 既存の公開関数・クラス・定数・型・テストおよび他モジュールからのインポート参照を壊さないよう、再エクスポートまたは参照元のインポート更新を含めて、未適用の現行コードベースへ単体でそのまま `aiskel a` 適用できる完全版パッチを出力せよ。\n"
+        "- 通常のコード修正と同様に、必ず `<<<< ==== >>>>` 形式と最末尾の `<commit>...</commit>` を含めること。\n\n"
+        "=== 基本規約 ===\n"
+        f"{base_rules}"
+    )

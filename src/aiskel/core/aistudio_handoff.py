@@ -5,8 +5,9 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from ..config import SkeletonConfig, load_bundle_filename_from_meta
 from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
@@ -34,6 +35,12 @@ _STOP_SIGNAL_LINE_RE = re.compile(
 )
 
 
+class HandoffKind(str, Enum):
+    """新規タブ引き継ぎの用途種別を定義する。"""
+
+    PATCH_REVIEW = "patch_review"
+    FILE_SPLIT = "file_split"
+
 @dataclass(frozen=True)
 class TabHandoffPayload:
     """新規タブへ引き継ぐAI応答・要約バンドル・紐づけ情報を保持する。"""
@@ -47,6 +54,8 @@ class TabHandoffPayload:
     created_at: float
     assigned_tab_id: Optional[str] = None
     remaining_auto_tabs: int = 0
+    handoff_kind: str = HandoffKind.PATCH_REVIEW.value
+    target_file: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -58,6 +67,8 @@ class TabHandoffPayload:
             "combined_text": self.combined_text,
             "assigned_tab_id": self.assigned_tab_id,
             "remaining_auto_tabs": self.remaining_auto_tabs,
+            "handoff_kind": self.handoff_kind,
+            "target_file": self.target_file,
         }
 
 
@@ -321,6 +332,12 @@ class PatchHandoffManager:
                 ):
                     self._last_detected_patch = None
 
+    def clear_tab_patch(self, tab_id: str = "") -> None:
+        """指定タブおよび系譜上・フォールバック保持に残る旧パッチをすべてクリアする。"""
+        self.consume_detected_patch(tab_id=tab_id, patch_text=None)
+        with self._lock:
+            self._last_detected_patch = None
+
     def _record_auto_tab_locked(self, tab_id: str, remaining: int, balance: Optional[int] = None) -> None:
         clean_tid = (tab_id or "").strip()
         if not clean_tid:
@@ -384,6 +401,8 @@ class PatchHandoffManager:
                     created_at=item.created_at,
                     assigned_tab_id=item.assigned_tab_id,
                     remaining_auto_tabs=next_rem,
+                    handoff_kind=item.handoff_kind,
+                    target_file=item.target_file,
                 )
 
     def _prune_expired_locked(self, now: float) -> None:
@@ -407,11 +426,23 @@ class PatchHandoffManager:
         summary_text: str,
         review_prompt: Optional[str] = None,
         remaining_auto_tabs: int = 0,
+        handoff_kind: Union[HandoffKind, str] = HandoffKind.PATCH_REVIEW,
+        target_file: str = "",
+        raw_combined_text: Optional[str] = None,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
         handoff_id = secrets.token_urlsafe(16)
-        combined = format_handoff_prompt_text(response_text, summary_text, review_prompt=review_prompt)
+        combined = (
+            raw_combined_text
+            if raw_combined_text is not None
+            else format_handoff_prompt_text(response_text, summary_text, review_prompt=review_prompt)
+        )
+        kind_val = (
+            handoff_kind.value
+            if isinstance(handoff_kind, HandoffKind)
+            else (str(handoff_kind or "").strip() or HandoffKind.PATCH_REVIEW.value)
+        )
         item = TabHandoffPayload(
             handoff_id=handoff_id,
             source_tab_id=source_tab_id,
@@ -421,12 +452,26 @@ class PatchHandoffManager:
             combined_text=combined,
             created_at=now,
             remaining_auto_tabs=max(0, int(remaining_auto_tabs)),
+            handoff_kind=kind_val,
+            target_file=target_file,
         )
         with self._lock:
             self._prune_expired_locked(now)
             self._entries[handoff_id] = item
             self._entry_balances[handoff_id] = item.remaining_auto_tabs
         return item
+
+    def _record_claimed_tab_metadata_locked(self, tab_id: str, item: TabHandoffPayload) -> None:
+        self._record_auto_tab_locked(
+            tab_id,
+            item.remaining_auto_tabs,
+            balance=self._entry_balances.get(item.handoff_id, item.remaining_auto_tabs),
+        )
+        if item.response_text.strip():
+            self._record_tab_patch_locked(tab_id, item.response_text, overwrite=True)
+        # 新規分割タスク開始時は旧ファイルのパッチ系譜を引き継がない
+        if item.handoff_kind != HandoffKind.FILE_SPLIT.value:
+            self._record_lineage_locked(tab_id, item.source_tab_id)
 
     def assign_tab(self, handoff_id: str, tab_id: str) -> Optional[TabHandoffPayload]:
         """指定引き継ぎIDに新規生成タブのtab_idを関連付ける。"""
@@ -450,16 +495,12 @@ class PatchHandoffManager:
                 created_at=existing.created_at,
                 assigned_tab_id=clean_tid,
                 remaining_auto_tabs=existing.remaining_auto_tabs,
+                handoff_kind=existing.handoff_kind,
+                target_file=existing.target_file,
             )
             self._entries[clean_hid] = updated
             # unbind・リロード後も自動生成タブの残り回数を保持するため記録
-            self._record_auto_tab_locked(
-                clean_tid,
-                existing.remaining_auto_tabs,
-                balance=self._entry_balances.get(clean_hid, existing.remaining_auto_tabs),
-            )
-            self._record_tab_patch_locked(clean_tid, existing.response_text, overwrite=True)
-            self._record_lineage_locked(clean_tid, existing.source_tab_id)
+            self._record_claimed_tab_metadata_locked(clean_tid, updated)
             return updated
 
     def claim(self, handoff_id: str = "", tab_id: str = "") -> Optional[TabHandoffPayload]:
@@ -486,27 +527,17 @@ class PatchHandoffManager:
                         created_at=item.created_at,
                         assigned_tab_id=clean_tid,
                         remaining_auto_tabs=item.remaining_auto_tabs,
+                        handoff_kind=item.handoff_kind,
+                        target_file=item.target_file,
                     )
                     self._entries[clean_hid] = item
                 if clean_tid:
-                    self._record_auto_tab_locked(
-                        clean_tid,
-                        item.remaining_auto_tabs,
-                        balance=self._entry_balances.get(clean_hid, item.remaining_auto_tabs),
-                    )
-                    self._record_tab_patch_locked(clean_tid, item.response_text, overwrite=True)
-                    self._record_lineage_locked(clean_tid, item.source_tab_id)
+                    self._record_claimed_tab_metadata_locked(clean_tid, item)
                 return item
             if clean_tid:
                 for item in reversed(list(self._entries.values())):
                     if item.assigned_tab_id == clean_tid:
-                        self._record_auto_tab_locked(
-                            clean_tid,
-                            item.remaining_auto_tabs,
-                            balance=self._entry_balances.get(item.handoff_id, item.remaining_auto_tabs),
-                        )
-                        self._record_tab_patch_locked(clean_tid, item.response_text, overwrite=True)
-                        self._record_lineage_locked(clean_tid, item.source_tab_id)
+                        self._record_claimed_tab_metadata_locked(clean_tid, item)
                         return item
         return None
 
