@@ -1,15 +1,30 @@
-"""Module: @role: ai_meta設定ファイル群からの書き込みパス制御ポリシー読込およびサンプルファイル生成を担当する。"""
+"""Module: @role: ai_meta設定ファイル群からの書き込みパス制御ポリシー読込・サンプル生成および公開ファサードを提供する。"""
 import json
-import re
 import sys
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence
 
-from .write_path_policy import (
-    WritePathMode,
-    WritePathPolicy,
-    normalize_write_path_mode,
-    strip_matching_quotes,
+from .write_path_policy import WritePathMode, WritePathPolicy
+from .write_path_policy_constants import (
+    ALLOWED_WRITE_PATHS_KEYS,
+    ALLOWED_WRITE_PATH_TXT_FILES,
+    DEFAULT_WRITE_PATHS_SAMPLE_CONTENT,
+    DENIED_WRITE_PATHS_KEYS,
+    DENIED_WRITE_PATH_TXT_FILES,
+    META_CANDIDATE_CONFIG_FILES,
+    WRITE_PATHS_SAMPLE_FILENAME,
+    WRITE_PATH_ENABLED_KEYS,
+    WRITE_PATH_MODE_KEYS,
+)
+from .write_path_policy_parser import (
+    _extract_bracket_list_inner,
+    _parse_path_list_from_text,
+    _parse_write_policy_from_dict,
+    _parse_write_policy_from_text,
+    _strip_inline_comment,
+    extract_paths_from_val,
+    parse_allowed_write_paths_from_text,
+    split_inline_list_items,
 )
 
 try:
@@ -17,279 +32,6 @@ try:
 except ImportError:
     tomllib = None  # type: ignore[assignment]
 
-WRITE_PATHS_SAMPLE_FILENAME = "writable_paths.sample.txt"
-
-ALLOWED_WRITE_PATHS_KEYS = (
-    "allowed_write_paths",
-    "writable_paths",
-    "write_allow_paths",
-    "allow_write_paths",
-    "write_paths",
-    "write_whitelist",
-    "writable_whitelist",
-    "whitelist_write_paths",
-)
-
-DENIED_WRITE_PATHS_KEYS = (
-    "denied_write_paths",
-    "disallowed_write_paths",
-    "blocked_write_paths",
-    "forbidden_write_paths",
-    "write_deny_paths",
-    "deny_write_paths",
-    "readonly_paths",
-    "read_only_paths",
-    "write_blacklist",
-    "writable_blacklist",
-    "blacklist_write_paths",
-)
-
-WRITE_PATH_MODE_KEYS = (
-    "write_paths_mode",
-    "write_path_mode",
-    "write_policy_mode",
-    "writable_paths_mode",
-    "write_mode",
-)
-
-WRITE_PATH_ENABLED_KEYS = (
-    "write_paths_enabled",
-    "enable_write_paths",
-    "write_path_restriction",
-)
-
-ALLOWED_WRITE_PATH_TXT_FILES = (
-    "allowed_write_paths.txt",
-    "writable_paths.txt",
-    "allow_write_paths.txt",
-)
-
-DENIED_WRITE_PATH_TXT_FILES = (
-    "denied_write_paths.txt",
-    "deny_write_paths.txt",
-    "disallowed_write_paths.txt",
-    "blocked_write_paths.txt",
-    "readonly_paths.txt",
-)
-
-META_CANDIDATE_CONFIG_FILES = (
-    "config.json",
-    "settings.json",
-    "aiskel.json",
-    "aiskel_config.json",
-    ".aiskelrc.json",
-    ".aiskelrc",
-    "config.toml",
-    "settings.toml",
-    "config.yaml",
-    "config.yml",
-    "settings.yaml",
-    "settings.yml",
-    "config.ini",
-    "settings.ini",
-)
-
-DEFAULT_WRITE_PATHS_SAMPLE_CONTENT = """# aiskel 書き込み可能パス制御 設定サンプル (writable_paths.sample.txt)
-#
-# このファイルは参考用のサンプルです（このファイル自体は設定として読み込まれません）。
-# 実際の設定は同じフォルダ内の config.json (または config.toml / config.yaml / *.txt) に記述してください。
-#
-# ==============================================================================
-# 1. モード設定 (write_paths_mode)
-# ==============================================================================
-#   - "disabled"  : 書き込みパス制限を無効化（すべてのパスへ書き込み可。リストを残したまま一時停止可能）
-#   - "whitelist" : ホワイトリストモード（allowed_write_paths に一致するパスのみ許可。空なら全拒否）
-#   - "blacklist" : ブラックリストモード（denied_write_paths に一致するパスのみ拒否。それ以外は許可）
-#   - "both"      : ホワイトリストとブラックリストを併用（許可対象のうち禁止対象を除外）
-#   - "auto"      : 自動判定（デフォルト。非空のリストのみ有効化し、両方指定時はブラックリスト優先。両方空なら制限なし）
-#
-# ※ パス指定ルール:
-#   - 相対パスはプロジェクトルート基準で解決されます
-#   - ディレクトリ: "src/" または "src" -> 配下の全ファイル・サブディレクトリに一致
-#   - 単一ファイル: "src/main.py" -> 指定ファイルのみに一致
-#   - ワイルドカード(Glob): "*.env", "src/**/*.py", "config/*.secret.json" 等が利用可能
-#
-# ==============================================================================
-# 2. config.json 記述例
-# ==============================================================================
-#
-# [例A] ホワイトリスト（指定ディレクトリ・ファイルのみ書き込み許可）
-# {
-#   "write_paths_mode": "whitelist",
-#   "allowed_write_paths": [
-#     "src/",
-#     "tests/",
-#     "README.md"
-#   ],
-#   "denied_write_paths": []
-# }
-#
-# [例B] ブラックリスト（重要ファイル・機密ファイルのみ書き込み禁止）
-# {
-#   "write_paths_mode": "blacklist",
-#   "allowed_write_paths": [],
-#   "denied_write_paths": [
-#     ".env",
-#     "*.secret.*",
-#     "config/production.json",
-#     "migrations/"
-#   ]
-# }
-#
-# [例C] ホワイトリスト + ブラックリスト併用（src/ 配下のみ許可しつつ、一部ファイルを除外）
-# {
-#   "write_paths_mode": "both",
-#   "allowed_write_paths": [
-#     "src/"
-#   ],
-#   "denied_write_paths": [
-#     "src/generated/",
-#     "src/core/secrets.py"
-#   ]
-# }
-#
-# [例D] 無効化（リスト設定を保持したまま、制限を一時的に無効化）
-# {
-#   "write_paths_mode": "disabled",
-#   "allowed_write_paths": ["src/"],
-#   "denied_write_paths": [".env"]
-# }
-#
-# ==============================================================================
-# 3. テキストファイル / YAML / TOML での記述例
-# ==============================================================================
-# [テキストファイル] 同フォルダに以下のファイルを配置（1行1パス、# でコメント）:
-#   - ai_meta/allowed_write_paths.txt : ホワイトリスト用
-#   - ai_meta/denied_write_paths.txt  : ブラックリスト用
-#
-# [YAML (config.yaml)]
-#   write_paths_mode: whitelist
-#   allowed_write_paths:
-#     - src/
-#     - tests/
-#   denied_write_paths:
-#     - "*.env"
-#
-# [TOML (config.toml)]
-#   write_paths_mode = "blacklist"
-#   denied_write_paths = [".env", "secrets/"]
-"""
-
-def extract_paths_from_val(val: object) -> List[str]:
-    paths: List[str] = []
-    if isinstance(val, str):
-        for line in val.splitlines():
-            cleaned = strip_matching_quotes(line)
-            if cleaned and not cleaned.startswith(("#", "//", ";")):
-                paths.append(cleaned)
-    elif isinstance(val, list):
-        for item in val:
-            if isinstance(item, str):
-                cleaned = strip_matching_quotes(item)
-                if cleaned:
-                    paths.append(cleaned)
-    return paths
-
-def split_inline_list_items(inner: str) -> List[str]:
-    # なぜ必要か: クォート内のカンマや空白を保持したまま配列要素と行末コメントを分離するため
-    items: List[str] = []
-    buf: List[str] = []
-    quote_char: Optional[str] = None
-    i = 0
-    while i < len(inner):
-        ch = inner[i]
-        if quote_char:
-            if ch == quote_char:
-                quote_char = None
-            else:
-                buf.append(ch)
-        else:
-            if ch in ('"', "'"):
-                quote_char = ch
-            elif ch == "#":
-                while i < len(inner) and inner[i] != "\n":
-                    i += 1
-                continue
-            elif ch in (",", "\n"):
-                token = "".join(buf).strip()
-                if token:
-                    items.append(token)
-                buf.clear()
-            else:
-                buf.append(ch)
-        i += 1
-    token = "".join(buf).strip()
-    if token:
-        items.append(token)
-    return items
-
-def _strip_inline_comment(
-    text: str,
-    *,
-    allow_semicolon: bool = True,
-    require_hash_boundary: bool = False,
-) -> str:
-    quote_char: Optional[str] = None
-    just_closed_quote = False
-    for idx, ch in enumerate(text):
-        if quote_char:
-            if ch == quote_char:
-                quote_char = None
-                just_closed_quote = True
-            continue
-        if ch in ('"', "'"):
-            # なぜ必要か: 要素先頭や空白直後のクォートのみ文字列囲みとみなすため
-            if idx == 0 or text[idx - 1].isspace():
-                quote_char = ch
-                just_closed_quote = False
-                continue
-        if ch == "#":
-            if not require_hash_boundary or idx == 0 or text[idx - 1].isspace() or just_closed_quote:
-                return text[:idx].strip()
-        elif allow_semicolon and ch == ";":
-            return text[:idx].strip()
-        just_closed_quote = False
-    return text.strip()
-
-def _extract_bracket_list_inner(lines: List[str], start_idx: int, initial_rhs: str) -> str:
-    # なぜ必要か: クォート内のGlob文字クラス([...])やコメント内の]で配列終端を誤認しないため
-    def _find_closing_bracket(text: str) -> int:
-        quote_char: Optional[str] = None
-        depth = 0
-        i = 0
-        while i < len(text):
-            ch = text[i]
-            if quote_char:
-                if ch == quote_char:
-                    quote_char = None
-            else:
-                if ch in ('"', "'"):
-                    quote_char = ch
-                elif ch == "#":
-                    while i < len(text) and text[i] != "\n":
-                        i += 1
-                    continue
-                elif ch == "[":
-                    depth += 1
-                elif ch == "]":
-                    depth -= 1
-                    if depth == 0:
-                        return i
-            i += 1
-        return -1
-
-    collected = [initial_rhs]
-    end_idx = start_idx
-    while end_idx < len(lines):
-        joined = "\n".join(collected)
-        close_pos = _find_closing_bracket(joined)
-        if close_pos != -1:
-            return joined[1:close_pos]
-        end_idx += 1
-        if end_idx >= len(lines):
-            break
-        collected.append(lines[end_idx])
-    return "\n".join(collected)[1:]
 
 def _collect_meta_dirs(project_root: Path, output_dir: Optional[Path] = None) -> List[Path]:
     meta_dirs: List[Path] = []
@@ -318,58 +60,6 @@ def iter_meta_config_files(
             target = d / fname
             if target.is_file():
                 yield target
-
-def _parse_path_list_from_text(
-    content: str,
-    keys: Sequence[str],
-) -> Tuple[Optional[List[str]], bool]:
-    keys_alt = "|".join(re.escape(k) for k in keys)
-    key_re = re.compile(rf"^([ \t]*)(?:{keys_alt})[ \t]*([:=])[ \t]*(.*)$")
-    lines = content.splitlines()
-    for idx, line in enumerate(lines):
-        m = key_re.match(line)
-        if not m:
-            continue
-        base_indent = len(m.group(1).expandtabs(2))
-        rhs = m.group(3).strip()
-
-        if rhs.startswith("["):
-            inner = _extract_bracket_list_inner(lines, idx, rhs)
-            return [p for p in (strip_matching_quotes(x) for x in split_inline_list_items(inner)) if p], False
-
-        rhs_no_comment = _strip_inline_comment(rhs)
-        if rhs_no_comment.lower() in ("false", "null", "none"):
-            return [], rhs_no_comment.lower() == "false"
-
-        if not rhs_no_comment:
-            yaml_items: List[str] = []
-            j = idx + 1
-            while j < len(lines):
-                raw_next = lines[j]
-                stripped_next = raw_next.strip()
-                if not stripped_next or stripped_next.startswith("#"):
-                    j += 1
-                    continue
-                next_indent = len(raw_next[: len(raw_next) - len(raw_next.lstrip(" \t"))].expandtabs(2))
-                if next_indent < base_indent:
-                    break
-                if stripped_next.startswith("- ") or stripped_next == "-":
-                    item_raw = _strip_inline_comment(
-                        stripped_next[1:].strip(),
-                        allow_semicolon=False,
-                        require_hash_boundary=True,
-                    )
-                    if item_raw:
-                        cleaned = strip_matching_quotes(item_raw)
-                        if cleaned:
-                            yaml_items.append(cleaned)
-                    j += 1
-                    continue
-                break
-            return yaml_items, False
-
-        return [p for p in (strip_matching_quotes(x) for x in split_inline_list_items(rhs_no_comment)) if p], False
-    return None, False
 
 def parse_allowed_write_paths_from_text(content: str) -> Optional[List[str]]:
     parsed, _ = _parse_path_list_from_text(content, ALLOWED_WRITE_PATHS_KEYS)
