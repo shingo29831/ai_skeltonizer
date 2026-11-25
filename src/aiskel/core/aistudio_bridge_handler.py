@@ -169,6 +169,7 @@ def build_bridge_request_handler_class(
                                 "bind": "/api/bind",
                                 "unbind": "/api/unbind",
                                 "prompt": "/api/prompt",
+                                "summary_prompt": "/api/summary_prompt",
                                 "execute": "/api/execute",
                             },
                         },
@@ -335,6 +336,20 @@ def build_bridge_request_handler_class(
                     self._send_json(status_code, body)
                 except Exception as e:
                     print(f"✖ 自動Run送信処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/summary_prompt":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_summary_prompt_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 要約・プロンプト取得中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
                     self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 

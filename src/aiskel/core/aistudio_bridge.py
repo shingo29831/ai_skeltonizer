@@ -25,6 +25,7 @@ from .aistudio_command import (
 from .aistudio_handoff import (
     MAX_HANDOFF_PAYLOAD_BYTES,
     PatchHandoffManager,
+    format_summary_prompt_text,
     has_patch_delimiters_in_text,
     load_project_summary_text,
 )
@@ -240,19 +241,10 @@ class AiskelBridgeServer:
             return str(addr[0]), int(addr[1])
         return normalize_bind_host(self.host), self.port
 
-    def _set_startup_ready_in_progress(self, value: bool) -> None:
-        with self._queue_state_lock:
-            self._startup_ready_in_progress = value
-
-    def _is_startup_ready_in_progress(self) -> bool:
-        with self._queue_state_lock:
-            return self._startup_ready_in_progress
-
     def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
         enriched = dict(info)
         enriched["auto_run_default"] = self._auto_run_mode == "enabled"
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
-        enriched["startup_paste_in_progress"] = self._is_startup_ready_in_progress()
         return enriched
 
     def get_prompt_payload(self, pattern: str = PromptPattern.DEFAULT.value) -> Tuple[int, Dict[str, object]]:
@@ -270,6 +262,38 @@ class AiskelBridgeServer:
             "ok": True,
             "pattern": normalized,
             "prompt": prompt_text,
+            "available_patterns": list(list_prompt_patterns()),
+        }
+
+    def handle_summary_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """最新のプロジェクト要約バンドルと指定パターンのプロンプトを取得し統合テキストを返す。"""
+        raw_pattern = payload.get("pattern")
+        pattern = str(raw_pattern).strip() if isinstance(raw_pattern, str) and raw_pattern.strip() else PromptPattern.DEFAULT.value
+        try:
+            prompt_text = load_prompt_for_pattern(self.project_root, pattern)
+        except ValueError as e:
+            return int(HTTPStatus.BAD_REQUEST), {
+                "ok": False,
+                "message": str(e),
+                "available_patterns": list(list_prompt_patterns()),
+            }
+
+        with self._exec_lock:
+            try:
+                summary_text = load_project_summary_text(self.project_root)
+            except (OSError, ValueError, RuntimeError) as e:
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "message": f"要約バンドルの取得に失敗しました: {e}",
+                }
+
+        combined_text = format_summary_prompt_text(prompt_text, summary_text)
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "pattern": pattern.lower(),
+            "prompt": prompt_text,
+            "summary": summary_text,
+            "combined_text": combined_text,
             "available_patterns": list(list_prompt_patterns()),
         }
 
@@ -494,8 +518,8 @@ class AiskelBridgeServer:
 
     @staticmethod
     def _make_job_result(action: str, ok: bool, message: str, exit_code: int = 1) -> Any:
-        # /api/handoff, /api/trigger_runはdictをJSON直列化するため、actionに応じて戻り値型を厳密に揃える
-        if action in ("handoff", "trigger_run"):
+        # dict応答APIはJSON直列化するため、actionに応じて戻り値型を厳密に揃える
+        if action in ("handoff", "trigger_run", "summary_prompt"):
             return {"ok": ok, "message": message}
         return BridgeExecutionResult(
             ok=ok,
@@ -663,6 +687,8 @@ class AiskelBridgeServer:
                 return self.handle_handoff_create(payload)
             if action == "trigger_run":
                 return self.handle_trigger_run_payload(payload)
+            if action == "summary_prompt":
+                return self.handle_summary_prompt_payload(payload)
             return self.handle_execute_payload(payload)
 
         if not job.done_event.wait(timeout=EXECUTION_WAIT_TIMEOUT_SEC):
@@ -685,6 +711,9 @@ class AiskelBridgeServer:
 
     def _dispatch_trigger_run_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="trigger_run")
+
+    def _dispatch_summary_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="summary_prompt")
 
     def _drain_pending_jobs_locked(self) -> None:
         while True:
@@ -745,8 +774,6 @@ class AiskelBridgeServer:
                     on_ready(self._stop_event)
                 except Exception as e:
                     print(f"⚠ ブリッジ起動後処理でエラーが発生しました: {e}", file=sys.stderr, flush=True)
-                finally:
-                    self._set_startup_ready_in_progress(False)
 
             while not self._stop_event.is_set():
                 try:
@@ -758,6 +785,8 @@ class AiskelBridgeServer:
                         status_code, result = self.handle_handoff_create(job.payload)
                     elif job.action == "trigger_run":
                         status_code, result = self.handle_trigger_run_payload(job.payload)
+                    elif job.action == "summary_prompt":
+                        status_code, result = self.handle_summary_prompt_payload(job.payload)
                     else:
                         status_code, result = self.handle_execute_payload(job.payload)
                     job.status_code = status_code
@@ -786,7 +815,6 @@ class AiskelBridgeServer:
             with self._queue_state_lock:
                 self._shutting_down = True
                 self._use_main_thread_queue = False
-                self._startup_ready_in_progress = False
                 self._drain_pending_jobs_locked()
 
     def shutdown(self) -> None:

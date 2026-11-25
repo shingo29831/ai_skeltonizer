@@ -112,6 +112,15 @@ def format_handoff_prompt_text(
     return "\n\n".join(sections)
 
 
+def format_summary_prompt_text(prompt_text: str, summary_text: str) -> str:
+    """プロンプト指示とプロジェクト要約バンドルをチャット欄挿入用テキストへ統合する。"""
+    prompt = (prompt_text or "").strip()
+    summary = (summary_text or "").strip()
+    if prompt and summary:
+        return f"{prompt}\n\n{summary}"
+    return prompt or summary
+
+
 def _find_existing_bundle_file(project_root: Path, output_dir: Path) -> Optional[Path]:
     configured = load_bundle_filename_from_meta(project_root, output_dir)
     if configured:
