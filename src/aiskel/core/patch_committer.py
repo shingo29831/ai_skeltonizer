@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from ..config import (
-    is_write_path_allowed,
-    load_allowed_write_paths_from_meta,
-    resolve_allowed_write_paths,
+    WritePathPolicy,
+    load_write_path_policy_from_meta,
 )
 from .patch_matcher import generate_diff_display
 from .patch_result import PatchResult
@@ -66,18 +65,18 @@ def commit_patch_transaction(
     allowed_write_paths: Optional[Sequence[Union[str, Path]]] = None,
 ) -> PatchResult:
     """構文検証・ドライラン出力・ディスクへのトランザクションコミットを一括実行する。"""
-    effective_allowed_paths = (
-        load_allowed_write_paths_from_meta(project_root)
+    write_policy = (
+        load_write_path_policy_from_meta(project_root)
         if allowed_write_paths is None
-        else resolve_allowed_write_paths(allowed_write_paths, project_root)
+        else WritePathPolicy.from_allowed_paths(allowed_write_paths, project_root)
     )
-    if effective_allowed_paths:
-        disallowed_targets = {
-            p
-            for p in (modified_files | files_to_delete)
-            if not is_write_path_allowed(p, effective_allowed_paths)
-        }
-        for p in sorted(disallowed_targets):
+    if write_policy.is_active:
+        disallowed_reasons: Dict[Path, str] = {}
+        for p in sorted(modified_files | files_to_delete):
+            allowed, reject_reason = write_policy.check_path(p)
+            if not allowed:
+                disallowed_reasons[p] = reject_reason
+        for p, reject_reason in disallowed_reasons.items():
             try:
                 rel_p = p.relative_to(project_root)
             except ValueError:
@@ -86,7 +85,7 @@ def commit_patch_transaction(
             files_to_delete.discard(p)
             file_contents[p] = original_contents.get(p, "")
             print(f"✖ 書き込み拒否 (許可されていないパス): {rel_p}")
-            failed_details.append(f"{rel_p}: ai_meta設定の allowed_write_paths により許可されていないパスです")
+            failed_details.append(f"{rel_p}: {reject_reason}")
             fail_count += 1
 
     err_count, syntax_failed_details, syntax_error_files = validate_python_syntax(

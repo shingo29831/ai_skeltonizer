@@ -4,9 +4,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from ..config import (
-    is_write_path_allowed,
-    load_allowed_write_paths_from_meta,
-    resolve_allowed_write_paths,
+    WritePathPolicy,
+    load_write_path_policy_from_meta,
 )
 from .patch_committer import commit_patch_transaction
 from .patch_result import PatchResult
@@ -87,10 +86,10 @@ def apply_block_replacement(
     allowed_write_paths: Optional[Sequence[Union[str, Path]]] = None,
 ) -> PatchResult:
     """Markdownコードブロック記法から関数・クラス単位の自動置換・追加を実行する。"""
-    effective_allowed_paths = (
-        load_allowed_write_paths_from_meta(project_root)
+    write_policy = (
+        load_write_path_policy_from_meta(project_root)
         if allowed_write_paths is None
-        else resolve_allowed_write_paths(allowed_write_paths, project_root)
+        else WritePathPolicy.from_allowed_paths(allowed_write_paths, project_root)
     )
     success_count = 0
     fail_count = 0
@@ -115,7 +114,7 @@ def apply_block_replacement(
         if file_match:
             raw_path = Path(file_match.group(1))
             current_file = raw_path.resolve() if raw_path.is_absolute() else (project_root / raw_path).resolve()
-            if current_file not in file_contents and is_write_path_allowed(current_file, effective_allowed_paths):
+            if current_file not in file_contents and write_policy.is_allowed(current_file):
                 if current_file.exists():
                     orig_text = current_file.read_text(encoding="utf-8")
                     file_contents[current_file] = orig_text
@@ -133,7 +132,8 @@ def apply_block_replacement(
                 i += 1
 
             if current_file:
-                if not is_write_path_allowed(current_file, effective_allowed_paths):
+                allowed, reject_reason = write_policy.check_path(current_file)
+                if not allowed:
                     try:
                         disp_path = current_file.relative_to(project_root)
                     except ValueError:
@@ -141,7 +141,7 @@ def apply_block_replacement(
                     print(f"✖ 書き込み拒否 (許可されていないパス): {disp_path} (行 {block_start_line})")
                     failed_details.append(
                         f"{disp_path}: 書き込み拒否 (行 {block_start_line})\n"
-                        f"  -> ai_meta設定の allowed_write_paths により許可されていないパスです"
+                        f"  -> {reject_reason}"
                     )
                     fail_count += 1
                 else:

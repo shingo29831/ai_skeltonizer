@@ -4,9 +4,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from ..config import (
-    is_write_path_allowed,
-    load_allowed_write_paths_from_meta,
-    resolve_allowed_write_paths,
+    WritePathPolicy,
+    load_write_path_policy_from_meta,
 )
 from .block_patcher import (
     FILE_HEADER_PATTERN,
@@ -91,10 +90,10 @@ def apply_patch(
     パッチテキストを解析し、ファイルを書き換える。
     コード削除およびファイル自体の削除操作にも対応する。
     """
-    effective_allowed_paths = (
-        load_allowed_write_paths_from_meta(project_root)
+    write_policy = (
+        load_write_path_policy_from_meta(project_root)
         if allowed_write_paths is None
-        else resolve_allowed_write_paths(allowed_write_paths, project_root)
+        else WritePathPolicy.from_allowed_paths(allowed_write_paths, project_root)
     )
 
     if not has_patch_delimiters(patch_text):
@@ -141,14 +140,15 @@ def apply_patch(
         except ValueError:
             disp_path = current_file
 
-        if not is_write_path_allowed(current_file, effective_allowed_paths):
+        allowed, reject_reason = write_policy.check_path(current_file)
+        if not allowed:
             action_label = "リバート" if revert else (
                 "ファイル削除" if (chunk.is_standalone_file_delete or chunk.is_file_deletion) else "書き込み"
             )
             print(f"✖ {action_label}拒否 (許可されていないパス): {disp_path} (パッチ行 {chunk.block_line_no})")
             failed_details.append(
                 f"{disp_path}: {action_label}拒否 (パッチ行 {chunk.block_line_no})\n"
-                f"  -> ai_meta設定の allowed_write_paths により許可されていないパスです"
+                f"  -> {reject_reason}"
             )
             fail_count += 1
             continue

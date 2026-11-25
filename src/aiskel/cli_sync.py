@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Optional, Set, Tuple
 
 from .config import (
+    WRITE_PATHS_SAMPLE_FILENAME,
     SkeletonConfig,
     ensure_default_config_file,
+    ensure_write_paths_sample_file,
     load_bloat_config_from_meta,
     load_bundle_filename_from_meta,
 )
@@ -77,6 +79,13 @@ def run_sync(
         except ValueError:
             rel_cfg = created_cfg
         print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
+    created_sample = ensure_write_paths_sample_file(output_dir, project_root)
+    if created_sample and not quiet:
+        try:
+            rel_sample = created_sample.relative_to(project_root)
+        except ValueError:
+            rel_sample = created_sample
+        print(f"✨ 書き込み可能パス指定のサンプルを作成しました: {rel_sample}")
     if not config.bundle_filename:
         config.bundle_filename = load_bundle_filename_from_meta(project_root, output_dir)
     target_files = get_target_files(project_root)
@@ -124,6 +133,13 @@ def run_sync(
             except ValueError:
                 rel_cfg = cfg_file
             print(f"  - 検証設定ファイル  : {rel_cfg} (適用後テスト実行用)")
+        sample_file = output_dir / WRITE_PATHS_SAMPLE_FILENAME
+        if sample_file.exists():
+            try:
+                rel_sample = sample_file.relative_to(project_root)
+            except ValueError:
+                rel_sample = sample_file
+            print(f"  - 書き込み制御見本  : {rel_sample} (許可/禁止パスの書き方サンプル)")
 
         print("\n--- トークン・予算削減アナライザー ---")
         print(f"  - 元のフルコード総量 : 約 {stats.raw_tokens:,} tokens")

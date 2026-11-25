@@ -7,21 +7,29 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
-try:
-    import tomllib  # Python 3.11+
-except ImportError:
-    tomllib = None  # type: ignore[assignment]
+from .write_path_policy import (
+    WritePathMode,
+    WritePathPolicy,
+    is_write_path_allowed,
+    resolve_allowed_write_paths,
+    strip_matching_quotes as _strip_matching_quotes,
+)
+from .write_path_policy_loader import (
+    ALLOWED_WRITE_PATHS_KEYS as _ALLOWED_WRITE_PATHS_KEYS,
+    META_CANDIDATE_CONFIG_FILES as _META_CANDIDATE_CONFIG_FILES,
+    WRITE_PATHS_SAMPLE_FILENAME,
+    ensure_write_paths_sample_file,
+    extract_paths_from_val as _extract_paths_from_val,
+    iter_meta_config_files as _iter_meta_config_files,
+    load_allowed_write_paths_from_meta,
+    load_write_path_policy_from_meta,
+    parse_allowed_write_paths_from_text as _parse_allowed_write_paths_from_text,
+    split_inline_list_items as _split_inline_list_items,
+)
 
 DEFAULT_PATCH_HANDOFF_MAX_TABS = 1
-_ALLOWED_WRITE_PATHS_KEYS = (
-    "allowed_write_paths",
-    "writable_paths",
-    "write_allow_paths",
-    "allow_write_paths",
-    "write_paths",
-)
 _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "patch_handoff_max_tabs",
     "handoff_max_tabs",
@@ -30,22 +38,6 @@ _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "max_auto_tabs",
     "patch_auto_tab_limit",
     "max_handoff_tabs",
-)
-_META_CANDIDATE_CONFIG_FILES = (
-    "config.json",
-    "settings.json",
-    "aiskel.json",
-    "aiskel_config.json",
-    ".aiskelrc.json",
-    ".aiskelrc",
-    "config.toml",
-    "settings.toml",
-    "config.yaml",
-    "config.yml",
-    "settings.yaml",
-    "settings.yml",
-    "config.ini",
-    "settings.ini",
 )
 
 
@@ -143,7 +135,11 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
     # なぜ必要か: 既に何らかの設定ファイルが存在する場合は上書き破壊を防止するため
     existing_cmd = load_test_command_from_meta(project_root, output_dir)
     config_path = output_dir / "config.json"
-    if existing_cmd is not None or config_path.exists():
+    if (
+        existing_cmd is not None
+        or config_path.exists()
+        or any(_iter_meta_config_files(project_root, output_dir))
+    ):
         return None
 
     try:
@@ -152,9 +148,15 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
             "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
             "exclude_paths": [],
+            "write_paths_mode": "auto",
             "allowed_write_paths": [],
+            "denied_write_paths": [],
             "patch_handoff_max_tabs": DEFAULT_PATCH_HANDOFF_MAX_TABS,
-            "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
+            "description": (
+                "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください "
+                "(配列または改行で複数指定可)。書き込み可能パスの指定方法は同フォルダの "
+                f"{WRITE_PATHS_SAMPLE_FILENAME} を参照してください"
+            ),
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return config_path
