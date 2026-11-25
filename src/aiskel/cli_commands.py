@@ -18,6 +18,7 @@ from .core.bloat_detector import (
 from .core.browser_focus import focus_default_browser
 from .core.clipboard import set_clipboard_text
 from .core.html_doc_parser import extract_html_docs, parse_html_to_markdown
+from .core.scope_builder import build_directory_index_file, build_scoped_bundle_text
 from .core.test_runner import run_validation_test
 from .core.token_counter import estimate_tokens
 from .core.watcher import watch_project
@@ -263,4 +264,103 @@ def handle_sync_command(
         no_ui=parsed_args.no_ui,
         quiet=False,
     )
+    if getattr(parsed_args, "index", False):
+        index_path = build_directory_index_file(
+            project_root,
+            output_dir,
+            include_files=not getattr(parsed_args, "index_no_files", False),
+            bundle_format=config.bundle_format,
+            custom_policy_path=config.policy_path,
+        )
+        idx_tokens = estimate_tokens(index_path.read_text(encoding="utf-8"))
+        try:
+            disp_idx = index_path.relative_to(project_root)
+        except ValueError:
+            disp_idx = index_path
+        print(f"  - 軽量インデックス  : {disp_idx} (約 {idx_tokens:,} tokens)")
+    return 0
+
+def handle_scope_command(
+    parsed_args: argparse.Namespace,
+    *,
+    comma_arg_processor: Optional[Callable[[List[str]], Set[str]]] = None,
+    clipboard_writer: Optional[Callable[[str], None]] = None,
+    token_estimator: Optional[Callable[[str], int]] = None,
+) -> int:
+    """指定ディレクトリ/ファイルと直接依存先のみに限定したスコープバンドルを生成する。"""
+    writer = clipboard_writer or set_clipboard_text
+    estimator = token_estimator or estimate_tokens
+
+    project_root: Path = parsed_args.dir.resolve()
+    if not project_root.exists() or not project_root.is_dir():
+        print(f"エラー: 指定されたプロジェクトディレクトリが存在しません: {project_root}", file=sys.stderr)
+        return 1
+
+    raw_targets = getattr(parsed_args, "targets", []) or []
+    if comma_arg_processor is not None:
+        raw_specs = sorted(comma_arg_processor(raw_targets))
+    else:
+        raw_specs = []
+        for item in raw_targets:
+            for part in str(item).split(","):
+                cleaned = part.strip()
+                if cleaned and cleaned not in raw_specs:
+                    raw_specs.append(cleaned)
+    if not raw_specs:
+        print("エラー: スコープ対象のディレクトリまたはファイルを1つ以上指定してください。", file=sys.stderr)
+        return 1
+
+    shallow = bool(getattr(parsed_args, "shallow", False)) and not bool(getattr(parsed_args, "recursive", False))
+    policy_arg = getattr(parsed_args, "policy", None)
+    scoped_text, resolution = build_scoped_bundle_text(
+        project_root,
+        raw_specs,
+        default_recursive=not shallow,
+        include_deps=not getattr(parsed_args, "no_deps", False),
+        include_tree=not getattr(parsed_args, "no_tree", False),
+        bundle_format=getattr(parsed_args, "format", "txt"),
+        custom_policy_path=policy_arg.resolve() if policy_arg else None,
+        extra_text_max_chars=max(0, int(getattr(parsed_args, "max_extra_chars", 8000))),
+    )
+
+    if resolution.missing_specs:
+        print(
+            f"⚠ 一部の指定パスが見つからないか対象外です: {', '.join(resolution.missing_specs)}",
+            file=sys.stderr,
+        )
+    if not scoped_text.strip():
+        print("エラー: 有効なスコープ対象ファイルが見つかりませんでした。", file=sys.stderr)
+        return 1
+
+    est_tokens = estimator(scoped_text)
+    output_file: Optional[Path] = getattr(parsed_args, "output", None)
+    if output_file is not None:
+        resolved_out = output_file.resolve()
+        resolved_out.parent.mkdir(parents=True, exist_ok=True)
+        resolved_out.write_text(scoped_text, encoding="utf-8")
+        print(
+            f"✔ スコープ限定バンドルを保存しました: {output_file} "
+            f"(対象 {len(resolution.primary_files)} + 依存 {len(resolution.dependency_files)} ファイル, 約 {est_tokens:,} tokens)",
+            file=sys.stderr,
+        )
+
+    if getattr(parsed_args, "clipboard", False):
+        try:
+            writer(scoped_text)
+            print(
+                f"📋 スコープ限定バンドルをクリップボードにコピーしました "
+                f"(対象 {len(resolution.primary_files)} + 依存 {len(resolution.dependency_files)} ファイル, 約 {est_tokens:,} tokens)",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"⚠ クリップボードへのコピーに失敗しました: {e}", file=sys.stderr)
+    elif output_file is None and sys.stderr.isatty():
+        print(
+            f"🎯 スコープ限定バンドルを生成しました "
+            f"(対象 {len(resolution.primary_files)} + 依存 {len(resolution.dependency_files)} ファイル, 約 {est_tokens:,} tokens)",
+            file=sys.stderr,
+        )
+
+    if output_file is None:
+        print(scoped_text)
     return 0

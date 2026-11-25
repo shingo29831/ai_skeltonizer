@@ -4,6 +4,7 @@ from typing import Optional, Tuple, Union
 
 from .aistudio_prompt_loader import (
     _DEFAULT_PROMPT_FILENAMES,
+    _DISCOVERY_PROMPT_FILENAMES,
     _PROMPT_FILE_NAME,
     _PROMPT_SECTION_HEADER_RE,
     _REQUIRED_BUILTIN_KEYS,
@@ -161,6 +162,20 @@ def load_prompt_for_pattern(project_root: Path, pattern: Union[PromptPattern, st
                 {"{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL},
             )
         return build_patch_review_prompt(load_default_prompt(resolved), project_root=resolved)
+
+    if raw_value == PromptPattern.DISCOVERY.value:
+        custom_discovery = _read_first_plain_or_section(
+            resolved,
+            _DISCOVERY_PROMPT_FILENAMES,
+            PromptPattern.DISCOVERY.value,
+        )
+        if custom_discovery is None:
+            custom_discovery = _load_project_sections(resolved).get(PromptPattern.DISCOVERY.value)
+        if custom_discovery is not None:
+            if "{{BASE_RULES}}" in custom_discovery:
+                return _render_template(custom_discovery, {"{{BASE_RULES}}": load_default_prompt(resolved)})
+            return custom_discovery
+        return _load_builtin_sections()["discovery"]
 
     raise ValueError(f"未対応のプロンプトパターンです: {pattern}")
 

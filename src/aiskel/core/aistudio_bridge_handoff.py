@@ -3,17 +3,20 @@ import sys
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlsplit
 
 from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
 from .aistudio_auto_apply import AutoApplyOutcome, execute_auto_check_patch_detailed
 from .aistudio_auto_organize import validate_patch_against_rename_policy
 from .aistudio_bridge_types import MAX_ERROR_DETAIL_CHARS, MAX_PATCH_HANDOFF_MAX_TABS
 from .aistudio_config_infer import resolve_target_config_file, validate_config_infer_patch
+from .aistudio_discovery_handoff import handle_discovery_handoff
 from .aistudio_handoff import (
     has_applicable_patch_in_text,
     has_handoff_stop_signal_in_text,
     load_project_summary_text,
 )
+from .aistudio_handoff.text import extract_discovery_directives
 from .aistudio_prompts import (
     PATCH_HANDOFF_STOP_SIGNAL,
     PromptPattern,
@@ -194,6 +197,30 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
     response_text = raw_response if isinstance(raw_response, str) else ""
     stop_requested = (payload.get("stop_handoff") is True) or has_handoff_stop_signal_in_text(response_text)
     has_patch = bool(response_text.strip() and has_applicable_patch_in_text(response_text))
+    has_discovery = bool(
+        not has_patch
+        and not stop_requested
+        and payload.get("discovery_mode") is not False
+        and extract_discovery_directives(response_text) is not None
+    )
+
+    turn_id = str(payload.get("turn_id") or "").strip()
+    new_chat_url = str(payload.get("new_chat_url") or DEFAULT_NEW_CHAT_URL).strip()
+    parsed_new_url = urlsplit(new_chat_url)
+    if parsed_new_url.scheme.lower() != "https" or (parsed_new_url.hostname or "").lower() != "aistudio.google.com":
+        new_chat_url = DEFAULT_NEW_CHAT_URL
+
+    if has_discovery:
+        discovery_dedup_key = f"DISCOVERY::{req_tab_id}::{turn_id}" if turn_id else ""
+        return handle_discovery_handoff(
+            bridge,
+            payload,
+            req_tab_id=req_tab_id,
+            response_text=response_text,
+            new_chat_url=new_chat_url,
+            dedup_key=discovery_dedup_key,
+        )
+
     if not has_patch and not stop_requested:
         return int(HTTPStatus.BAD_REQUEST), {
             "ok": False,

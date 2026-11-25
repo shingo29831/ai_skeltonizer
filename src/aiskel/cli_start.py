@@ -33,6 +33,7 @@ from .cli_start_bundle import (
     DEFAULT_BUNDLE_FILENAMES,
     build_start_skeleton_config,
     copy_bundle_to_clipboard,
+    copy_start_bundle_or_discovery_index,
     find_conflicting_sync_options as _find_conflicting_sync_options,
     resolve_existing_bundle_path,
     validate_start_arguments,
@@ -82,6 +83,9 @@ def _copy_bundle_to_clipboard(
         no_bundle=no_bundle,
         token_estimator=estimate_tokens,
     )
+
+_ORIG_COPY_BUNDLE_TO_CLIPBOARD = _copy_bundle_to_clipboard
+_ORIG_COPY_BUNDLE_IMPORTED = copy_bundle_to_clipboard
 
 def is_supported_paste_url(url: str) -> bool:
     """起動時自動貼り付けの対象となるAIチャットサービスのURLか判定する。"""
@@ -149,15 +153,42 @@ def handle_start_command(
         bundle_path = _resolve_existing_bundle_path(project_root, output_dir)
 
     copied_bundle = False
+    two_stage_override = getattr(parsed_args, "two_stage", None)
     if not no_clipboard:
         writer = clipboard_writer or set_clipboard_text
-        copied_bundle = _copy_bundle_to_clipboard(
-            bundle_path,
-            project_root,
-            writer,
-            no_sync=no_sync,
-            no_bundle=no_bundle,
+        has_manual_scope = bool(
+            getattr(parsed_args, "focus", [])
+            or getattr(parsed_args, "git_diff", False)
+            or getattr(parsed_args, "only_nodes", [])
         )
+        # テスト等でクリップボード関数が差し替えられていない場合のみ2段階自動判定を通す
+        if (
+            _copy_bundle_to_clipboard is _ORIG_COPY_BUNDLE_TO_CLIPBOARD
+            and copy_bundle_to_clipboard is _ORIG_COPY_BUNDLE_IMPORTED
+            and two_stage_override is not False
+        ):
+            policy_arg = getattr(parsed_args, "policy", None)
+            copied_bundle = copy_start_bundle_or_discovery_index(
+                bundle_path,
+                project_root,
+                output_dir,
+                writer,
+                two_stage_override=two_stage_override,
+                has_manual_scope=has_manual_scope,
+                no_sync=no_sync,
+                no_bundle=no_bundle,
+                bundle_format=getattr(parsed_args, "format", "txt"),
+                policy_path=policy_arg.resolve() if policy_arg else None,
+                token_estimator=estimate_tokens,
+            )
+        else:
+            copied_bundle = _copy_bundle_to_clipboard(
+                bundle_path,
+                project_root,
+                writer,
+                no_sync=no_sync,
+                no_bundle=no_bundle,
+            )
         printed_prior = True
 
     no_focus = getattr(parsed_args, "no_focus", False)
@@ -244,10 +275,11 @@ def handle_start_command(
     }
     try:
         sig = inspect.signature(run_bridge_server)
-        if "command_cwd" in sig.parameters or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-        ):
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if "command_cwd" in sig.parameters or has_var_kw:
             bridge_kwargs["command_cwd"] = launch_cwd
+        if two_stage_override is not None and ("two_stage" in sig.parameters or has_var_kw):
+            bridge_kwargs["two_stage"] = two_stage_override
     except (TypeError, ValueError):
         pass
 

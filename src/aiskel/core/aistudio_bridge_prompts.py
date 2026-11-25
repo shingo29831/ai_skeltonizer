@@ -26,11 +26,14 @@ from .aistudio_handoff import (
     format_summary_prompt_text,
     load_project_summary_text,
 )
+from ..config import load_two_stage_config_from_meta
 from .aistudio_prompts import (
     PromptPattern,
     list_prompt_patterns,
     load_prompt_for_pattern,
 )
+from .scope_builder import build_directory_index_text
+from .token_counter import estimate_tokens
 
 DEFAULT_NEW_CHAT_URL = "https://aistudio.google.com/prompts/new_chat"
 
@@ -55,8 +58,21 @@ def get_prompt_response(
         "available_patterns": list(list_prompt_patterns()),
     }
 
+def _normalize_two_stage_param(raw_val: object) -> object:
+    if raw_val is None:
+        return "auto"
+    if isinstance(raw_val, bool):
+        return raw_val
+    if isinstance(raw_val, str):
+        low = raw_val.strip().lower()
+        if low in ("true", "1", "on", "yes"):
+            return True
+        if low in ("false", "0", "off", "no"):
+            return False
+    return "auto"
+
 def handle_summary_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
-    """最新のプロジェクト要約バンドルと指定パターンのプロンプトを取得し統合テキストを返す。"""
+    """最新のプロジェクト要約バンドル(または2段階探索インデックス)と指定パターンのプロンプトを取得し統合テキストを返す。"""
     raw_pattern = payload.get("pattern")
     pattern = (
         str(raw_pattern).strip()
@@ -64,7 +80,7 @@ def handle_summary_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         else PromptPattern.DEFAULT.value
     )
     try:
-        prompt_text = load_prompt_for_pattern(bridge.project_root, pattern)
+        requested_prompt_text = load_prompt_for_pattern(bridge.project_root, pattern)
     except ValueError as e:
         return int(HTTPStatus.BAD_REQUEST), {
             "ok": False,
@@ -72,21 +88,74 @@ def handle_summary_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             "available_patterns": list(list_prompt_patterns()),
         }
 
+    two_stage_param = _normalize_two_stage_param(payload.get("two_stage", "auto"))
+    two_stage_cfg = load_two_stage_config_from_meta(bridge.project_root, bridge.output_dir)
+    explicit_two_stage = getattr(bridge, "_explicit_two_stage", None)
+    default_two_stage_enabled = explicit_two_stage if explicit_two_stage is not None else two_stage_cfg.enabled
+
     with bridge._exec_lock:
         try:
-            summary_text = load_project_summary_text(bridge.project_root)
+            full_summary_text = load_project_summary_text(bridge.project_root)
         except (OSError, ValueError, RuntimeError) as e:
             return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
                 "ok": False,
                 "message": f"要約バンドルの取得に失敗しました: {e}",
             }
 
-    combined_text = format_summary_prompt_text(prompt_text, summary_text)
+        full_tokens = estimate_tokens(full_summary_text)
+        explicit_pattern = pattern.lower() != PromptPattern.DEFAULT.value
+        use_two_stage = False
+        if pattern.lower() == PromptPattern.DISCOVERY.value:
+            use_two_stage = True
+        elif not explicit_pattern:
+            if two_stage_param is True:
+                use_two_stage = True
+            elif two_stage_param is False:
+                use_two_stage = False
+            elif explicit_two_stage is True:
+                use_two_stage = True
+            else:
+                use_two_stage = default_two_stage_enabled and (full_tokens >= two_stage_cfg.min_tokens)
+
+        if use_two_stage:
+            try:
+                prompt_text = (
+                    requested_prompt_text
+                    if pattern.lower() == PromptPattern.DISCOVERY.value
+                    else load_prompt_for_pattern(bridge.project_root, PromptPattern.DISCOVERY)
+                )
+                index_text = build_directory_index_text(
+                    bridge.project_root,
+                    include_files=two_stage_cfg.index_include_files,
+                )
+            except (OSError, ValueError, RuntimeError) as e:
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "message": f"軽量インデックスの生成に失敗しました: {e}",
+                }
+            index_tokens = estimate_tokens(index_text)
+            combined_text = format_summary_prompt_text(prompt_text, index_text)
+            return int(HTTPStatus.OK), {
+                "ok": True,
+                "pattern": PromptPattern.DISCOVERY.value,
+                "two_stage_used": True,
+                "full_tokens": full_tokens,
+                "index_tokens": index_tokens,
+                "prompt": prompt_text,
+                "summary": index_text,
+                "combined_text": combined_text,
+                "available_patterns": list(list_prompt_patterns()),
+            }
+
+    combined_text = format_summary_prompt_text(requested_prompt_text, full_summary_text)
     return int(HTTPStatus.OK), {
         "ok": True,
         "pattern": pattern.lower(),
-        "prompt": prompt_text,
-        "summary": summary_text,
+        "two_stage_used": False,
+        "full_tokens": full_tokens,
+        "index_tokens": full_tokens,
+        "prompt": requested_prompt_text,
+        "summary": full_summary_text,
         "combined_text": combined_text,
         "available_patterns": list(list_prompt_patterns()),
     }

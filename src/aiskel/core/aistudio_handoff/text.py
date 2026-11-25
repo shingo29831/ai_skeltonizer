@@ -1,7 +1,7 @@
 """Module: @role: パッチ・停止合図のテキスト検出、引き継ぎ用プロンプト整形、および要約バンドル読込を担当する。"""
 import re
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 from ...config import SkeletonConfig, load_bundle_filename_from_meta
 from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
@@ -160,6 +160,92 @@ def format_handoff_prompt_text(
         sections.append(_format_check_error_section(check_err))
     if summary:
         sections.append(summary)
+    return "\n\n".join(sections)
+
+_DISCOVERY_DIRS_TAG_RE = re.compile(r"<dirs>\s*([\s\S]*?)\s*</dirs>", re.IGNORECASE)
+_DISCOVERY_TASK_TAG_RE = re.compile(r"<task>\s*([\s\S]*?)\s*</task>", re.IGNORECASE)
+_DISCOVERY_INDEX_BLOCK_RE = re.compile(r"<ai_directory_index>[\s\S]*?</ai_directory_index>", re.IGNORECASE)
+_DISCOVERY_MD_INDEX_RE = re.compile(
+    r"(?:^|\n)# Directory Index\n(?:## Policy\n[\s\S]*?(?=## Project Root Files))?(?:## Project Root Files\n[^\n]*\n)?(?:## Directories\n(?:- [^\n]*(?:\n|$))*)?",
+    re.IGNORECASE,
+)
+_DISCOVERY_DUMMY_PATHS = frozenset({"...", "…", "path/to/dir1", "path/to/dir", "path/to/file.py"})
+
+def extract_discovery_directives(text: str) -> Optional[Tuple[str, List[str]]]:
+    """1度目探索応答から整理済みタスク(<task>)と対象ディレクトリ/ファイル群(<dirs>)を抽出する。"""
+    if not text or not text.strip() or has_applicable_patch_in_text(text) or has_handoff_stop_signal_in_text(text):
+        return None
+    dir_matches = list(_DISCOVERY_DIRS_TAG_RE.finditer(text))
+    if not dir_matches:
+        return None
+
+    selected_dirs: List[str] = []
+    for match in reversed(dir_matches):
+        raw_body = match.group(1)
+        items: List[str] = []
+        for line in raw_body.splitlines():
+            for part in line.split(","):
+                cleaned = part.strip().strip("`'\"").lstrip("-•* ").strip()
+                if not cleaned or cleaned.lower() in _DISCOVERY_DUMMY_PATHS:
+                    continue
+                if cleaned.startswith("<") and cleaned.endswith(">"):
+                    continue
+                if cleaned not in items:
+                    items.append(cleaned)
+        if items:
+            selected_dirs = items
+            break
+
+    if not selected_dirs:
+        return None
+
+    task_matches = list(_DISCOVERY_TASK_TAG_RE.finditer(text))
+    task_text = task_matches[-1].group(1).strip() if task_matches else ""
+    return task_text, selected_dirs
+
+def extract_original_user_request(user_prompt_text: str, discovery_prompt: str = "") -> str:
+    """1度目タブのユーザー発言全体からプロンプトとインデックス部を除いた元のユーザー要求原文を抽出する。"""
+    raw = (user_prompt_text or "").replace("\r\n", "\n").strip()
+    if not raw:
+        return ""
+    cleaned = _DISCOVERY_INDEX_BLOCK_RE.sub("", raw)
+    cleaned = _DISCOVERY_MD_INDEX_RE.sub("\n", cleaned)
+    prompt_trimmed = (discovery_prompt or "").replace("\r\n", "\n").strip()
+    if prompt_trimmed and prompt_trimmed in cleaned:
+        cleaned = cleaned.replace(prompt_trimmed, "")
+    # HTMLレンダリングで装飾記号が落ちた場合もプロンプト本文を除去する
+    cleaned = re.sub(
+        r"\[AISKEL-DISCOVERY\][\s\S]*?=== 出力フォーマット[\s\S]*?(?:</dirs>|path/to/file\.py)\s*",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+def format_discovery_handoff_text(
+    second_stage_prompt: str,
+    scoped_bundle_text: str,
+    *,
+    original_request: str = "",
+    organized_task: str = "",
+    missing_specs: Optional[Sequence[str]] = None,
+) -> str:
+    """2度目タブ用のプロンプト・元の要望・整理済みタスク・スコープ限定バンドルを統合する。"""
+    sections: List[str] = []
+    if second_stage_prompt.strip():
+        sections.append(second_stage_prompt.strip())
+    if original_request.strip():
+        sections.append(f"=== ユーザーリクエスト（原文） ===\n{original_request.strip()}")
+    if organized_task.strip():
+        sections.append(f"=== 整理済みタスク・確認方針 ===\n{organized_task.strip()}")
+    if missing_specs:
+        sections.append(
+            "=== 注意（対象外パス） ===\n"
+            "以下の1度目指定パスはプロジェクト内に存在しないためスコープから除外されました: "
+            + ", ".join(missing_specs)
+        )
+    if scoped_bundle_text.strip():
+        sections.append(scoped_bundle_text.strip())
     return "\n\n".join(sections)
 
 def format_summary_prompt_text(prompt_text: str, summary_text: str) -> str:

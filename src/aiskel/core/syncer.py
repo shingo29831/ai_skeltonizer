@@ -43,6 +43,10 @@ class ProjectSyncer:
             "architecture_bundle.xml",
             "architecture_bundle.md",
             "architecture_bundle.markdown",
+            "directory_index.txt",
+            "directory_index.xml",
+            "directory_index.md",
+            "directory_index.markdown",
             "phase1_architecture_bundle.txt",
             "phase1_architecture_bundle.xml",
             "phase1_architecture_bundle.markdown",
@@ -88,6 +92,7 @@ class ProjectSyncer:
                     dest_path.name in protected_filenames
                     or rel_path in protected_rel_paths
                     or dest_path.name.startswith("architecture_bundle")
+                    or dest_path.name.startswith("directory_index")
                     or dest_path.name.startswith("phase")
                 ):
                     continue

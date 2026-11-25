@@ -16,7 +16,7 @@ PASTE_RETRY_DELAYS: Tuple[float, ...] = (0.15, 0.3, 0.5)
 KNOWN_NON_COPY_SUBCOMMANDS = frozenset({
     "apply", "a", "revert", "r", "check", "chk", "verify", "commit", "cm", "ci",
     "move", "mv", "rename",
-    "test", "t", "bloat", "b", "size", "docs", "d", "watch", "w", "listen", "l", "start", "s",
+    "test", "t", "bloat", "b", "size", "docs", "d", "scope", "sc", "watch", "w", "listen", "l", "start", "s",
 })
 
 class TeeStderr:

@@ -334,8 +334,9 @@ class PatchHandoffManager:
         )
         if item.response_text.strip():
             self._record_tab_patch_locked(tab_id, item.response_text, overwrite=True)
-        # 新規分割・階層整理・設定推論タスク開始時は旧タスクのパッチ系譜を引き継がない
+        # 新規分割・階層整理・設定推論・探索遷移開始時は旧タスクのパッチ系譜を引き継がない
         if item.handoff_kind not in (
+            HandoffKind.DISCOVERY.value,
             HandoffKind.FILE_SPLIT.value,
             HandoffKind.DIR_ORGANIZE.value,
             HandoffKind.CONFIG_INFER.value,

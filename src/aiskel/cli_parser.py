@@ -18,7 +18,31 @@ def normalize_cli_args(
     if not args:
         return args
 
-    # なぜ必要か: サブコマンド判定と整合させるため copy/c/cp の位置引数再構成は先頭指定時のみ適用する
+    # なぜ必要か: サブコマンド判定と整合させるため copy/c/cp および scope/sc の位置引数再構成は先頭指定時のみ適用する
+    if args[0] in ("scope", "sc"):
+        prefix, rest = args[:1], args[1:]
+        options, positionals = [], []
+        i = 0
+        while i < len(rest):
+            token = rest[i]
+            if token in ("-r", "--recursive", "--shallow", "--no-deps", "--no-tree", "-c", "--copy", "--clipboard", "-h", "--help"):
+                options.append(token)
+                i += 1
+            elif token in ("--dir", "--format", "--policy", "-o", "--output", "--max-extra-chars"):
+                options.append(token)
+                if i + 1 < len(rest):
+                    options.append(rest[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            elif any(token.startswith(f"{opt}=") for opt in ("--dir", "--format", "--policy", "--output", "--max-extra-chars")):
+                options.append(token)
+                i += 1
+            else:
+                positionals.append(token)
+                i += 1
+        return prefix + options + positionals
+
     if args[0] in ("copy", "c", "cp"):
         prefix, rest = args[:1], args[1:]
         options, positionals = [], []
@@ -60,7 +84,7 @@ def normalize_cli_args(
         i = 1
         while i < len(rest):
             token = rest[i]
-            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "--no-error-clipboard", "--force", "--no-ui", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
+            if token in ("-d", "--deps", "--dependencies", "--no-focus", "--no-paste", "--no-error-clipboard", "--force", "--no-ui", "--index", "--index-no-files", "-g", "--git-diff", "--git-dif", "--diff", "--no-bundle", "--focus-deps"):
                 options.append(token)
                 i += 1
             elif token in ("--max-chars", "-f", "--full-path", "-k", "--keep-func", "--focus", "--only-nodes", "--format", "--policy"):
@@ -116,6 +140,8 @@ def _add_root_arguments(target_parser: argparse.ArgumentParser) -> None:
     target_parser.add_argument("--policy", type=Path, default=None, help="バンドルに自動注入するカスタムポリシーファイルのパス")
     target_parser.add_argument("--force", action="store_true", help="全ファイルを強制的に再処理する")
     target_parser.add_argument("--no-ui", action="store_true", help="UIレイヤーのファイルを除外してロジック層のみを抽出する")
+    target_parser.add_argument("--index", action="store_true", help="1度目探索用の軽量ディレクトリインデックス (directory_index) も生成する")
+    target_parser.add_argument("--index-no-files", action="store_true", help="--index 出力時にディレクトリ直下ファイル一覧を省略する")
     target_parser.add_argument("-g", "--git-diff", "--git-dif", "--diff", dest="git_diff", action="store_true", help="Gitの差分から、変更されたファイルとそれに直接依存するファイルのみを抽出する")
     target_parser.add_argument("-c", "--copy", nargs="+", metavar="SPEC", help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     target_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="コピー時に参照している依存ノードも自動で一緒にコピーします")
@@ -209,6 +235,19 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     test_parser.add_argument("-q", "--quiet", action="store_true", help="テスト実行中の標準出力を抑制します")
     test_parser.add_argument("--timeout", type=int, default=60, help="コマンド1件あたりのタイムアウト秒数 (デフォルト: 60秒)")
 
+    scope_parser = subparsers.add_parser("scope", aliases=["sc"], help="指定したディレクトリやファイル＋直接依存先のみに限定して要約バンドルを生成します")
+    scope_parser.add_argument("targets", nargs="+", help="対象ディレクトリまたはファイルパス (カンマ・スペース区切り可)")
+    scope_parser.add_argument("--dir", type=Path, default=Path("."), help="プロジェクトのルートディレクトリ (デフォルト: カレントディレクトリ)")
+    scope_parser.add_argument("-r", "--recursive", action="store_true", help="指定ディレクトリ配下を再帰的に対象に含める (デフォルトも再帰、--shallowで直下のみ)")
+    scope_parser.add_argument("--shallow", action="store_true", help="ディレクトリ指定時に直下のファイルのみを対象とする")
+    scope_parser.add_argument("--no-deps", action="store_true", help="直接依存先ファイルの自動同梱をスキップする")
+    scope_parser.add_argument("--no-tree", action="store_true", help="<project_tree> の出力を省略する")
+    scope_parser.add_argument("--format", choices=["txt", "xml", "markdown"], default="txt", help="バンドル出力フォーマット")
+    scope_parser.add_argument("--policy", type=Path, default=None, help="バンドルに注入するカスタムポリシーファイルのパス")
+    scope_parser.add_argument("-c", "--copy", "--clipboard", dest="clipboard", action="store_true", help="生成結果をクリップボードにコピーする")
+    scope_parser.add_argument("-o", "--output", type=Path, default=None, help="出力先ファイルパス (省略時は標準出力)")
+    scope_parser.add_argument("--max-extra-chars", type=int, default=8000, help="パーサー非対応ファイルを明示指定した際の最大出力文字数 (0で省略)")
+
     copy_parser = subparsers.add_parser("copy", aliases=["c", "cp"], help="指定したファイルや関数・クラスのコードをクリップボードにコピーします")
     copy_parser.add_argument("specs", nargs="+", help="コピー対象 (書式: path/to/file[:func_or_class,...])")
     copy_parser.add_argument("-d", "--deps", "--dependencies", action="store_true", help="指定した関数・クラスが参照している同一ファイル内の依存ノードも自動で一緒にコピーします")
@@ -275,6 +314,7 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     start_parser.add_argument("--no-start-paste", action="store_true", help="起動時のプロンプト入力欄への自動貼り付けのみを行わない")
     start_parser.add_argument("--no-auto-paste", action="store_true", help="推論完了後の自動実行時のプロンプト入力欄への自動貼り付けのみを行わない")
     start_parser.add_argument("--auto-run", action=argparse.BooleanOptionalAction, default=None, help="自動実行での貼り付け完了後にAI StudioのRunボタンを自動押下する (--no-auto-run で明示的に無効化)")
+    start_parser.add_argument("--two-stage", action=argparse.BooleanOptionalAction, default=None, help="1度目の軽量探索インデックス＋2度目スコープ限定引き継ぎモードを強制有効/無効化する")
     start_parser.add_argument("--max-auto-tabs", "--patch-handoff-max-tabs", dest="patch_handoff_max_tabs", type=int, default=None, metavar="N", help="パッチ出力検知時の新規タブ自動作成上限回数 (0で自動新タブ作成を無効化)")
     start_parser.add_argument("--extension-dir", type=Path, default=None, help="ブラウザ拡張機能ファイルの出力先ディレクトリ")
     start_parser.add_argument("-f", "--full-path", action="append", default=[], help="スケルトン化せずフルコードのまま保持するファイルまたはフォルダのパス")

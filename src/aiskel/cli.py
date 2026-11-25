@@ -33,6 +33,7 @@ from .cli_move import handle_move_command
 from .cli_commands import (
     handle_bloat_command,
     handle_docs_command,
+    handle_scope_command,
     handle_sync_command,
     handle_test_command,
     handle_watch_command,
@@ -218,6 +219,14 @@ def main(args: Optional[List[str]] = None) -> int:
                 project_root=project_root,
                 focus_browser=True,
             ).exit_code
+
+        if cmd in ("scope", "sc"):
+            return handle_scope_command(
+                parsed_args,
+                comma_arg_processor=_process_comma_separated_args,
+                clipboard_writer=set_clipboard_text,
+                token_estimator=estimate_tokens,
+            )
 
         if cmd in ("docs", "d"):
             return handle_docs_command(

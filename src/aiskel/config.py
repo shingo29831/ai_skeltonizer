@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Set, Tuple, Union
 
+from .two_stage_config import (
+    DEFAULT_INDEX_INCLUDE_FILES,
+    DEFAULT_SCOPE_INCLUDE_DEPS,
+    DEFAULT_TWO_STAGE_MIN_TOKENS,
+    TwoStageConfig,
+    load_two_stage_config_from_meta,
+)
 from .write_path_policy import (
     WritePathMode,
     WritePathPolicy,
@@ -350,6 +357,10 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
             "allowed_write_paths": [],
             "denied_write_paths": [],
             "patch_handoff_max_tabs": DEFAULT_PATCH_HANDOFF_MAX_TABS,
+            "two_stage_enabled": True,
+            "two_stage_min_tokens": DEFAULT_TWO_STAGE_MIN_TOKENS,
+            "index_include_files": DEFAULT_INDEX_INCLUDE_FILES,
+            "scope_include_deps": DEFAULT_SCOPE_INCLUDE_DEPS,
             "description": (
                 "test_command には aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンド、"
                 "static_analysis_command には aiskel a 適用後に自動実行される静的コード解析(構文・型・Lintチェック等)コマンドを記述してください "

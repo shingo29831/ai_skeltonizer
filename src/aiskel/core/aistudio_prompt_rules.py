@@ -25,6 +25,7 @@ class PromptPattern(str, Enum):
 
     DEFAULT = "default"
     PATCH_REVIEW = "patch_review"
+    DISCOVERY = "discovery"
 
 _CORE_ENGINEERING_RULES_HEAD_COMMON = """Role: エキスパートソフトウェアエンジニア。以下を厳守せよ。
 

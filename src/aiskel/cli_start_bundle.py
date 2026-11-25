@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from .cli_parser import process_comma_separated_args
-from .config import SkeletonConfig, load_bundle_filename_from_meta
+from .config import SkeletonConfig, load_bundle_filename_from_meta, load_two_stage_config_from_meta
+from .core.aistudio_handoff.text import format_summary_prompt_text
+from .core.aistudio_prompts import PromptPattern, load_prompt_for_pattern
+from .core.scope_builder import build_directory_index_file
 from .core.token_counter import estimate_tokens
 
 DEFAULT_BUNDLE_FILENAMES: Tuple[str, ...] = (
@@ -179,6 +182,99 @@ def copy_bundle_to_clipboard(
         print(
             f"\n📋 バンドルをクリップボードにコピーしました: {display_path} "
             f"(文字数: {len(content):,} 文字, 推定約 {est_tokens:,} tokens)"
+        )
+        return True
+    except Exception as e:
+        print(f"⚠ クリップボードへのコピーに失敗しました: {e}", file=sys.stderr)
+        return False
+
+def copy_start_bundle_or_discovery_index(
+    bundle_path: Optional[Path],
+    project_root: Path,
+    output_dir: Path,
+    clipboard_writer: Callable[[str], None],
+    *,
+    two_stage_override: Optional[bool] = None,
+    has_manual_scope: bool = False,
+    no_sync: bool = False,
+    no_bundle: bool = False,
+    bundle_format: str = "txt",
+    policy_path: Optional[Path] = None,
+    token_estimator: Callable[[str], int] = estimate_tokens,
+) -> bool:
+    """規模設定に応じて2段階探索用インデックス+プロンプトまたは従来バンドルをクリップボードへコピーする。"""
+    if no_bundle:
+        print("ℹ --no-bundle が指定されているためバンドルのクリップボードコピーをスキップしました。")
+        return False
+
+    two_stage_cfg = load_two_stage_config_from_meta(project_root, output_dir)
+    full_tokens = 0
+    if bundle_path is not None and bundle_path.is_file():
+        try:
+            full_tokens = token_estimator(bundle_path.read_text(encoding="utf-8"))
+        except OSError:
+            full_tokens = 0
+
+    should_use_two_stage = False
+    if two_stage_override is True:
+        should_use_two_stage = True
+    elif two_stage_override is False or has_manual_scope:
+        should_use_two_stage = False
+    elif two_stage_cfg.enabled and bundle_path is not None and bundle_path.is_file():
+        should_use_two_stage = full_tokens >= two_stage_cfg.min_tokens
+
+    if not should_use_two_stage:
+        if (
+            two_stage_override is None
+            and two_stage_cfg.enabled
+            and not has_manual_scope
+            and bundle_path is not None
+            and bundle_path.is_file()
+            and full_tokens < two_stage_cfg.min_tokens
+        ):
+            print(
+                f"\nℹ フル要約が小規模 (約 {full_tokens:,} < 閾値 {two_stage_cfg.min_tokens:,} tokens) "
+                "のため2段階探索をバイパスし、通常バンドルを使用します。"
+            )
+        return copy_bundle_to_clipboard(
+            bundle_path,
+            project_root,
+            clipboard_writer,
+            no_sync=no_sync,
+            no_bundle=no_bundle,
+            token_estimator=token_estimator,
+        )
+
+    try:
+        index_path = build_directory_index_file(
+            project_root,
+            output_dir,
+            include_files=two_stage_cfg.index_include_files,
+            bundle_format=bundle_format,
+            custom_policy_path=policy_path,
+        )
+        index_text = index_path.read_text(encoding="utf-8")
+        discovery_prompt = load_prompt_for_pattern(project_root, PromptPattern.DISCOVERY)
+        combined = format_summary_prompt_text(discovery_prompt, index_text)
+    except Exception as e:
+        print(f"⚠ 2段階探索インデックスの生成に失敗したため通常バンドルへフォールバックします: {e}", file=sys.stderr)
+        return copy_bundle_to_clipboard(
+            bundle_path,
+            project_root,
+            clipboard_writer,
+            no_sync=no_sync,
+            no_bundle=no_bundle,
+            token_estimator=token_estimator,
+        )
+
+    try:
+        clipboard_writer(combined)
+        idx_tokens = token_estimator(index_text)
+        comb_tokens = token_estimator(combined)
+        ratio = f" / フル比 {((1.0 - idx_tokens / full_tokens) * 100):.0f}% 削減" if full_tokens > 0 else ""
+        print(
+            f"\n📋 2段階探索モード (1度目インデックス+プロンプト) をクリップボードにコピーしました "
+            f"(インデックス: 約 {idx_tokens:,} tokens{ratio}, 合計: 約 {comb_tokens:,} tokens)"
         )
         return True
     except Exception as e:

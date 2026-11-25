@@ -11,6 +11,7 @@ _REQUIRED_BUILTIN_KEYS: Tuple[str, ...] = (
     "patch_review",
     "review_context_rules",
     "review_patch_format_rules",
+    "discovery",
     "file_split",
     "dir_organize",
     "config_infer",
@@ -39,6 +40,14 @@ _REVIEW_PROMPT_FILENAMES: Tuple[str, ...] = (
     ".ai_meta/REVIEW_PROMPT.txt",
     "ai_meta/prompts/patch_review.txt",
     ".ai_meta/prompts/patch_review.txt",
+)
+
+_DISCOVERY_PROMPT_FILENAMES: Tuple[str, ...] = (
+    "DISCOVERY_PROMPT.txt",
+    "ai_meta/DISCOVERY_PROMPT.txt",
+    ".ai_meta/DISCOVERY_PROMPT.txt",
+    "ai_meta/prompts/discovery.txt",
+    ".ai_meta/prompts/discovery.txt",
 )
 
 _PROMPT_SECTION_HEADER_RE = re.compile(
@@ -187,7 +196,7 @@ def get_meta_prompt_relative_paths() -> Tuple[str, ...]:
     """ai_meta/.ai_meta 配下に配置され得るプロンプト定義ファイルの相対パス一覧を返す。"""
     rel_paths: List[str] = []
     seen: Set[str] = set()
-    for raw_path in _UNIFIED_PROMPT_FILENAMES + _DEFAULT_PROMPT_FILENAMES + _REVIEW_PROMPT_FILENAMES:
+    for raw_path in _UNIFIED_PROMPT_FILENAMES + _DEFAULT_PROMPT_FILENAMES + _REVIEW_PROMPT_FILENAMES + _DISCOVERY_PROMPT_FILENAMES:
         rel: Optional[str] = None
         for prefix in ("ai_meta/", ".ai_meta/"):
             if raw_path.startswith(prefix):

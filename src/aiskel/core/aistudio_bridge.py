@@ -80,6 +80,7 @@ from .aistudio_handoff import (
     MAX_HANDOFF_PAYLOAD_BYTES,
     PatchHandoffManager,
 )
+from ..config import load_two_stage_config_from_meta
 from .aistudio_prompts import PromptPattern
 from .browser_paste import trigger_browser_prompt_run
 from .clipboard import set_clipboard_text
@@ -119,10 +120,12 @@ class AiskelBridgeServer:
         output_dir: Optional[Path] = None,
         patch_handoff_max_tabs: Optional[int] = None,
         command_cwd: Optional[Path] = None,
+        two_stage: Optional[bool] = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.command_cwd = command_cwd.resolve() if command_cwd is not None else self.project_root
         self.output_dir = output_dir.resolve() if output_dir is not None else None
+        self._explicit_two_stage: Optional[bool] = two_stage if isinstance(two_stage, bool) else None
         self._explicit_patch_handoff_max_tabs: Optional[int] = (
             max(0, min(MAX_PATCH_HANDOFF_MAX_TABS, int(patch_handoff_max_tabs)))
             if patch_handoff_max_tabs is not None and not isinstance(patch_handoff_max_tabs, bool)
@@ -206,6 +209,11 @@ class AiskelBridgeServer:
         enriched["command_cwd"] = str(self.command_cwd)
         max_tabs = self.get_patch_handoff_max_tabs()
         enriched["patch_handoff_max_tabs"] = max_tabs
+        two_stage_cfg = load_two_stage_config_from_meta(self.project_root, self.output_dir)
+        enriched["two_stage_enabled"] = (
+            self._explicit_two_stage if self._explicit_two_stage is not None else two_stage_cfg.enabled
+        )
+        enriched["two_stage_min_tokens"] = two_stage_cfg.min_tokens
         if bound_tab_id:
             enriched["remaining_auto_tabs"] = self._handoff_manager.get_remaining_auto_tabs(
                 bound_tab_id,
@@ -517,6 +525,7 @@ def run_bridge_server(
     output_dir: Optional[Path] = None,
     patch_handoff_max_tabs: Optional[int] = None,
     command_cwd: Optional[Path] = None,
+    two_stage: Optional[bool] = None,
 ) -> int:
     """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
     if not project_root.exists() or not project_root.is_dir():
@@ -541,6 +550,7 @@ def run_bridge_server(
         output_dir=output_dir,
         patch_handoff_max_tabs=patch_handoff_max_tabs,
         command_cwd=command_cwd,
+        two_stage=two_stage,
     )
 
     return run_bridge_lifecycle(
