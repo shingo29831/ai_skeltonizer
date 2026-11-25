@@ -1,246 +1,40 @@
 """Module: @role: パッチ出力検知時の応答・要約バンドル統合および新規タブへの引き継ぎ状態管理を担当する。"""
-import re
 import secrets
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, Optional, Set, Union
 
-from ..config import SkeletonConfig, load_bundle_filename_from_meta
-from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
-from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, has_patch_delimiters
-
-MAX_HANDOFF_PAYLOAD_BYTES = 4 * 1024 * 1024
-HANDOFF_TTL_SEC = 120.0
-MAX_PENDING_HANDOFFS = 20
-MAX_TRACKED_AUTO_TABS = 512
-_DEFAULT_BUNDLE_FILENAMES = (
-    "architecture_bundle.txt",
-    "architecture_bundle.md",
-    "architecture_bundle.xml",
+from .aistudio_handoff_text import (
+    format_handoff_prompt_text,
+    format_summary_prompt_text,
+    has_handoff_stop_signal_in_text,
+    has_patch_delimiters_in_text,
+    load_project_summary_text,
 )
-_COMMIT_TAG_OPEN = "<" + "commit>"
-_PATCH_STRUCTURE_HINT_RE = re.compile(
-    r"^[ \t]*(?:ファイルパス|File(?:\s+path)?|Path|削除)[ \t]*[:：]|^[ \t]*"
-    + re.escape(_COMMIT_TAG_OPEN)
-    + r"[ \t]*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
-_STOP_SIGNAL_LINE_RE = re.compile(
-    r"^[ \t]*`?" + re.escape(PATCH_HANDOFF_STOP_SIGNAL) + r"`?[ \t。.]*$"
+from .aistudio_handoff_types import (
+    HANDOFF_TTL_SEC,
+    MAX_HANDOFF_PAYLOAD_BYTES,
+    MAX_PENDING_HANDOFFS,
+    MAX_TRACKED_AUTO_TABS,
+    HandoffKind,
+    TabHandoffPayload,
 )
 
-
-class HandoffKind(str, Enum):
-    """新規タブ引き継ぎの用途種別を定義する。"""
-
-    PATCH_REVIEW = "patch_review"
-    FILE_SPLIT = "file_split"
-
-@dataclass(frozen=True)
-class TabHandoffPayload:
-    """新規タブへ引き継ぐAI応答・要約バンドル・紐づけ情報を保持する。"""
-
-    handoff_id: str
-    source_tab_id: str
-    new_chat_url: str
-    response_text: str
-    summary_text: str
-    combined_text: str
-    created_at: float
-    assigned_tab_id: Optional[str] = None
-    remaining_auto_tabs: int = 0
-    handoff_kind: str = HandoffKind.PATCH_REVIEW.value
-    target_file: str = ""
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "handoff_id": self.handoff_id,
-            "source_tab_id": self.source_tab_id,
-            "new_chat_url": self.new_chat_url,
-            "response_text": self.response_text,
-            "summary_text": self.summary_text,
-            "combined_text": self.combined_text,
-            "assigned_tab_id": self.assigned_tab_id,
-            "remaining_auto_tabs": self.remaining_auto_tabs,
-            "handoff_kind": self.handoff_kind,
-            "target_file": self.target_file,
-        }
-
-
-def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
-    excluded: Set[int] = set()
-    total = len(lines)
-    i = 0
-    while i < total:
-        if DELIMITER_START.match(lines[i]):
-            has_mid = False
-            end_idx = -1
-            for j in range(i + 1, total):
-                if DELIMITER_START.match(lines[j]):
-                    break
-                if DELIMITER_MID.match(lines[j]):
-                    has_mid = True
-                    continue
-                if DELIMITER_END.match(lines[j]):
-                    if has_mid:
-                        end_idx = j
-                    break
-            if end_idx != -1:
-                excluded.update(range(i, end_idx + 1))
-                i = end_idx + 1
-                continue
-        i += 1
-    return excluded
-
-
-def _find_excluded_stop_signal_line_indices(lines: List[str]) -> Set[int]:
-    # パッチ内自己言及やコードブロック内例示による誤停止を防ぐため対象範囲を除外
-    excluded = _find_valid_patch_line_indices(lines)
-    active_fence: Optional[Tuple[str, int]] = None
-    for idx, line in enumerate(lines):
-        if active_fence is not None:
-            excluded.add(idx)
-            fence_char, fence_len = active_fence
-            stripped = line.strip()
-            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
-                active_fence = None
-            continue
-        match = _FENCE_OPEN_RE.match(line)
-        if match:
-            marker, info = match.group(1), match.group(2)
-            if marker[0] == "~" or "`" not in info:
-                active_fence = (marker[0], len(marker))
-                excluded.add(idx)
-    return excluded
-
-
-def has_patch_delimiters_in_text(text: str) -> bool:
-    """テキスト内にaiskelパッチ形式（<<<< ==== >>>> の順序ペアとヘッダ/commit構造）が含まれるか判定する。"""
-    if not text or not text.strip() or not has_patch_delimiters(text):
-        return False
-    if not _PATCH_STRUCTURE_HINT_RE.search(text):
-        return False
-    return bool(_find_valid_patch_line_indices(text.splitlines()))
-
-
-def has_handoff_stop_signal_in_text(text: str) -> bool:
-    """応答テキストのコードブロック・パッチ外に新規タブ作成停止合図が含まれるか判定する。"""
-    if not text or not text.strip() or PATCH_HANDOFF_STOP_SIGNAL not in text:
-        return False
-    lines = text.splitlines()
-    excluded_indices = _find_excluded_stop_signal_line_indices(lines)
-    for idx, line in enumerate(lines):
-        if idx in excluded_indices:
-            continue
-        if _STOP_SIGNAL_LINE_RE.match(line):
-            return True
-    return False
-
-
-def _wrap_proposed_implementation(resp: str) -> str:
-    # 応答内の同名閉じタグによる境界破壊を防ぐため衝突時は動的タグ名へ切り替える
-    tag = "proposed_implementation"
-    if re.search(rf"</?{tag}\b", resp, re.IGNORECASE):
-        idx = 1
-        while re.search(rf"</?{tag}_{idx}\b", resp, re.IGNORECASE):
-            idx += 1
-        tag = f"{tag}_{idx}"
-    return f"<{tag}>\n{resp}\n</{tag}>"
-
-
-def format_handoff_prompt_text(
-    response_text: str,
-    summary_text: str,
-    review_prompt: Optional[str] = None,
-) -> str:
-    """コピーしたAI応答・要約バンドル・任意のレビュー指示を新規タブ貼り付け用テキストへ統合する。"""
-    resp = (response_text or "").strip()
-    summary = (summary_text or "").strip()
-    if not resp and not summary:
-        return ""
-    prompt = (review_prompt or "").strip()
-    if not prompt:
-        if resp and summary:
-            return f"{resp}\n\n{summary}"
-        return resp or summary
-    sections = [prompt]
-    if resp:
-        sections.append(_wrap_proposed_implementation(resp))
-    if summary:
-        sections.append(summary)
-    return "\n\n".join(sections)
-
-
-def format_summary_prompt_text(prompt_text: str, summary_text: str) -> str:
-    """プロンプト指示とプロジェクト要約バンドルをチャット欄挿入用テキストへ統合する。"""
-    prompt = (prompt_text or "").strip()
-    summary = (summary_text or "").strip()
-    if prompt and summary:
-        return f"{prompt}\n\n{summary}"
-    return prompt or summary
-
-
-def _find_existing_bundle_file(project_root: Path, output_dir: Path) -> Optional[Path]:
-    configured = load_bundle_filename_from_meta(project_root, output_dir)
-    if configured:
-        candidate = output_dir / configured
-        if candidate.is_file():
-            return candidate
-        if configured != _DEFAULT_BUNDLE_FILENAMES[0]:
-            return None
-    for name in _DEFAULT_BUNDLE_FILENAMES:
-        candidate = output_dir / name
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def load_project_summary_text(project_root: Path) -> str:
-    """対象プロジェクトを差分同期し、最新の要約バンドル文字列を取得する。"""
-    # 循環インポート回避のためcli_syncを遅延参照し、.gitignore更新・config初期化・最新バンドル生成を統一実行
-    from ..cli_sync import resolve_output_dir, run_sync
-
-    resolved_root = project_root.resolve()
-    output_dir = resolve_output_dir(resolved_root, None)
-    configured_name = load_bundle_filename_from_meta(resolved_root, output_dir)
-    config = SkeletonConfig(
-        create_bundle=True,
-        bundle_format="txt",
-        bundle_filename=configured_name,
-    )
-    _, _, _, bundle_path = run_sync(
-        resolved_root,
-        output_dir,
-        config,
-        force=False,
-        quiet=True,
-        check_bloat=False,
-    )
-    if bundle_path is None or not bundle_path.is_file():
-        bundle_path = _find_existing_bundle_file(resolved_root, output_dir)
-    if bundle_path is None or not bundle_path.is_file():
-        _, _, _, bundle_path = run_sync(
-            resolved_root,
-            output_dir,
-            config,
-            force=True,
-            quiet=True,
-            check_bloat=False,
-        )
-
-    if bundle_path is None or not bundle_path.is_file():
-        raise FileNotFoundError("要約バンドルファイルが見つかりません")
-
-    content = bundle_path.read_text(encoding="utf-8")
-    if not content.strip():
-        raise ValueError("要約バンドルファイルが空です")
-    return content
-
+__all__ = [
+    "HANDOFF_TTL_SEC",
+    "HandoffKind",
+    "MAX_HANDOFF_PAYLOAD_BYTES",
+    "MAX_PENDING_HANDOFFS",
+    "MAX_TRACKED_AUTO_TABS",
+    "PatchHandoffManager",
+    "TabHandoffPayload",
+    "format_handoff_prompt_text",
+    "format_summary_prompt_text",
+    "has_handoff_stop_signal_in_text",
+    "has_patch_delimiters_in_text",
+    "load_project_summary_text",
+]
 
 class PatchHandoffManager:
     """パッチ検知時の新規タブ引き継ぎペイロードをTTL付きでスレッドセーフに管理する。"""
