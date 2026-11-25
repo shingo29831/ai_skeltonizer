@@ -275,6 +275,24 @@ class AiskelBridgeServer:
             self._handoff_manager.assign_tab(handoff_id, str(info.get("tab_id") or tab_id))
         return info
 
+    def bind_tab_if_unbound(
+        self,
+        tab_id: str,
+        tab_title: str = "",
+        tab_url: str = "",
+        handoff_id: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, object]]:
+        """未紐づけの場合のみブラウザタブを紐づけ、(今回新規紐づけしたか, 紐づけ情報) を返す。"""
+        newly_bound, raw_info = self._binding_manager.bind_if_unbound(
+            tab_id=tab_id,
+            tab_title=tab_title,
+            tab_url=tab_url,
+        )
+        info = self._enrich_binding_info(raw_info)
+        if newly_bound and handoff_id:
+            self._handoff_manager.assign_tab(handoff_id, str(info.get("tab_id") or tab_id))
+        return newly_bound, info
+
     def unbind_tab(self, tab_id: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
         """現在のブラウザタブ紐づけを解除する。"""
         changed, info = self._binding_manager.unbind(tab_id=tab_id)
@@ -835,7 +853,7 @@ def run_bridge_server(
         print("   ※ Chrome/Edge: chrome://extensions から上記拡張フォルダを読み込み")
         print("   ※ Firefox    : about:debugging#/runtime/this-firefox の「一時的なアドオンを読み込む」から上記 manifest.json を選択")
         print("   ※ 常駐利用   : Tampermonkey / Violentmonkey 用スクリプトは `aiskel listen --print-userscript` で出力できます")
-        print("   ※ タブ紐づけ : 開いたタブ上の「VSCodeと紐づける」ボタン、または拡張機能アイコンから対象タブを選択してください")
+        print("   ※ タブ紐づけ : AI Studioタブを開くと自動で紐づきます（解除・別タブへの切替はタブ上UIまたは拡張機能アイコンから操作）")
         print("   推論完了時の `aiskel c` コマンドを待機中... (終了するには Ctrl+C)")
 
         server.serve_forever(on_ready=on_ready)

@@ -86,6 +86,21 @@ class TabBindingManager:
             self._binding = info
             return self._build_info_locked()
 
+    def bind_if_unbound(self, tab_id: str, tab_title: str = "", tab_url: str = "") -> Tuple[bool, Dict[str, object]]:
+        """未紐づけの場合のみ指定タブを紐づけ、(今回新規紐づけしたか, 最新状態) を返す。"""
+        normalized_id = self._normalize_tab_id(tab_id)
+        info = TabBindingInfo(
+            tab_id=normalized_id,
+            tab_title=sanitize_console_text(tab_title, MAX_TAB_TITLE_CHARS),
+            tab_url=sanitize_console_text(tab_url, MAX_TAB_URL_CHARS),
+            bound_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        with self._lock:
+            if self._binding is not None:
+                return False, self._build_info_locked()
+            self._binding = info
+            return True, self._build_info_locked()
+
     def unbind(self, tab_id: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
         """紐づけを解除し、(実際に解除されたか, 最新状態) を返す。"""
         target_id = self._normalize_tab_id(tab_id) if tab_id is not None else ""

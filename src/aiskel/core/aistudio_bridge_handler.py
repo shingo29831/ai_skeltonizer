@@ -228,8 +228,24 @@ def build_bridge_request_handler_class(
                     return
                 raw_handoff_id = payload.get("handoff_id")
                 handoff_id = raw_handoff_id.strip() if isinstance(raw_handoff_id, str) and raw_handoff_id.strip() else None
+                raw_only_if_unbound = payload.get("only_if_unbound", False)
+                if not isinstance(raw_only_if_unbound, bool):
+                    self._send_json(
+                        int(HTTPStatus.BAD_REQUEST),
+                        {"ok": False, "message": "only_if_unbound を真偽値で指定してください"},
+                    )
+                    return
+                only_if_unbound = raw_only_if_unbound
+                newly_bound = True
                 try:
-                    if handoff_id is not None:
+                    if only_if_unbound:
+                        newly_bound, info = bridge.bind_tab_if_unbound(
+                            tab_id=raw_tab_id,
+                            tab_title=str(payload.get("tab_title") or ""),
+                            tab_url=str(payload.get("tab_url") or ""),
+                            handoff_id=handoff_id,
+                        )
+                    elif handoff_id is not None:
                         info = bridge.bind_tab(
                             tab_id=raw_tab_id,
                             tab_title=str(payload.get("tab_title") or ""),
@@ -245,8 +261,9 @@ def build_bridge_request_handler_class(
                 except ValueError as e:
                     self._send_json(int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": str(e)})
                     return
-                label = sanitize_console_text(str(info.get("tab_title") or info.get("tab_url") or info.get("tab_id")))
-                print(f"\n🔗 ブラウザタブをVSCodeプロジェクトと紐づけました: {label}", flush=True)
+                if newly_bound:
+                    label = sanitize_console_text(str(info.get("tab_title") or info.get("tab_url") or info.get("tab_id")))
+                    print(f"\n🔗 ブラウザタブをVSCodeプロジェクトと紐づけました: {label}", flush=True)
                 self._send_json(int(HTTPStatus.OK), info)
                 return
 
