@@ -123,6 +123,12 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             "message": "パッチ区切り記号(<<<< ==== >>>>)を含む有効な応答テキストがありません",
         }
 
+    # コード修正パッチを出力したAI自身の終了判断は無効化し、次タブのAIへ判定を委ねる
+    ignored_self_stop = False
+    if has_patch and stop_requested:
+        stop_requested = False
+        ignored_self_stop = True
+
     turn_id = str(payload.get("turn_id") or "").strip()
     dedup_key = f"HANDOFF::{req_tab_id}::{turn_id}" if turn_id else ""
 
@@ -187,6 +193,12 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             return status_code, body
 
         if remaining_before <= 0:
+            if ignored_self_stop:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(
+                    f"\n[{timestamp}] ⚠ 修正パッチを含む応答内の終了合図は無効化しました（自動新タブ上限到達のため適用へ進みます）",
+                    flush=True,
+                )
             bridge._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
             status_code, body = bridge._run_terminal_auto_apply(
                 req_tab_id=req_tab_id,
@@ -198,6 +210,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 success_message="新規タブ自動作成の回数制限に達したため最後に検知した置換コードを aiskel a で適用しました",
                 log_banner="📋 パッチ出力(<<<< ==== >>>>)を検知（新規タブ自動作成の回数制限到達） -> 最後に検知した置換コードを aiskel a で実行します",
             )
+            body["self_stop_ignored"] = ignored_self_stop
             if dedup_key:
                 bridge._recent_keys.append(dedup_key)
             return status_code, body
@@ -233,6 +246,11 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             bridge._recent_keys.append(dedup_key)
 
         timestamp = datetime.now().strftime("%H:%M:%S")
+        if ignored_self_stop:
+            print(
+                f"\n[{timestamp}] ⚠ 修正パッチを含む応答内の終了合図は無効化しました（次タブのAIが終了可否を判定します）",
+                flush=True,
+            )
         print(
             f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーし、新規タブへ要約とともに引き継ぎます (新規タブ残り回数: {next_remaining})",
             flush=True,
@@ -241,6 +259,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             "ok": True,
             "skipped": False,
             "limit_reached": False,
+            "self_stop_ignored": ignored_self_stop,
             "remaining_auto_tabs": next_remaining,
             "copied_to_clipboard": copied_to_clipboard,
             "handoff_id": handoff.handoff_id,

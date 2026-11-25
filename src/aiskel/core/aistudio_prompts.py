@@ -3,6 +3,8 @@ import re
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple, Union
+import importlib.resources as importlib_resources
+from typing import Dict, List, Optional, Tuple, Union
 
 _D_START = "<" * 4
 _D_MID = "=" * 4
@@ -144,12 +146,7 @@ _CORE_ENGINEERING_RULES_TAIL = """3. 設計・分割と aiskel メタデータ�
   - 外部環境・インフラ差分（DB、外部API、ファイルストレージ、時間等）は直接依存せず、引数・設定オブジェクト・インターフェース経由で注入可能（DI）な汎用設計とせよ。
 - DRY原則、明確な命名、ボーイスカウトルール徹底。"""
 
-BUILTIN_DEFAULT_PROMPT = (
-    f"{_CORE_ENGINEERING_RULES_HEAD_COMMON}\n\n"
-    f"{_DEFAULT_CONTEXT_RULES}\n\n"
-    f"{_DEFAULT_OUTPUT_RULES}\n\n"
-    f"{_CORE_ENGINEERING_RULES_TAIL}"
-)
+BUILTIN_DEFAULT_PROMPT: str = _load_builtin_sections()["default"]
 _BUILTIN_REVIEW_BASE_RULES = (
     f"{_CORE_ENGINEERING_RULES_HEAD_COMMON}\n\n"
     f"{_REVIEW_CONTEXT_RULES}\n\n"
@@ -161,11 +158,10 @@ _BUILTIN_REVIEW_BASE_RULES = (
 def _decode_prompt_bytes(raw: bytes) -> str:
     for encoding in ("utf-8-sig", "cp932"):
         try:
-            return raw.decode(encoding).strip()
+            return raw.decode(encoding).replace("\r\n", "\n").replace("\r", "\n").strip()
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace").strip()
-
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 def _read_first_non_empty_file(candidates: Tuple[Path, ...]) -> Optional[str]:
     for path in candidates:
@@ -194,63 +190,77 @@ def _replace_output_flow_section_for_review(prompt_text: str) -> Tuple[str, bool
 
 
 def load_default_prompt(project_root: Path) -> str:
-    """対象プロジェクトの設定ファイルまたはビルトインからデフォルトプロンプトを読み込む。"""
+    """対象プロジェクトの設定ファイルまたは外部プロンプト定義ファイルからデフォルトプロンプトを読み込む。"""
     resolved = project_root.resolve()
-    candidates = (
-        resolved / "PROMPT.txt",
-        resolved / "ai_meta" / "PROMPT.txt",
-        resolved / ".ai_meta" / "PROMPT.txt",
-        resolved / "ai_meta" / "prompts" / "default.txt",
-        resolved / ".ai_meta" / "prompts" / "default.txt",
+    custom = _read_first_plain_or_section(
+        resolved,
+        _DEFAULT_PROMPT_FILENAMES + _UNIFIED_PROMPT_FILENAMES,
+        PromptPattern.DEFAULT.value,
     )
-    custom = _read_first_non_empty_file(candidates)
     if custom is not None:
         return custom
-    return BUILTIN_DEFAULT_PROMPT
+    return _load_builtin_sections()["default"]
 
-
-def build_patch_review_prompt(default_prompt: str) -> str:
+def build_patch_review_prompt(
+    default_prompt: str,
+    project_root: Optional[Path] = None,
+    review_template_override: Optional[str] = None,
+) -> str:
     """デフォルトプロンプトの規約をベースに新規実装内容の欠陥指摘を依頼するレビュー専用プロンプトを組み立てる。"""
+    builtin_sections = _load_builtin_sections()
+    project_sections = _load_project_sections(project_root)
+
+    review_template = (
+        review_template_override
+        or project_sections.get("patch_review")
+        or builtin_sections["patch_review"]
+    )
+    review_context_rules = (
+        project_sections.get("review_context_rules") or builtin_sections["review_context_rules"]
+    )
+    review_patch_format_rules = (
+        project_sections.get("review_patch_format_rules") or builtin_sections["review_patch_format_rules"]
+    )
+
     stripped = (default_prompt or "").strip()
-    is_builtin = (not stripped) or (stripped == BUILTIN_DEFAULT_PROMPT.strip())
+    builtin_default = builtin_sections["default"].strip()
+    is_builtin = (
+        (not stripped)
+        or (stripped == builtin_default)
+        or (stripped == BUILTIN_DEFAULT_PROMPT.strip())
+    )
+
     if is_builtin:
-        base_section = (
-            "=== 基本規約（設計・実装・パッチ準拠ルール） ===\n"
-            f"{_BUILTIN_REVIEW_BASE_RULES}"
+        base_rules, _ = _replace_sections_for_review(
+            builtin_default,
+            review_context_rules,
+            review_patch_format_rules,
+            replace_context=True,
         )
+        base_section = f"=== 基本規約（設計・実装・パッチ準拠ルール） ===\n{base_rules}"
     else:
-        sanitized, replaced = _replace_output_flow_section_for_review(stripped)
+        sanitized, replaced = _replace_sections_for_review(
+            stripped,
+            review_context_rules,
+            review_patch_format_rules,
+            replace_context=False,
+        )
         header = (
             "=== 基本規約（プロジェクト固有ルール：出力手順は上記「検証手順と出力方針」を優先） ==="
             if replaced
             else "=== 基本規約（プロジェクト固有ルール：出力省略制約・出力例より上記「検証手順と出力方針」とパッチ書式を優先） ==="
         )
+        base_rules = sanitized
         base_section = f"{header}\n{sanitized}"
-    return (
-        "【依頼タスク: 新規実装・変更内容の厳密コードレビューと欠陥指摘】\n"
-        "下記の「基本規約」を厳守した上で、後続の提案実装セクション（`<proposed_implementation>` 等）"
-        "および `<ai_architecture_bundle>`（最新のプロジェクト構造・型定義・依存関係）を突き合わせ、"
-        "潜在的な欠陥・バグ・設計不整合・規約違反がないか徹底的に検証し指摘せよ。\n\n"
-        "=== 前提条件（未適用ベースへの直接適用） ===\n"
-        "- `<ai_architecture_bundle>` および `aiskel c` で取得できる現在のソースコードには、`<proposed_implementation>`（旧タブの提案パッチ）はまだ適用されていない。\n"
-        "- ユーザーは旧タブのコードを適用せず、このレビュー結果で最終的に採用されるパッチを未適用コードベースへ直接適用する前提である。\n"
-        "- したがって、修正パッチを提示する場合は「旧タブのパッチに対する追加差分」ではなく、`<proposed_implementation>` の必要な変更内容と欠陥修正をすべて統合し、未適用の現行コードに対して単体でそのまま `aiskel a` 適用できる完全版パッチを出力せよ。\n\n"
-        "=== 検証観点（必須チェック項目） ===\n"
-        "1. ロジック欠陥・エッジケース: 境界値・空値・不正入力・例外処理漏れ・パッチ適用時の検索文字列不整合や構文破壊がないか。\n"
-        "2. リグレッション・波及影響: 既存のシグネチャ・戻り値型・呼び出し元・依存モジュールへの破壊的影響がないか。\n"
-        "3. 状態管理・並行性・リソース: レースコンディション・競合状態・重複実行・タイムアウト・リソースリークがないか。\n"
-        "4. セキュリティ・汎用性: 入力検証不備・環境依存（OS/パス/TZ等）・テスト過剰適合（ハードコード）が混入していないか。\n"
-        "5. 規約準拠: 下記の基本規約（ファイル肥大化分割、メタデータ、型注釈、Enum/定数集約、Whyコメント最小化、DRY）に違反していないか。\n\n"
-        "=== 検証手順と出力方針 ===\n"
-        "- 要約バンドルだけでは変更対象の前後文脈や呼び出し元の実装が不明な場合は、推測で断定せず `aiskel c`（`-d` オプション付き1行ワンライナー）で該当コードを要求して確認せよ（調査段階では停止合図を出さないこと）。\n"
-        "- 欠陥や懸念事項を検出し再レビューが必要な場合は、該当箇所・根本原因・具体的なリスクを指摘し、上記前提に基づく統合版修正パッチ（`aiskel a` 準拠形式）を提示せよ。\n"
-        "- これ以上修正すべき欠陥が見つからなかった場合（または再レビュー用の新規タブ作成を止めるべき最終確定と判断した場合）は、検証した観点と安全性の根拠を簡潔に報告した上で、"
-        f"**応答の最末尾（コードブロックの外側の単独行）に必ず停止合図 `{PATCH_HANDOFF_STOP_SIGNAL}` を出力せよ**"
-        "（この合図により次の新規タブ自動作成が停止する。修正パッチの再レビューが必要な場合や `aiskel c` 要求時はこの合図を絶対に出力・言及するな）。\n"
-        "- 不要な雑談・挨拶は禁止する。\n\n"
-        f"{base_section}"
-    )
 
+    return _render_template(
+        review_template,
+        {
+            "{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL,
+            "{{BASE_SECTION}}": base_section,
+            "{{BASE_RULES}}": base_rules,
+        },
+    )
 
 def list_prompt_patterns() -> Tuple[str, ...]:
     """利用可能なプロンプトパターン名一覧を返す。"""
@@ -265,18 +275,36 @@ def load_prompt_for_pattern(project_root: Path, pattern: Union[PromptPattern, st
 
     resolved = project_root.resolve()
     if raw_value == PromptPattern.PATCH_REVIEW.value:
-        custom_review = _read_first_non_empty_file(
-            (
-                resolved / "REVIEW_PROMPT.txt",
-                resolved / "ai_meta" / "REVIEW_PROMPT.txt",
-                resolved / ".ai_meta" / "REVIEW_PROMPT.txt",
-                resolved / "ai_meta" / "prompts" / "patch_review.txt",
-                resolved / ".ai_meta" / "prompts" / "patch_review.txt",
-            )
+        custom_review = _read_first_plain_or_section(
+            resolved,
+            _REVIEW_PROMPT_FILENAMES,
+            PromptPattern.PATCH_REVIEW.value,
         )
         if custom_review is not None:
-            return custom_review
-        return build_patch_review_prompt(load_default_prompt(resolved))
+            if "{{BASE_SECTION}}" in custom_review or "{{BASE_RULES}}" in custom_review:
+                return build_patch_review_prompt(
+                    load_default_prompt(resolved),
+                    project_root=resolved,
+                    review_template_override=custom_review,
+                )
+            return _render_template(
+                custom_review,
+                {"{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL},
+            )
+        project_sections = _load_project_sections(resolved)
+        unified_review = project_sections.get(PromptPattern.PATCH_REVIEW.value)
+        if unified_review is not None:
+            if "{{BASE_SECTION}}" in unified_review or "{{BASE_RULES}}" in unified_review:
+                return build_patch_review_prompt(
+                    load_default_prompt(resolved),
+                    project_root=resolved,
+                    review_template_override=unified_review,
+                )
+            return _render_template(
+                unified_review,
+                {"{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL},
+            )
+        return build_patch_review_prompt(load_default_prompt(resolved), project_root=resolved)
 
     raise ValueError(f"未対応のプロンプトパターンです: {pattern}")
 
@@ -289,20 +317,223 @@ def build_file_split_prompt(
     max_chars: int,
     file_index: int = 1,
     total_files: int = 1,
+    project_root: Optional[Path] = None,
 ) -> str:
     """肥大化した単一ファイルを責務ごとに分割するための専用プロンプトを組み立てる。"""
+    builtin_sections = _load_builtin_sections()
+    project_sections = _load_project_sections(project_root)
+    split_template = project_sections.get("file_split") or builtin_sections["file_split"]
+
     stripped = (default_prompt or "").strip()
-    base_rules = stripped if stripped else BUILTIN_DEFAULT_PROMPT
-    return (
-        f"【依頼タスク: 肥大化ファイルの責務分割 ({file_index}/{total_files})】\n"
-        f"対象ファイル: `{target_rel_path}` (現在: {lines} lines, {chars:,} chars / 閾値: lines < {max_lines}, chars < {max_chars:,})\n"
-        "下記の「基本規約」を厳守し、この対象ファイル1つのみを凝集度の高い適切なモジュール群へ分割せよ。\n\n"
-        "=== 自動分割モードの実行ルール ===\n"
-        f"- 今回の作業対象は `{target_rel_path}` のみとし、他の肥大化ファイルには同時に手を付けないこと。\n"
-        f"- `{target_rel_path}` のソースコード全文は末尾に添付済みのため対象ファイル単体のための `aiskel c` は不要である。呼び出し元や依存先など他ファイルの確認が必要な場合のみ、`aiskel c -d ...`（1行ワンライナー）で関連コードを取得してから分割パッチを作成せよ。\n"
-        f"- 分割後の各ファイルが閾値（{max_lines}行未満 かつ {max_chars:,}文字未満）に収まるよう適切に責務分割せよ。\n"
-        "- 既存の公開関数・クラス・定数・型・テストおよび他モジュールからのインポート参照を壊さないよう、再エクスポートまたは参照元のインポート更新を含めて、未適用の現行コードベースへ単体でそのまま `aiskel a` 適用できる完全版パッチを出力せよ。\n"
-        "- 通常のコード修正と同様に、必ず `<<<< ==== >>>>` 形式と最末尾の `<commit>...</commit>` を含めること。\n\n"
-        "=== 基本規約 ===\n"
-        f"{base_rules}"
+    base_rules = stripped if stripped else builtin_sections["default"]
+    return _render_template(
+        split_template,
+        {
+            "{{TARGET_REL_PATH}}": target_rel_path,
+            "{{LINES}}": str(lines),
+            "{{CHARS}}": f"{chars:,}",
+            "{{MAX_LINES}}": str(max_lines),
+            "{{MAX_CHARS}}": f"{max_chars:,}",
+            "{{FILE_INDEX}}": str(file_index),
+            "{{TOTAL_FILES}}": str(total_files),
+            "{{BASE_RULES}}": base_rules,
+        },
     )
+_PROMPT_FILE_NAME = "prompts.txt"
+
+
+_REQUIRED_BUILTIN_KEYS = (
+    "default",
+    "patch_review",
+    "review_context_rules",
+    "review_patch_format_rules",
+    "file_split",
+)
+
+
+_UNIFIED_PROMPT_FILENAMES = (
+    "PROMPTS.txt",
+    "PROMPTS.md",
+    "ai_meta/PROMPTS.txt",
+    "ai_meta/PROMPTS.md",
+    ".ai_meta/PROMPTS.txt",
+    ".ai_meta/PROMPTS.md",
+)
+
+
+_DEFAULT_PROMPT_FILENAMES = (
+    "PROMPT.txt",
+    "ai_meta/PROMPT.txt",
+    ".ai_meta/PROMPT.txt",
+    "ai_meta/prompts/default.txt",
+    ".ai_meta/prompts/default.txt",
+)
+
+
+_REVIEW_PROMPT_FILENAMES = (
+    "REVIEW_PROMPT.txt",
+    "ai_meta/REVIEW_PROMPT.txt",
+    ".ai_meta/REVIEW_PROMPT.txt",
+    "ai_meta/prompts/patch_review.txt",
+    ".ai_meta/prompts/patch_review.txt",
+)
+
+
+_PROMPT_SECTION_HEADER_RE = re.compile(
+    r"^[ \t]*===[ \t]*\[PROMPT:[ \t]*([a-zA-Z0-9_]+)[ \t]*\][^\n]*===[ \t]*$"
+)
+
+
+_CONTEXT_RULES_SECTION_RE = re.compile(
+    r"^(?P<indent>[ \t]*)1\.[ \t]*コンテキスト解釈とトークン最小化規則[^\n]*\n[\s\S]*?(?=^(?P=indent)2\.[ \t]|\Z)",
+    re.MULTILINE,
+)
+
+
+_TOKEN_UNESCAPE_MAP: Tuple[Tuple[str, str], ...] = (
+    ("{{<<<<}}", "<" * 4),
+    ("{{====}}", "=" * 4),
+    ("{{>>>>}}", ">" * 4),
+    ("{{FILE_HEADER}}", "ファイル" + "パス:"),
+    ("{{DELETE_HEADER}}", "削" + "除:"),
+    ("{{COMMIT_OPEN}}", "<" + "commit>"),
+    ("{{COMMIT_CLOSE}}", "</" + "commit>"),
+)
+
+
+def _unescape_prompt_tokens(text: str) -> str:
+    resolved = text
+    for token, literal in _TOKEN_UNESCAPE_MAP:
+        if token in resolved:
+            resolved = resolved.replace(token, literal)
+    return resolved
+
+
+def _render_template(template: str, replacements: Dict[str, str]) -> str:
+    if not replacements:
+        return template
+    # 置換後の値に含まれる別プレースホルダへの再代入を防ぐため1パスで置換する
+    pattern = re.compile("|".join(re.escape(key) for key in replacements))
+    return pattern.sub(lambda match: replacements[match.group(0)], template)
+
+
+def _parse_prompt_sections(raw_text: str) -> Dict[str, str]:
+    sections: Dict[str, str] = {}
+    current_key: Optional[str] = None
+    buffer: List[str] = []
+
+    for line in raw_text.splitlines():
+        header_match = _PROMPT_SECTION_HEADER_RE.match(line)
+        if header_match:
+            if current_key is not None:
+                body = _unescape_prompt_tokens("\n".join(buffer).strip())
+                if body:
+                    sections[current_key] = body
+            current_key = header_match.group(1).strip().lower()
+            buffer = []
+            continue
+        if current_key is not None:
+            buffer.append(line)
+
+    if current_key is not None:
+        body = _unescape_prompt_tokens("\n".join(buffer).strip())
+        if body:
+            sections[current_key] = body
+    return sections
+
+
+def _read_prompt_file_bytes(path: Path) -> Optional[str]:
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    text = _decode_prompt_bytes(raw)
+    return text if text else None
+
+
+def _read_builtin_prompt_file_text() -> str:
+    try:
+        resource = importlib_resources.files("aiskel").joinpath(_PROMPT_FILE_NAME)
+        raw = resource.read_bytes()
+        text = _decode_prompt_bytes(raw)
+        if text:
+            return text
+    except (ModuleNotFoundError, FileNotFoundError, OSError, TypeError, AttributeError):
+        pass
+
+    fallback_path = Path(__file__).resolve().parents[1] / _PROMPT_FILE_NAME
+    fallback_text = _read_prompt_file_bytes(fallback_path)
+    if fallback_text:
+        return fallback_text
+    raise FileNotFoundError(f"組込プロンプト定義ファイルが見つかりません: {_PROMPT_FILE_NAME}")
+
+
+def _load_builtin_sections() -> Dict[str, str]:
+    raw_text = _read_builtin_prompt_file_text()
+    sections = _parse_prompt_sections(raw_text)
+    missing = [key for key in _REQUIRED_BUILTIN_KEYS if not sections.get(key)]
+    if missing:
+        raise RuntimeError(f"組込プロンプト定義ファイルに必須セクションが不足しています: {', '.join(missing)}")
+    return sections
+
+
+def _load_project_sections(project_root: Optional[Path]) -> Dict[str, str]:
+    if project_root is None:
+        return {}
+    resolved = project_root.resolve()
+    merged: Dict[str, str] = {}
+    for rel_path in _UNIFIED_PROMPT_FILENAMES + _DEFAULT_PROMPT_FILENAMES:
+        raw_text = _read_prompt_file_bytes(resolved / rel_path)
+        if not raw_text:
+            continue
+        sections = _parse_prompt_sections(raw_text)
+        if sections:
+            for key, val in sections.items():
+                merged.setdefault(key, val)
+    return merged
+
+
+def _read_first_plain_or_section(
+    project_root: Path,
+    rel_paths: Tuple[str, ...],
+    section_key: str,
+) -> Optional[str]:
+    resolved = project_root.resolve()
+    for rel_path in rel_paths:
+        raw_text = _read_prompt_file_bytes(resolved / rel_path)
+        if not raw_text:
+            continue
+        sections = _parse_prompt_sections(raw_text)
+        if sections:
+            value = sections.get(section_key)
+            if value:
+                return value
+            continue
+        return _unescape_prompt_tokens(raw_text)
+    return None
+
+
+def _replace_sections_for_review(
+    prompt_text: str,
+    review_context_rules: str,
+    review_patch_format_rules: str,
+    replace_context: bool,
+) -> Tuple[str, bool]:
+    updated = prompt_text.strip()
+    if replace_context and _CONTEXT_RULES_SECTION_RE.search(updated):
+        updated = _CONTEXT_RULES_SECTION_RE.sub(
+            lambda _m: f"{review_context_rules.strip()}\n\n",
+            updated,
+            count=1,
+        )
+
+    if _OUTPUT_FLOW_SECTION_RE.search(updated):
+        updated = _OUTPUT_FLOW_SECTION_RE.sub(
+            lambda _m: f"{review_patch_format_rules.strip()}\n\n",
+            updated,
+            count=1,
+        )
+        return updated.strip(), True
+    return updated.strip(), False

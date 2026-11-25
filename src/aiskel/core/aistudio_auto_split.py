@@ -171,6 +171,7 @@ def build_split_combined_text(
         max_chars=int(target_info["max_chars"]),
         file_index=int(target_info["file_index"]),
         total_files=int(target_info["total_files"]),
+        project_root=project_root,
     )
     prompt_and_summary = format_summary_prompt_text(split_prompt, summary_text)
     target_code_section = _format_split_target_code_section(project_root, rel_path)
