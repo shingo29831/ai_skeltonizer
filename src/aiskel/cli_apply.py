@@ -1,7 +1,7 @@
 """Module: @role: AIパッチの適用・リバート実行フロー全体の統括(オーケストレーション)を担当する。"""
 import argparse
 from pathlib import Path
-from typing import Callable, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from .cli_apply_io import (
     has_applicable_patch_content as _has_applicable_patch_content,
@@ -11,6 +11,7 @@ from .cli_apply_io import (
 from .cli_apply_post import (
     finalize_apply_commit,
     handle_partial_success,
+    run_post_apply_static_analysis,
     run_post_apply_validation,
     try_revert_last_commit,
 )
@@ -38,11 +39,12 @@ from .cli_sync import ensure_gitignore_updated
 from .config import (
     ensure_default_config_file,
     ensure_write_paths_sample_file,
+    load_static_analysis_command_from_meta,
     load_test_command_from_meta,
 )
 from .core.clipboard import get_clipboard_text, set_clipboard_text
 from .core.patch_applier import apply_patch
-from .core.test_runner import run_validation_test
+from .core.test_runner import run_static_analysis, run_validation_test
 
 __all__ = [
     "get_clipboard_text",
@@ -124,9 +126,11 @@ def handle_apply_command(
         no_sync=getattr(parsed_args, "no_sync", False),
         no_bloat=getattr(parsed_args, "no_bloat", False),
         no_push=getattr(parsed_args, "no_push", False),
+        no_static_analysis=getattr(parsed_args, "no_static_analysis", False),
     )
 
     total_modified_files: Set[Path] = set()
+    rollback_snapshot: Dict[Path, Optional[bytes]] = {}
     total_success = 0
     total_skipped = 0
     last_fail = 0
@@ -158,6 +162,10 @@ def handle_apply_command(
         total_skipped += skipped
         last_fail = fail
         total_modified_files.update(modified_files)
+        patch_snap = getattr(patch_result, "rollback_snapshot", None)
+        if isinstance(patch_snap, dict):
+            for snap_path, orig_bytes in patch_snap.items():
+                rollback_snapshot.setdefault(snap_path, orig_bytes)
 
         report_kwargs = {"is_check": True} if is_check else {}
         report_patch_result(
@@ -209,6 +217,22 @@ def handle_apply_command(
 
     if is_revert and total_success > 0:
         clear_pending_commit(project_root, total_modified_files)
+
+    if not is_revert and not session.no_static_analysis and total_success > 0 and last_fail == 0:
+        static_commands = load_static_analysis_command_from_meta(project_root)
+        if static_commands:
+            static_failed = run_post_apply_static_analysis(
+                project_root,
+                static_commands,
+                total_modified_files,
+                snapshot=rollback_snapshot,
+                static_runner=run_static_analysis,
+                rollback_fn=rollback_modified_files,
+                clipboard_writer=set_clipboard_text,
+                non_interactive=is_non_interactive,
+            )
+            if static_failed:
+                return 1
 
     test_failed = False
     if not is_revert and session.test_option is not None and total_success > 0 and last_fail == 0:

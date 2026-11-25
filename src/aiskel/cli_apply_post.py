@@ -3,8 +3,12 @@ import inspect
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
+from .cli_apply_io import (
+    _format_command_summary,
+    copy_static_analysis_failure_report_to_clipboard,
+)
 from .cli_commit import (
     clear_pending_commit,
     execute_git_commit,
@@ -14,7 +18,8 @@ from .cli_interaction import (
     prompt_user_confirmation,
     rollback_modified_files,
 )
-from .core.test_runner import run_validation_test
+from .core.clipboard import set_clipboard_text
+from .core.test_runner import run_static_analysis, run_validation_test
 
 
 def try_revert_last_commit(
@@ -114,6 +119,67 @@ def run_post_apply_validation(
         print("\n--- テスト失敗ログ ---", file=sys.stderr)
         print(test_output, file=sys.stderr)
         print("----------------------\n", file=sys.stderr)
+    return True
+
+def _invoke_rollback(
+    rollback_exec: Callable[..., bool],
+    project_root: Path,
+    modified_files: Set[Path],
+    snapshot: Optional[Dict[Path, Optional[bytes]]] = None,
+) -> bool:
+    if snapshot:
+        try:
+            params = inspect.signature(rollback_exec).parameters
+            supports_snapshot = "snapshot" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):
+            supports_snapshot = False
+        if supports_snapshot:
+            return rollback_exec(project_root, modified_files, snapshot=snapshot)
+    return rollback_exec(project_root, modified_files)
+
+def run_post_apply_static_analysis(
+    project_root: Path,
+    static_commands: Union[str, List[str]],
+    total_modified_files: Set[Path],
+    *,
+    snapshot: Optional[Dict[Path, Optional[bytes]]] = None,
+    static_runner: Optional[Callable[..., Tuple[bool, str]]] = None,
+    rollback_fn: Optional[Callable[..., bool]] = None,
+    clipboard_writer: Optional[Callable[[str], None]] = None,
+    non_interactive: bool = False,
+) -> bool:
+    """静的コード解析を実行し、失敗時は変更を元に戻してエラー内容をプロンプトへ出力・保存する。"""
+    runner = static_runner or run_static_analysis
+    rollback = rollback_fn or rollback_modified_files
+    writer = clipboard_writer or set_clipboard_text
+
+    ok, output = runner(project_root, static_commands)
+    if ok:
+        print("✅ 静的コード解析に成功しました。")
+        return False
+
+    cmd_summary = _format_command_summary(static_commands)
+
+    print("\n❌ 静的コード解析が失敗しました。変更を元に戻します。", file=sys.stderr)
+    if cmd_summary:
+        print(f"実行コマンド: {cmd_summary}", file=sys.stderr)
+    if output:
+        print("\n--- 静的コード解析エラーログ ---", file=sys.stderr)
+        print(output, file=sys.stderr)
+        print("--------------------------------\n", file=sys.stderr)
+
+    _invoke_rollback(rollback, project_root, total_modified_files, snapshot=snapshot)
+    clear_pending_commit(project_root, total_modified_files)
+    total_modified_files.clear()
+
+    if not non_interactive:
+        copy_static_analysis_failure_report_to_clipboard(
+            static_commands,
+            output,
+            clipboard_writer=writer,
+        )
     return True
 
 

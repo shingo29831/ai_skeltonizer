@@ -3,7 +3,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 from .core.clipboard import get_clipboard_text, set_clipboard_text
 from .core.patch_parser import is_file_deletion_patch, is_file_move_patch
@@ -118,6 +118,49 @@ def copy_failure_report_to_clipboard(
     except Exception as e:
         print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
 
+def _format_command_summary(commands: Union[str, List[str]]) -> str:
+    if isinstance(commands, list):
+        cmd_list = [c.strip() for c in commands if isinstance(c, str) and c.strip()]
+    else:
+        cmd_list = [
+            c.strip()
+            for c in str(commands or "").splitlines()
+            if c.strip() and not c.strip().startswith(("#", "//", ";"))
+        ]
+    return " && ".join(cmd_list)
+
+def build_static_analysis_failure_report(
+    commands: Union[str, List[str]],
+    output_log: str,
+) -> str:
+    cmd_summary = _format_command_summary(commands)
+    cleaned_log = re.sub(r"\x1b\[[0-9;]*m", "", output_log or "").strip()
+
+    report_lines = [
+        "提示されたパッチの適用後に行われた静的コード解析に失敗したため、変更を元に戻しました。",
+        "以下のエラー内容を解消し、現在のコードベースに対してそのまま適用できる修正パッチを再提示してください。\n",
+        "【静的コード解析エラー】",
+    ]
+    if cmd_summary:
+        report_lines.append(f"実行コマンド: {cmd_summary}")
+    if cleaned_log:
+        report_lines.append(cleaned_log)
+    else:
+        report_lines.append("- 静的コード解析コマンドがゼロ以外の終了コードで終了しました")
+    return "\n".join(report_lines)
+
+def copy_static_analysis_failure_report_to_clipboard(
+    commands: Union[str, List[str]],
+    output_log: str,
+    clipboard_writer: Optional[Callable[[str], None]] = None,
+) -> None:
+    report_text = build_static_analysis_failure_report(commands, output_log)
+    writer = clipboard_writer or set_clipboard_text
+    try:
+        writer(report_text)
+        print("📋 静的コード解析の失敗結果とエラー内容をプロンプトとしてクリップボードにコピーしました (AIチャットにそのままペースト可能)。")
+    except Exception as e:
+        print(f"⚠ クリップボードへの保存に失敗しました: {e}", file=sys.stderr)
 
 def report_patch_result(
     success: int,

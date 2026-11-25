@@ -152,6 +152,7 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     apply_parser.add_argument("-T", "--test", dest="test", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にテストを実行し、失敗時は自動リバートします (コマンド省略時はai_metaの設定または自動検出)")
     apply_parser.add_argument("-e", "-r", "--exec", "--run", dest="exec_cmd", nargs="?", const="auto", default=None, metavar="CMD", help="パッチ適用後にai_meta内の設定ファイルまたは指定されたコマンドを実行します (省略時は設定ファイルから取得)")
     apply_parser.add_argument("--no-test", action="store_true", help="設定ファイルのコマンド実行および検証テストを明示的にスキップします")
+    apply_parser.add_argument("--no-static-analysis", action="store_true", help="設定ファイルの静的コード解析コマンド実行を明示的にスキップします")
     apply_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
     apply_parser.add_argument("--no-push", action="store_true", help="コミット成功後のプッシュ確認および git push をスキップします")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")

@@ -30,6 +30,7 @@ class ApplySessionState:
     no_sync: bool
     no_bloat: bool
     no_push: bool = False
+    no_static_analysis: bool = False
 
 
 def _strip_outer_quotes(text: str) -> str:
@@ -202,6 +203,8 @@ def wait_for_next_patch(
                 state.test_option = next_test_opt
             if getattr(next_args, "no_test", False):
                 state.test_option = None
+            if getattr(next_args, "no_static_analysis", False):
+                state.no_static_analysis = True
             if getattr(next_args, "yes", False):
                 state.yes = True
             if getattr(next_args, "no_push", False):

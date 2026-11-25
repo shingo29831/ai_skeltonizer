@@ -60,11 +60,18 @@ def extract_apply_error_detail(
     max_chars: int = DEFAULT_APPLY_ERROR_DETAIL_CHARS,
 ) -> str:
     """aiskel apply の標準エラーおよび標準出力から失敗箇所・原因の要約文字列を抽出する。"""
+    clean_err = _strip_ansi(stderr_text or "")
+    clean_out = _strip_ansi(stdout_text or "")
     stderr_lines: List[str] = []
     has_stderr_error = False
-    for raw in stderr_text.splitlines():
+    for raw in clean_err.splitlines():
         cleaned = raw.strip()
-        if not cleaned or cleaned.startswith("📋") or (cleaned.startswith("---") and cleaned.endswith("---")):
+        if (
+            not cleaned
+            or cleaned.startswith("📋")
+            or (cleaned.startswith("---") and cleaned.endswith("---"))
+            or set(cleaned) == {"-"}
+        ):
             continue
         if cleaned.startswith(("❌", "✖", "エラー:", "Error:", "致命的")):
             has_stderr_error = True
@@ -73,7 +80,7 @@ def extract_apply_error_detail(
     stdout_lines: List[str] = []
     has_stdout_failure = False
     in_failed_section = False
-    for raw in stdout_text.splitlines():
+    for raw in clean_out.splitlines():
         cleaned = raw.strip()
         if not cleaned:
             in_failed_section = False
@@ -128,6 +135,9 @@ def extract_apply_success_summary(
     skip_matches = re.findall(r"⏭\s*スキップ[^:]*:\s*(\d+)\s*箇所", clean_out)
     if skip_matches and int(skip_matches[-1]) > 0:
         parts.append(f"スキップ: {skip_matches[-1]}箇所")
+
+    if "✅ 静的コード解析に成功しました" in clean_out:
+        parts.append("静的解析成功")
 
     if "❌ 検証テストが失敗しました" in clean_err or "❌ 検証テストが失敗しました" in clean_out:
         test_failed = True
@@ -198,10 +208,18 @@ def extract_apply_error_report(
         if stripped.startswith(("✖", "❌", "⛔", "エラー:", "Error:", "致命的")):
             extracted_stdout.append(raw.rstrip())
 
+    is_static_analysis_failure = (
+        "静的コード解析が失敗しました" in clean_stderr
+        or "【静的コード解析エラー】" in clean_stdout
+        or "【静的コード解析エラー】" in clean_stderr
+    )
+
     extracted_stderr: List[str] = []
     for raw in clean_stderr.splitlines():
         stripped = raw.strip()
-        if not stripped or stripped.startswith("📋"):
+        if not stripped or stripped.startswith("📋") or set(stripped) == {"-"}:
+            continue
+        if is_static_analysis_failure and stripped in ("--- 静的コード解析エラーログ ---", "--- テスト失敗ログ ---"):
             continue
         extracted_stderr.append(raw.rstrip())
 
@@ -222,10 +240,17 @@ def extract_apply_error_report(
         cmd_label = "aiskel check (置換検証)"
     else:
         cmd_label = "aiskel a"
-    header = (
-        f"提示されたパッチの適用に失敗しました ({cmd_label}, 終了コード: {exit_code})。\n"
-        "以下のエラー箇所について、現在のコードと整合する修正パッチを再提示してください。"
-    )
+
+    if is_static_analysis_failure:
+        header = (
+            f"提示されたパッチの適用後に行われた静的コード解析に失敗したため、変更を元に戻しました ({cmd_label}, 終了コード: {exit_code})。\n"
+            "以下の静的コード解析エラーを解消し、現在のコードベースに対して単体でそのまま適用できる修正パッチを再提示してください。"
+        )
+    else:
+        header = (
+            f"提示されたパッチの適用に失敗しました ({cmd_label}, 終了コード: {exit_code})。\n"
+            "以下のエラー箇所について、現在のコードと整合する修正パッチを再提示してください。"
+        )
     if not body_lines:
         return header
 

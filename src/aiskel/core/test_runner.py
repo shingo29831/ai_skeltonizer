@@ -105,11 +105,36 @@ def run_validation_test(
             else:
                 detected = venv_pytest or f'"{sys.executable}" -m pytest'
             commands = [detected]
-    elif isinstance(test_command, list):
-        commands = [c.strip() for c in test_command if c.strip()]
     else:
-        commands = [c.strip() for c in test_command.splitlines() if c.strip() and not c.strip().startswith(("#", "//", ";"))]
+        commands = _normalize_command_list(test_command)
 
+    return _execute_command_sequence(
+        project_root,
+        commands,
+        label="検証テスト",
+        icon="🧪",
+        timeout_sec=timeout_sec,
+        verbose=verbose,
+    )
+
+def _normalize_command_list(raw_commands: Union[str, List[str]]) -> List[str]:
+    if isinstance(raw_commands, list):
+        return [c.strip() for c in raw_commands if isinstance(c, str) and c.strip()]
+    return [
+        c.strip()
+        for c in str(raw_commands or "").splitlines()
+        if c.strip() and not c.strip().startswith(("#", "//", ";"))
+    ]
+
+def _execute_command_sequence(
+    project_root: Path,
+    commands: List[str],
+    *,
+    label: str,
+    icon: str,
+    timeout_sec: int = 60,
+    verbose: bool = False,
+) -> Tuple[bool, str]:
     output_logs: List[str] = []
     total = len(commands)
     current_dir = project_root
@@ -118,7 +143,7 @@ def run_validation_test(
 
     for idx, cmd in enumerate(commands, 1):
         step_label = f"[{idx}/{total}] " if total > 1 else ""
-        print(f"\n🧪 検証テストを実行中: {step_label}{cmd}")
+        print(f"\n{icon} {label}を実行中: {step_label}{cmd}")
 
         is_cd, ok, new_dir, new_prev, msg = try_handle_cd_command(cmd, current_dir, dir_stack, prev_dir)
         if is_cd:
@@ -156,8 +181,27 @@ def run_validation_test(
             if proc.returncode != 0:
                 return False, "\n".join(output_logs)
         except subprocess.TimeoutExpired:
-            return False, f"テスト実行がタイムアウトしました ({timeout_sec}秒): {cmd}"
+            return False, f"{label}がタイムアウトしました ({timeout_sec}秒): {cmd}"
         except Exception as e:
-            return False, f"テスト実行コマンドの起動に失敗しました: {cmd} ({e})"
+            return False, f"{label}コマンドの起動に失敗しました: {cmd} ({e})"
 
     return True, "\n".join(output_logs)
+
+def run_static_analysis(
+    project_root: Path,
+    commands: Union[str, List[str]],
+    timeout_sec: int = 60,
+    verbose: bool = False,
+) -> Tuple[bool, str]:
+    """静的コード解析コマンドを実行し、成否と実行ログを返す。"""
+    cmd_list = _normalize_command_list(commands)
+    if not cmd_list:
+        return True, ""
+    return _execute_command_sequence(
+        project_root,
+        cmd_list,
+        label="静的コード解析",
+        icon="🔍",
+        timeout_sec=timeout_sec,
+        verbose=verbose,
+    )

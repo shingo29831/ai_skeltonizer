@@ -22,6 +22,7 @@ from .write_path_policy_loader import (
     DENIED_WRITE_PATH_TXT_FILES,
     META_CANDIDATE_CONFIG_FILES,
     WRITE_PATHS_SAMPLE_FILENAME,
+    _collect_meta_dirs,
     ensure_write_paths_sample_file,
     extract_paths_from_val as _extract_paths_from_val,
     iter_meta_config_files as _iter_meta_config_files,
@@ -29,6 +30,7 @@ from .write_path_policy_loader import (
     load_write_path_policy_from_meta,
     parse_allowed_write_paths_from_text as _parse_allowed_write_paths_from_text,
     split_inline_list_items as _split_inline_list_items,
+    tomllib as _tomllib,
 )
 
 _META_CANDIDATE_CONFIG_FILES = META_CANDIDATE_CONFIG_FILES
@@ -49,6 +51,26 @@ _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "max_auto_tabs",
     "patch_auto_tab_limit",
     "max_handoff_tabs",
+)
+_STATIC_ANALYSIS_COMMAND_KEYS = (
+    "static_analysis_command",
+    "static_analysis_cmd",
+    "static_analysis",
+    "lint_command",
+    "lint_cmd",
+    "syntax_check_command",
+    "syntax_check_cmd",
+    "typecheck_command",
+    "typecheck_cmd",
+    "staticAnalysisCommand",
+)
+_STATIC_ANALYSIS_TXT_FILES = (
+    "static_analysis_command.txt",
+    "static_analysis_cmd.txt",
+    "static_analysis.txt",
+    "lint_command.txt",
+    "lint_cmd.txt",
+    "syntax_check_command.txt",
 )
 
 
@@ -134,20 +156,184 @@ def _parse_command_file(file_path: Path) -> Optional[List[str]]:
         if cmds:
             return cmds
 
-    lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", ";"))]
-    if lines and not lines[0].startswith(("[", "{")):
-        return lines
+    # 構造化設定の他項目(static_analysis_command等)をテストコマンドへ誤認しないため専用テキストのみ行フォールバック
+    if file_path.suffix.lower() not in (".json", ".toml", ".yaml", ".yml", ".ini") and not file_path.name.startswith(".aiskelrc"):
+        lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith(("#", "//", ";"))]
+        if lines and not lines[0].startswith(("[", "{")):
+            return lines
 
     return None
 
+def _strip_unquoted_comment(text: str) -> str:
+    quote: Optional[str] = None
+    escaped = False
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and quote == '"':
+            escaped = True
+            continue
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            continue
+        if ch in ("#", ";") and (i == 0 or text[i - 1].isspace()):
+            return text[:i].strip()
+    return text.strip()
+
+def _extract_commands_from_mapping(data: dict) -> Optional[List[str]]:
+    for k in _STATIC_ANALYSIS_COMMAND_KEYS:
+        if k in data:
+            cmds = _extract_commands_from_val(data[k])
+            if cmds:
+                return cmds
+    if "scripts" in data and isinstance(data["scripts"], dict):
+        for k in ("static_analysis", "lint", "typecheck", "syntax_check"):
+            if k in data["scripts"]:
+                cmds = _extract_commands_from_val(data["scripts"][k])
+                if cmds:
+                    return cmds
+    return None
+
+def _extract_commands_from_structured_text(content: str, keys: Tuple[str, ...]) -> Optional[List[str]]:
+    lines = content.splitlines()
+    empty_literals = {"[]", "()", "null", "none", "~", '""', "''"}
+    for idx, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith(("#", "//", ";")):
+            continue
+        for key in keys:
+            m = re.match(rf"^{re.escape(key)}[ \t]*[:=][ \t]*(.*)$", stripped, re.IGNORECASE)
+            if not m:
+                continue
+            rhs = _strip_unquoted_comment(m.group(1))
+            if rhs.lower() in empty_literals:
+                continue
+            if rhs.startswith("["):
+                if rhs.endswith("]"):
+                    items = [_strip_matching_quotes(it) for it in _split_inline_list_items(rhs[1:-1])]
+                    cmds = [it.strip() for it in items if it.strip()]
+                    if cmds:
+                        return cmds
+                    continue
+                collected: List[str] = []
+                first_body = rhs[1:].strip()
+                if first_body:
+                    for it in _split_inline_list_items(first_body):
+                        cleaned = _strip_matching_quotes(it).strip()
+                        if cleaned:
+                            collected.append(cleaned)
+                for sub_raw in lines[idx + 1:]:
+                    sub = _strip_unquoted_comment(sub_raw.strip())
+                    if not sub:
+                        continue
+                    end_pos = sub.find("]")
+                    body = sub[:end_pos] if end_pos != -1 else sub
+                    for it in _split_inline_list_items(body):
+                        cleaned = _strip_matching_quotes(it).strip()
+                        if cleaned:
+                            collected.append(cleaned)
+                    if end_pos != -1:
+                        break
+                if collected:
+                    return collected
+                continue
+            if not rhs:
+                base_indent = len(raw_line) - len(raw_line.lstrip(" \t"))
+                yaml_items: List[str] = []
+                for sub_raw in lines[idx + 1:]:
+                    sub_stripped = sub_raw.strip()
+                    if not sub_stripped or sub_stripped.startswith("#"):
+                        continue
+                    sub_indent = len(sub_raw) - len(sub_raw.lstrip(" \t"))
+                    if sub_indent <= base_indent and not sub_stripped.startswith("-"):
+                        break
+                    if sub_stripped.startswith("-"):
+                        raw_item = _strip_unquoted_comment(sub_stripped[1:].strip())
+                        item_val = _strip_matching_quotes(raw_item).strip()
+                        if item_val:
+                            yaml_items.append(item_val)
+                    else:
+                        break
+                if yaml_items:
+                    return yaml_items
+                continue
+            unquoted = _strip_matching_quotes(rhs).strip()
+            if unquoted and unquoted.lower() not in empty_literals:
+                return [unquoted]
+    return None
+
+def load_static_analysis_command_from_meta(
+    project_root: Path, output_dir: Optional[Path] = None
+) -> Optional[List[str]]:
+    """ai_meta等の設定ファイルから静的コード解析用コマンドを取得する"""
+    for target in _iter_meta_config_files(project_root, output_dir):
+        try:
+            content = target.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+
+        if target.suffix.lower() == ".json" or content.startswith("{"):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    cmds = _extract_commands_from_mapping(data)
+                    if cmds:
+                        return cmds
+                continue
+            except Exception:
+                if target.suffix.lower() == ".json":
+                    continue
+
+        if target.suffix.lower() == ".toml" and _tomllib is not None:
+            try:
+                data = _tomllib.loads(content)
+                if isinstance(data, dict):
+                    cmds = _extract_commands_from_mapping(data)
+                    if cmds:
+                        return cmds
+                continue
+            except Exception:
+                continue
+
+        parsed = _extract_commands_from_structured_text(content, _STATIC_ANALYSIS_COMMAND_KEYS)
+        if parsed:
+            return parsed
+
+    for d in _collect_meta_dirs(project_root, output_dir):
+        for fname in _STATIC_ANALYSIS_TXT_FILES:
+            target = d / fname
+            if not target.is_file():
+                continue
+            try:
+                content = target.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            lines = [
+                l.strip()
+                for l in content.splitlines()
+                if l.strip() and not l.strip().startswith(("#", "//", ";"))
+            ]
+            if lines:
+                return lines
+
+    return None
 
 def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional[Path]:
     """ai_meta内に設定ファイルが存在しない場合、デフォルトのconfig.jsonを安全に自動生成する"""
     # なぜ必要か: 既に何らかの設定ファイルが存在する場合は上書き破壊を防止するため
     existing_cmd = load_test_command_from_meta(project_root, output_dir)
+    existing_static_cmd = load_static_analysis_command_from_meta(project_root, output_dir)
     config_path = output_dir / "config.json"
     if (
         existing_cmd is not None
+        or existing_static_cmd is not None
         or config_path.exists()
         or any(_iter_meta_config_files(project_root, output_dir))
     ):
@@ -158,15 +344,17 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
         config_data = {
             "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
+            "static_analysis_command": [],
             "exclude_paths": [],
             "write_paths_mode": "auto",
             "allowed_write_paths": [],
             "denied_write_paths": [],
             "patch_handoff_max_tabs": DEFAULT_PATCH_HANDOFF_MAX_TABS,
             "description": (
-                "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください "
-                "(配列または改行で複数指定可)。書き込み可能パスの指定方法は同フォルダの "
-                f"{WRITE_PATHS_SAMPLE_FILENAME} を参照してください"
+                "test_command には aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンド、"
+                "static_analysis_command には aiskel a 適用後に自動実行される静的コード解析(構文・型・Lintチェック等)コマンドを記述してください "
+                "(配列または改行で複数指定可)。static_analysis_command が失敗した場合は変更を自動で元に戻しエラー内容をプロンプトへ追記します。"
+                f"書き込み可能パスの指定方法は同フォルダの {WRITE_PATHS_SAMPLE_FILENAME} を参照してください"
             ),
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

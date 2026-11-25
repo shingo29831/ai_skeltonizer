@@ -8,6 +8,11 @@ from ..config import (
     WritePathPolicy,
     load_write_path_policy_from_meta,
 )
+from ..write_path_policy_loader import (
+    ALLOWED_WRITE_PATH_TXT_FILES,
+    _collect_meta_dirs,
+    iter_meta_config_files,
+)
 from ..write_path_policy_updater import (
     find_new_top_directories,
     update_write_policy_for_created_dirs,
@@ -191,6 +196,41 @@ def commit_patch_transaction(
             policy_added_dirs=policy_added_dirs,
         )
 
+    rollback_snapshot: Dict[Path, Optional[bytes]] = {}
+    for path in set(write_targets) | (files_to_delete & modified_files):
+        if path in syntax_error_files:
+            continue
+        resolved_key = path.resolve()
+        # 大文字小文字のみ異なるリネーム先は既存別ケースと衝突するため未存在扱いにする
+        if path in case_rename_set and path.exists():
+            try:
+                if path.resolve().name != path.name:
+                    rollback_snapshot[path] = None
+                    continue
+            except OSError:
+                pass
+        if path.exists() and path.is_file():
+            try:
+                rollback_snapshot[resolved_key] = path.read_bytes()
+            except OSError:
+                # 読込失敗時にNone登録するとロールバックで既存ファイルを誤削除するため登録しない
+                continue
+        else:
+            rollback_snapshot[resolved_key] = None
+
+    pre_policy_bytes: Dict[Path, bytes] = {}
+    if created_top_dirs and write_policy.is_active and persist_policy_update:
+        candidate_policy_files: List[Path] = list(iter_meta_config_files(project_root))
+        for meta_dir in _collect_meta_dirs(project_root):
+            for txt_name in ALLOWED_WRITE_PATH_TXT_FILES:
+                candidate_policy_files.append(meta_dir / txt_name)
+        for pf in candidate_policy_files:
+            if pf.is_file():
+                try:
+                    pre_policy_bytes[pf.resolve()] = pf.read_bytes()
+                except OSError:
+                    pass
+
     written_files: Set[Path] = set()
     for path in files_to_delete:
         if path in modified_files and path not in syntax_error_files:
@@ -221,7 +261,7 @@ def commit_patch_transaction(
     policy_added_dirs: List[Path] = []
     if created_top_dirs:
         if write_policy.is_active:
-            policy_added_dirs, _ = update_write_policy_for_created_dirs(
+            policy_added_dirs, updated_policy_path = update_write_policy_for_created_dirs(
                 project_root,
                 created_top_dirs,
                 write_policy,
@@ -229,6 +269,9 @@ def commit_patch_transaction(
                 created_files=write_targets,
                 persist=persist_policy_update,
             )
+            if updated_policy_path is not None:
+                resolved_policy = updated_policy_path.resolve()
+                rollback_snapshot.setdefault(resolved_policy, pre_policy_bytes.get(resolved_policy))
         else:
             disp_dirs = []
             for d in created_top_dirs:
@@ -246,4 +289,5 @@ def commit_patch_transaction(
         failed_details,
         created_dirs=created_top_dirs,
         policy_added_dirs=policy_added_dirs,
+        rollback_snapshot=rollback_snapshot,
     )

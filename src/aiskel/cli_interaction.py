@@ -4,7 +4,7 @@ import re
 import sys
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def _find_patch_block_spans(patch_text: str) -> List[Tuple[int, int]]:
@@ -140,30 +140,79 @@ def prompt_user_confirmation(prompt: str, default: bool = False) -> bool:
         return False
 
 
-def rollback_modified_files(project_root: Path, modified_files: Set[Path]) -> bool:
-    # なぜ必要か: 新規作成ファイル(未追跡)の残留を防ぎ、Git経由で完全ロールバックを保証
+def _cleanup_empty_dirs_up_to_root(start_dir: Path, resolved_root: Path) -> None:
+    cur = start_dir
+    while cur != resolved_root:
+        try:
+            cur.relative_to(resolved_root)
+        except ValueError:
+            break
+        if not cur.is_dir():
+            break
+        try:
+            if any(cur.iterdir()):
+                break
+            cur.rmdir()
+        except OSError:
+            break
+        cur = cur.parent
+
+def _resolve_under_root(path: Path, resolved_root: Path) -> Path:
+    return path.resolve() if path.is_absolute() else (resolved_root / path).resolve()
+
+def rollback_modified_files(
+    project_root: Path,
+    modified_files: Set[Path],
+    snapshot: Optional[Dict[Path, Optional[bytes]]] = None,
+) -> bool:
+    # なぜ必要か: 非Git環境・未コミット変更・新規作成ファイル残留を防ぎ、適用前状態へ確実に復元するため
     resolved_root = project_root.resolve()
+    snap_map = snapshot or {}
     try:
+        resolved_snap: Dict[Path, Optional[bytes]] = {}
+        delete_first_targets: List[Path] = []
+        restore_targets: List[Path] = []
+        for raw_k, orig_bytes in snap_map.items():
+            rk = _resolve_under_root(raw_k, resolved_root)
+            resolved_snap[rk] = orig_bytes
+            if orig_bytes is None:
+                delete_first_targets.append(raw_k)
+            else:
+                restore_targets.append(raw_k)
+
+        # 大文字小文字のみ変更された新規側の削除を先に実行し、元のファイル名大文字小文字を復元可能にする
+        handled_resolved: Set[Path] = set()
+        for raw_p in delete_first_targets:
+            resolved_f = _resolve_under_root(raw_p, resolved_root)
+            handled_resolved.add(resolved_f)
+            if resolved_f.exists() and resolved_f.is_file():
+                resolved_f.unlink()
+            _cleanup_empty_dirs_up_to_root(resolved_f.parent, resolved_root)
+
+        for raw_p in restore_targets:
+            resolved_f = _resolve_under_root(raw_p, resolved_root)
+            handled_resolved.add(resolved_f)
+            orig_bytes = resolved_snap[resolved_f]
+            if orig_bytes is None:
+                continue
+            resolved_f.parent.mkdir(parents=True, exist_ok=True)
+            if resolved_f.exists():
+                try:
+                    if resolved_f.resolve().name != raw_p.name:
+                        resolved_f.unlink()
+                except OSError:
+                    pass
+            resolved_f.write_bytes(orig_bytes)
+
         for f in modified_files:
+            resolved_f = _resolve_under_root(f, resolved_root)
+            if resolved_f in handled_resolved:
+                continue
+            handled_resolved.add(resolved_f)
             res = subprocess.run(["git", "checkout", "--", str(f)], cwd=project_root, capture_output=True)
             if res.returncode != 0:
                 subprocess.run(["git", "clean", "-f", str(f)], cwd=project_root, capture_output=True)
-                resolved_f = f.resolve() if f.is_absolute() else (resolved_root / f).resolve()
-                cur = resolved_f.parent
-                while cur != resolved_root:
-                    try:
-                        cur.relative_to(resolved_root)
-                    except ValueError:
-                        break
-                    if not cur.is_dir():
-                        break
-                    try:
-                        if any(cur.iterdir()):
-                            break
-                        cur.rmdir()
-                    except OSError:
-                        break
-                    cur = cur.parent
+                _cleanup_empty_dirs_up_to_root(resolved_f.parent, resolved_root)
         print("🔄 変更ファイルを元の状態に復元しました。")
         return True
     except Exception as e:
