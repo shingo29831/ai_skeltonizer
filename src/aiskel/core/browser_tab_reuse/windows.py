@@ -4,7 +4,7 @@ import time
 from collections import deque
 from typing import Any, Deque, List, Optional, Sequence, Tuple
 
-from ..browser_focus_windows import (
+from ..browser_focus.windows import (
     _find_target_browser_hwnds,
     _get_windows_default_browser_exe_names,
     _init_win32_apis,

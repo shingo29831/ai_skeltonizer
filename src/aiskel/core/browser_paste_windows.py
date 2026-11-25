@@ -3,7 +3,7 @@ import ctypes
 import time
 from typing import Optional, Sequence
 
-from .browser_focus_windows import _get_windows_default_browser_exe_names
+from .browser_focus.windows import _get_windows_default_browser_exe_names
 from .browser_paste_types import (
     PasteErrorKind,
     PasteOutcome,

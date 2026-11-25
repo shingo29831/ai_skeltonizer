@@ -3,7 +3,7 @@ import json
 import subprocess
 from typing import Optional, Sequence
 
-from ..browser_focus_macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
+from ..browser_focus.macos import _get_macos_default_browser_bundle_id, _resolve_running_macos_bundle_id
 from ..browser_paste_types import (
     BROWSER_CUSTOM_PROFILE_SUFFIX_REGEX_PATTERN,
     BROWSER_STANDALONE_PROFILE_REGEX_PATTERN,

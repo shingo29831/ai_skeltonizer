@@ -5,7 +5,7 @@ import time
 from collections import deque
 from typing import Any, Deque, List, Optional, Sequence, Set, Tuple
 
-from ..browser_focus_linux import _get_linux_browser_wm_hints, focus_linux_default_browser_target
+from ..browser_focus.linux import _get_linux_browser_wm_hints, focus_linux_default_browser_target
 from ..browser_paste_linux import (
     _build_linux_hint_norms,
     _clear_atspi_single_cache,

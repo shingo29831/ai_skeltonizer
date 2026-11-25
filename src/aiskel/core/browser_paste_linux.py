@@ -3,7 +3,7 @@ import os
 import time
 from typing import Any, Optional, Sequence, Tuple
 
-from .browser_focus_linux import _get_linux_browser_wm_hints
+from .browser_focus.linux import _get_linux_browser_wm_hints
 from .browser_paste_linux_atspi import (
     _clear_atspi_single_cache as _clear_atspi_single_cache,
     _clear_atspi_subtree_cache as _clear_atspi_subtree_cache,

@@ -5,9 +5,9 @@ import subprocess
 import sys
 from typing import Optional, Union
 
-from .browser_focus_linux import focus_linux_default_browser_target, focus_linux_window_id
-from .browser_focus_macos import focus_macos_bundle_id, focus_macos_default_browser_target
-from .browser_focus_windows import focus_windows_default_browser_hwnd, focus_windows_hwnd
+from .linux import focus_linux_default_browser_target, focus_linux_window_id
+from .macos import focus_macos_bundle_id, focus_macos_default_browser_target
+from .windows import focus_windows_default_browser_hwnd, focus_windows_hwnd
 
 
 def focus_default_browser_target(interactive_only: bool = False) -> Optional[Union[int, str]]:
