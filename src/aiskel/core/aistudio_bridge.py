@@ -1,11 +1,8 @@
 """Module: @role: ブラウザ監視クライアントからの通知を受信し、検証済みaiskelコマンドをメインスレッド上で安全に自動実行するローカルHTTPブリッジを提供する。"""
-import ipaddress
 import queue
-import socket
 import sys
 import threading
 from collections import deque
-from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
@@ -34,6 +31,16 @@ from .aistudio_bridge_prompts import (
     handle_summary_prompt,
 )
 from .aistudio_bridge_runner import run_bridge_lifecycle
+from .aistudio_bridge_runtime import (
+    IPv6ThreadingHTTPServer as _IPv6ThreadingHTTPServer,
+    bind_bridge_server,
+    dispatch_bridge_job,
+    drain_pending_jobs_locked,
+    execute_bridge_action,
+    is_ipv6_literal as _is_ipv6_literal,
+    serve_bridge_forever,
+    shutdown_bridge_server,
+)
 from .aistudio_bridge_state import TabBindingManager
 from .aistudio_bridge_types import (
     ALLOWED_EXTENSION_SCHEMES,
@@ -45,11 +52,8 @@ from .aistudio_bridge_types import (
     SOCKET_TIMEOUT_SEC,
     BridgeExecutionResult,
     ExecutionJob as _ExecutionJob,
-    TeeTextIO as _TeeTextIO,
-    extract_error_detail as _extract_error_detail,
     is_allowed_origin,
     make_bridge_job_result,
-    normalize_system_exit_code as _normalize_system_exit_code,
     resolve_target_title_keywords,
     validate_optional_tab_id,
 )
@@ -328,49 +332,10 @@ class AiskelBridgeServer:
         return _handle_handoff_ack(self, payload)
 
     def _execute_action(self, action: str, payload: Dict[str, object]) -> Tuple[int, Any]:
-        if action == "handoff":
-            return self.handle_handoff_create(payload)
-        if action == "trigger_run":
-            return self.handle_trigger_run_payload(payload)
-        if action == "summary_prompt":
-            return self.handle_summary_prompt_payload(payload)
-        if action == "bloat_targets":
-            return self.handle_bloat_targets_payload(payload)
-        if action == "split_prompt":
-            return self.handle_split_prompt_payload(payload)
-        if action == "split_handoff":
-            return self.handle_split_handoff_payload(payload)
-        return self.handle_execute_payload(payload)
+        return execute_bridge_action(self, action, payload)
 
     def _dispatch_job(self, payload: Dict[str, object], action: str) -> Tuple[int, Any]:
-        # シャットダウン時のキュー取り残し競合を防ぐため状態確認と投入をロック内で原子化
-        with self._queue_state_lock:
-            if self._shutting_down:
-                return int(HTTPStatus.SERVICE_UNAVAILABLE), self._make_job_result(
-                    action, False, "ブリッジサーバー終了のため実行を中止しました"
-                )
-            if not self._use_main_thread_queue:
-                run_inline = True
-                job: Optional[_ExecutionJob] = None
-            else:
-                run_inline = False
-                job = _ExecutionJob(payload=payload, action=action)
-                self._job_queue.put(job)
-
-        if run_inline or job is None:
-            return self._execute_action(action, payload)
-
-        if not job.done_event.wait(timeout=EXECUTION_WAIT_TIMEOUT_SEC):
-            return int(HTTPStatus.GATEWAY_TIMEOUT), self._make_job_result(
-                action, False, "コマンド実行がタイムアウトしました"
-            )
-        if job.error is not None:
-            raise job.error
-        if job.result is None:
-            return int(HTTPStatus.INTERNAL_SERVER_ERROR), self._make_job_result(
-                action, False, "コマンド実行結果を取得できませんでした"
-            )
-        return job.status_code, job.result
+        return dispatch_bridge_job(self, payload, action)
 
     def _dispatch_execute_payload(self, payload: Dict[str, object]) -> Tuple[int, BridgeExecutionResult]:
         return self._dispatch_job(payload, action="execute")
@@ -394,16 +359,7 @@ class AiskelBridgeServer:
         return self._dispatch_job(payload, action="split_handoff")
 
     def _drain_pending_jobs_locked(self) -> None:
-        while True:
-            try:
-                job = self._job_queue.get_nowait()
-            except queue.Empty:
-                break
-            job.status_code = int(HTTPStatus.SERVICE_UNAVAILABLE)
-            job.result = self._make_job_result(
-                job.action, False, "ブリッジサーバー終了のため実行を中止しました"
-            )
-            job.done_event.set()
+        drain_pending_jobs_locked(self)
 
     def _build_handler_class(self):
         return build_bridge_request_handler_class(
@@ -416,97 +372,19 @@ class AiskelBridgeServer:
 
     def bind(self) -> Tuple[str, int]:
         """ソケットをバインドしてサーバーインスタンスを初期化する(IPv4/IPv6対応)。"""
-        if not isinstance(self.port, int) or isinstance(self.port, bool) or not (0 <= self.port <= 65535):
-            raise ValueError(f"ポート番号は 0〜65535 の範囲で指定してください: {self.port}")
-        if self._httpd is None:
-            handler_cls = self._build_handler_class()
-            bind_host = normalize_bind_host(self.host)
-            server_cls = _IPv6ThreadingHTTPServer if _is_ipv6_literal(bind_host) else ThreadingHTTPServer
-            self._httpd = server_cls((bind_host, self.port), handler_cls)
-            self._httpd.daemon_threads = True
-        return self.server_address
+        return bind_bridge_server(
+            self,
+            ipv4_server_cls=ThreadingHTTPServer,
+            ipv6_server_cls=_IPv6ThreadingHTTPServer,
+        )
 
     def serve_forever(self, on_ready: Optional[Callable[[threading.Event], None]] = None) -> None:
         """HTTP待受を専用スレッドで稼働させ、起動後処理とコマンド実行はCOM/UI安全なメインスレッドで処理する。"""
-        self.bind()
-        assert self._httpd is not None
-        self._stop_event.clear()
-        with self._queue_state_lock:
-            self._shutting_down = False
-            self._use_main_thread_queue = True
-            self._startup_ready_in_progress = on_ready is not None
-
-        httpd = self._httpd
-        self._http_thread = threading.Thread(
-            target=httpd.serve_forever,
-            kwargs={"poll_interval": 0.2},
-            daemon=True,
-            name="aiskel-bridge-http",
-        )
-        self._http_thread.start()
-
-        try:
-            # なぜ必要か: UI/COM操作を含む起動後処理をメインスレッド上で安全に実行し、ログ混線と終了時競合を防ぐため
-            if on_ready is not None:
-                try:
-                    on_ready(self._stop_event)
-                except Exception as e:
-                    print(f"⚠ ブリッジ起動後処理でエラーが発生しました: {e}", file=sys.stderr, flush=True)
-
-            while not self._stop_event.is_set():
-                try:
-                    job = self._job_queue.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                try:
-                    status_code, result = self._execute_action(job.action, job.payload)
-                    job.status_code = status_code
-                    job.result = result
-                except KeyboardInterrupt:
-                    job.status_code = int(HTTPStatus.SERVICE_UNAVAILABLE)
-                    job.result = self._make_job_result(
-                        job.action, False, "ブリッジサーバー終了のため実行を中止しました"
-                    )
-                    raise
-                except SystemExit as e:
-                    exit_code = _normalize_system_exit_code(e)
-                    job.status_code = int(HTTPStatus.OK)
-                    job.result = self._make_job_result(
-                        job.action,
-                        ok=(exit_code == 0),
-                        message=f"コマンドが終了コード {exit_code} で終了しました",
-                        exit_code=exit_code,
-                    )
-                except BaseException as e:
-                    job.error = e
-                finally:
-                    job.done_event.set()
-        finally:
-            self._stop_event.set()
-            with self._queue_state_lock:
-                self._shutting_down = True
-                self._use_main_thread_queue = False
-                self._drain_pending_jobs_locked()
+        serve_bridge_forever(self, on_ready=on_ready)
 
     def shutdown(self) -> None:
         """起動中サーバーを安全に停止・クローズする。"""
-        self._stop_event.set()
-        with self._queue_state_lock:
-            self._shutting_down = True
-            self._use_main_thread_queue = False
-            self._drain_pending_jobs_locked()
-        httpd = self._httpd
-        http_thread = self._http_thread
-        if httpd is not None and http_thread is not None and http_thread.is_alive():
-            # なぜ必要か: HTTP待受スレッド未起動時にshutdown()を呼ぶとBaseServer内で永久待機するため
-            httpd.shutdown()
-        if http_thread is not None and http_thread.is_alive():
-            http_thread.join(timeout=2.0)
-        if httpd is not None:
-            # なぜ必要か: 待受スレッド終了後にソケットを閉じて参照競合を防ぐため
-            httpd.server_close()
-        self._httpd = None
-        self._http_thread = None
+        shutdown_bridge_server(self)
 
 
 def run_bridge_server(
