@@ -267,17 +267,21 @@ class AiskelBridgeServer:
 
     def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
         enriched = dict(info)
-        enriched["auto_run_default"] = self._auto_run_mode == "enabled"
+        bound_tab_id = str(enriched.get("tab_id") or "") if enriched.get("bound") else ""
+        is_auto_tab = self._handoff_manager.is_auto_generated_tab(bound_tab_id) if bound_tab_id else False
+        # 自動生成タブはmanualモードでも自動送信ONで開始する
+        enriched["auto_run_default"] = (self._auto_run_mode == "enabled") or (
+            is_auto_tab and self._auto_run_mode != "disabled"
+        )
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
         max_tabs = self.get_patch_handoff_max_tabs()
         enriched["patch_handoff_max_tabs"] = max_tabs
-        bound_tab_id = str(enriched.get("tab_id") or "") if enriched.get("bound") else ""
         if bound_tab_id:
             enriched["remaining_auto_tabs"] = self._handoff_manager.get_remaining_auto_tabs(
                 bound_tab_id,
                 default_limit=max_tabs,
             )
-            enriched["is_auto_generated_tab"] = self._handoff_manager.is_auto_generated_tab(bound_tab_id)
+            enriched["is_auto_generated_tab"] = is_auto_tab
         else:
             enriched["remaining_auto_tabs"] = max_tabs
             enriched["is_auto_generated_tab"] = False
@@ -503,7 +507,11 @@ class AiskelBridgeServer:
             pasted = (not paste_suppressed) and exec_pasted
             paste_reason = "" if (pasted or paste_suppressed) else exec_paste_reason
             auto_run_allowed = pasted and (self._auto_run_mode != "disabled")
-            auto_run = pasted and (self._auto_run_mode == "enabled")
+            is_auto_tab = bool(req_tab_id and self._handoff_manager.is_auto_generated_tab(req_tab_id))
+            auto_run = pasted and (
+                (self._auto_run_mode == "enabled")
+                or (self._auto_run_mode != "disabled" and is_auto_tab)
+            )
 
             if exit_code == 0:
                 status_msg = "コマンドを実行しました"
