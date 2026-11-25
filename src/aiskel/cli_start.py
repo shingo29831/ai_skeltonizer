@@ -518,4 +518,5 @@ def handle_start_command(
         auto_run=auto_run,
         structured_command_runner=on_run_structured,
         on_ready=_on_bridge_ready if not no_browser else None,
+        output_dir=output_dir,
     )

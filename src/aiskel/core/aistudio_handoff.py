@@ -3,6 +3,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -13,6 +14,7 @@ from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, has_pat
 MAX_HANDOFF_PAYLOAD_BYTES = 4 * 1024 * 1024
 HANDOFF_TTL_SEC = 120.0
 MAX_PENDING_HANDOFFS = 20
+MAX_TRACKED_AUTO_TABS = 512
 _DEFAULT_BUNDLE_FILENAMES = (
     "architecture_bundle.txt",
     "architecture_bundle.md",
@@ -39,6 +41,7 @@ class TabHandoffPayload:
     combined_text: str
     created_at: float
     assigned_tab_id: Optional[str] = None
+    remaining_auto_tabs: int = 0
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -49,6 +52,7 @@ class TabHandoffPayload:
             "summary_text": self.summary_text,
             "combined_text": self.combined_text,
             "assigned_tab_id": self.assigned_tab_id,
+            "remaining_auto_tabs": self.remaining_auto_tabs,
         }
 
 
@@ -185,6 +189,41 @@ class PatchHandoffManager:
         self._ttl_sec = ttl_sec
         self._lock = threading.Lock()
         self._entries: Dict[str, TabHandoffPayload] = {}
+        self._auto_tab_remaining: "OrderedDict[str, int]" = OrderedDict()
+
+    def _record_auto_tab_locked(self, tab_id: str, remaining: int) -> None:
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid:
+            return
+        self._auto_tab_remaining[clean_tid] = max(0, int(remaining))
+        self._auto_tab_remaining.move_to_end(clean_tid)
+        while len(self._auto_tab_remaining) > MAX_TRACKED_AUTO_TABS:
+            self._auto_tab_remaining.popitem(last=False)
+
+    def get_remaining_auto_tabs(self, tab_id: str, default_limit: int) -> int:
+        """対象タブの残り自動生成回数を返す（自動生成タブ以外は設定値を返す）。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            if clean_tid and clean_tid in self._auto_tab_remaining:
+                return self._auto_tab_remaining[clean_tid]
+        return max(0, int(default_limit))
+
+    def is_auto_generated_tab(self, tab_id: str) -> bool:
+        """対象タブがパッチ引き継ぎにより自動生成されたタブか判定する。"""
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid:
+            return False
+        with self._lock:
+            return clean_tid in self._auto_tab_remaining
+
+    def consume_auto_tab_if_tracked(self, tab_id: str, next_remaining: int) -> None:
+        """自動生成タブとして追跡中の場合のみ残り自動生成回数を更新する。"""
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid:
+            return
+        with self._lock:
+            if clean_tid in self._auto_tab_remaining:
+                self._record_auto_tab_locked(clean_tid, next_remaining)
 
     def _prune_expired_locked(self, now: float) -> None:
         expired = [
@@ -204,6 +243,7 @@ class PatchHandoffManager:
         response_text: str,
         summary_text: str,
         review_prompt: Optional[str] = None,
+        remaining_auto_tabs: int = 0,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
@@ -217,6 +257,7 @@ class PatchHandoffManager:
             summary_text=summary_text,
             combined_text=combined,
             created_at=now,
+            remaining_auto_tabs=max(0, int(remaining_auto_tabs)),
         )
         with self._lock:
             self._prune_expired_locked(now)
@@ -244,8 +285,11 @@ class PatchHandoffManager:
                 combined_text=existing.combined_text,
                 created_at=existing.created_at,
                 assigned_tab_id=clean_tid,
+                remaining_auto_tabs=existing.remaining_auto_tabs,
             )
             self._entries[clean_hid] = updated
+            # unbind・リロード後も自動生成タブの残り回数を保持するため記録
+            self._record_auto_tab_locked(clean_tid, existing.remaining_auto_tabs)
             return updated
 
     def claim(self, handoff_id: str = "", tab_id: str = "") -> Optional[TabHandoffPayload]:
@@ -271,12 +315,16 @@ class PatchHandoffManager:
                         combined_text=item.combined_text,
                         created_at=item.created_at,
                         assigned_tab_id=clean_tid,
+                        remaining_auto_tabs=item.remaining_auto_tabs,
                     )
                     self._entries[clean_hid] = item
+                if clean_tid:
+                    self._record_auto_tab_locked(clean_tid, item.remaining_auto_tabs)
                 return item
             if clean_tid:
                 for item in reversed(list(self._entries.values())):
                     if item.assigned_tab_id == clean_tid:
+                        self._record_auto_tab_locked(clean_tid, item.remaining_auto_tabs)
                         return item
         return None
 

@@ -7,7 +7,34 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Set, Tuple, Union
+from typing import Iterator, List, Optional, Set, Tuple, Union
+
+DEFAULT_PATCH_HANDOFF_MAX_TABS = 1
+_PATCH_HANDOFF_MAX_TABS_KEYS = (
+    "patch_handoff_max_tabs",
+    "handoff_max_tabs",
+    "auto_handoff_max_tabs",
+    "auto_tab_limit",
+    "max_auto_tabs",
+    "patch_auto_tab_limit",
+    "max_handoff_tabs",
+)
+_META_CANDIDATE_CONFIG_FILES = (
+    "config.json",
+    "settings.json",
+    "aiskel.json",
+    "aiskel_config.json",
+    ".aiskelrc.json",
+    ".aiskelrc",
+    "config.toml",
+    "settings.toml",
+    "config.yaml",
+    "config.yml",
+    "settings.yaml",
+    "settings.yml",
+    "config.ini",
+    "settings.ini",
+)
 
 
 @dataclass
@@ -113,6 +140,7 @@ def ensure_default_config_file(output_dir: Path, project_root: Path) -> Optional
             "bundle_filename": "architecture_bundle.txt",
             "test_command": [],
             "exclude_paths": [],
+            "patch_handoff_max_tabs": DEFAULT_PATCH_HANDOFF_MAX_TABS,
             "description": "aiskel apply (-e / -T) 実行後に自動実行されるテスト・検証コマンドを記述してください (配列または改行で複数指定可)",
         }
         config_path.write_text(json.dumps(config_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -332,3 +360,71 @@ def load_bloat_config_from_meta(
                     pass
 
     return max_lines, max_chars, exclude_paths
+
+
+def _iter_meta_config_files(
+    project_root: Path, output_dir: Optional[Path] = None
+) -> Iterator[Path]:
+    meta_dirs = []
+    if output_dir:
+        meta_dirs.append(output_dir)
+    meta_dirs.extend([
+        project_root / "ai_meta",
+        project_root / ".ai_meta",
+    ])
+    checked_dirs: List[Path] = []
+    for d in meta_dirs:
+        try:
+            resolved = d.resolve()
+            if resolved not in checked_dirs and resolved.exists() and resolved.is_dir():
+                checked_dirs.append(resolved)
+        except OSError:
+            continue
+
+    for d in checked_dirs:
+        for fname in _META_CANDIDATE_CONFIG_FILES:
+            target = d / fname
+            if target.is_file():
+                yield target
+
+
+def load_patch_handoff_max_tabs_from_meta(
+    project_root: Path, output_dir: Optional[Path] = None
+) -> Optional[int]:
+    """ai_meta等の設定ファイルからパッチ検知時の新規タブ自動作成上限回数を取得する"""
+    for target in _iter_meta_config_files(project_root, output_dir):
+        try:
+            content = target.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+
+        if target.suffix.lower() == ".json" or content.startswith("{"):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for k in _PATCH_HANDOFF_MAX_TABS_KEYS:
+                        if k in data:
+                            val = data[k]
+                            if isinstance(val, int) and not isinstance(val, bool):
+                                return max(0, val)
+                continue
+            except Exception:
+                # 明示的な.jsonファイルが構文不正の場合にテキスト正規表現へ誤フォールバックしない
+                if target.suffix.lower() == ".json":
+                    continue
+
+        for k in _PATCH_HANDOFF_MAX_TABS_KEYS:
+            pattern = re.compile(
+                rf"^[ \t]*{re.escape(k)}[ \t]*[:=][ \t]*([\"']?)(-?\d+)\1[ \t]*(?:[#;].*)?$",
+                re.MULTILINE | re.IGNORECASE,
+            )
+            m = pattern.search(content)
+            if m:
+                try:
+                    return max(0, int(m.group(2)))
+                except ValueError:
+                    pass
+
+    return None

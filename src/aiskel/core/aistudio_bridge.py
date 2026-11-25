@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, TextIO, Tuple
 from urllib.parse import urlsplit
 
+from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
 from .aistudio_bridge_handler import build_bridge_request_handler_class
 from .aistudio_bridge_state import TabBindingManager
 from .aistudio_command import (
@@ -188,8 +189,16 @@ class AiskelBridgeServer:
         structured_command_runner: Optional[Callable[..., Any]] = None,
         clipboard_writer: Optional[Callable[[str], None]] = None,
         prompt_run_trigger: Optional[Callable[..., Any]] = None,
+        output_dir: Optional[Path] = None,
+        patch_handoff_max_tabs: Optional[int] = None,
     ) -> None:
         self.project_root = project_root.resolve()
+        self.output_dir = output_dir.resolve() if output_dir is not None else None
+        self._explicit_patch_handoff_max_tabs: Optional[int] = (
+            max(0, int(patch_handoff_max_tabs))
+            if patch_handoff_max_tabs is not None and not isinstance(patch_handoff_max_tabs, bool)
+            else None
+        )
         self.command_runner = command_runner
         self.structured_command_runner = structured_command_runner
         self.clipboard_writer: Callable[[str], None] = clipboard_writer or set_clipboard_text
@@ -241,10 +250,31 @@ class AiskelBridgeServer:
             return str(addr[0]), int(addr[1])
         return normalize_bind_host(self.host), self.port
 
+    def get_patch_handoff_max_tabs(self) -> int:
+        """非自動生成タブにおけるパッチ検知時の新規タブ自動作成上限回数を返す。"""
+        if self._explicit_patch_handoff_max_tabs is not None:
+            return self._explicit_patch_handoff_max_tabs
+        configured = load_patch_handoff_max_tabs_from_meta(self.project_root, self.output_dir)
+        if configured is not None:
+            return configured
+        return DEFAULT_PATCH_HANDOFF_MAX_TABS
+
     def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
         enriched = dict(info)
         enriched["auto_run_default"] = self._auto_run_mode == "enabled"
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
+        max_tabs = self.get_patch_handoff_max_tabs()
+        enriched["patch_handoff_max_tabs"] = max_tabs
+        bound_tab_id = str(enriched.get("tab_id") or "") if enriched.get("bound") else ""
+        if bound_tab_id:
+            enriched["remaining_auto_tabs"] = self._handoff_manager.get_remaining_auto_tabs(
+                bound_tab_id,
+                default_limit=max_tabs,
+            )
+            enriched["is_auto_generated_tab"] = self._handoff_manager.is_auto_generated_tab(bound_tab_id)
+        else:
+            enriched["remaining_auto_tabs"] = max_tabs
+            enriched["is_auto_generated_tab"] = False
         return enriched
 
     def get_prompt_payload(self, pattern: str = PromptPattern.DEFAULT.value) -> Tuple[int, Dict[str, object]]:
@@ -309,10 +339,11 @@ class AiskelBridgeServer:
         handoff_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """指定されたブラウザタブをこのブリッジへ紐づける。"""
-        info = self._enrich_binding_info(self._binding_manager.bind(tab_id=tab_id, tab_title=tab_title, tab_url=tab_url))
+        raw_info = self._binding_manager.bind(tab_id=tab_id, tab_title=tab_title, tab_url=tab_url)
+        # assign_tabで自動生成タブの残り回数を確定させてからbinding情報を拡張する
         if handoff_id:
-            self._handoff_manager.assign_tab(handoff_id, str(info.get("tab_id") or tab_id))
-        return info
+            self._handoff_manager.assign_tab(handoff_id, str(raw_info.get("tab_id") or tab_id))
+        return self._enrich_binding_info(raw_info)
 
     def bind_tab_if_unbound(
         self,
@@ -327,10 +358,9 @@ class AiskelBridgeServer:
             tab_title=tab_title,
             tab_url=tab_url,
         )
-        info = self._enrich_binding_info(raw_info)
         if newly_bound and handoff_id:
-            self._handoff_manager.assign_tab(handoff_id, str(info.get("tab_id") or tab_id))
-        return newly_bound, info
+            self._handoff_manager.assign_tab(handoff_id, str(raw_info.get("tab_id") or tab_id))
+        return newly_bound, self._enrich_binding_info(raw_info)
 
     def unbind_tab(self, tab_id: Optional[str] = None) -> Tuple[bool, Dict[str, object]]:
         """現在のブラウザタブ紐づけを解除する。"""
@@ -575,6 +605,31 @@ class AiskelBridgeServer:
                     "message": "同一ターンのパッチ引き継ぎは処理済みのためスキップしました",
                 }
 
+            max_tabs = self.get_patch_handoff_max_tabs()
+            remaining_before = self._handoff_manager.get_remaining_auto_tabs(req_tab_id, default_limit=max_tabs)
+            if remaining_before <= 0:
+                copied_to_clipboard = False
+                try:
+                    self.clipboard_writer(response_text)
+                    copied_to_clipboard = True
+                except Exception as e:
+                    print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
+                if dedup_key:
+                    self._recent_keys.append(dedup_key)
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(
+                    f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーしました（新規タブ自動作成の回数制限に達したため新規タブは作成しません）",
+                    flush=True,
+                )
+                return int(HTTPStatus.OK), {
+                    "ok": True,
+                    "skipped": True,
+                    "limit_reached": True,
+                    "remaining_auto_tabs": 0,
+                    "copied_to_clipboard": copied_to_clipboard,
+                    "message": "新規タブ自動作成の回数制限に達したため新規タブは作成しませんでした",
+                }
+
             try:
                 summary_text = load_project_summary_text(self.project_root)
             except (OSError, ValueError, RuntimeError) as e:
@@ -590,6 +645,7 @@ class AiskelBridgeServer:
             except Exception as e:
                 print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
 
+            next_remaining = remaining_before - 1
             review_prompt = load_prompt_for_pattern(self.project_root, PromptPattern.PATCH_REVIEW)
             handoff = self._handoff_manager.create(
                 source_tab_id=req_tab_id,
@@ -597,18 +653,22 @@ class AiskelBridgeServer:
                 response_text=response_text,
                 summary_text=summary_text,
                 review_prompt=review_prompt,
+                remaining_auto_tabs=next_remaining,
             )
+            self._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, next_remaining)
             if dedup_key:
                 self._recent_keys.append(dedup_key)
 
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(
-                f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーし、新規タブへ要約とともに引き継ぎます",
+                f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーし、新規タブへ要約とともに引き継ぎます (新規タブ残り回数: {next_remaining})",
                 flush=True,
             )
             return int(HTTPStatus.OK), {
                 "ok": True,
                 "skipped": False,
+                "limit_reached": False,
+                "remaining_auto_tabs": next_remaining,
                 "copied_to_clipboard": copied_to_clipboard,
                 "handoff_id": handoff.handoff_id,
                 "new_chat_url": handoff.new_chat_url,
@@ -851,6 +911,8 @@ def run_bridge_server(
     require_tab_binding: bool = True,
     auto_run: Optional[bool] = None,
     structured_command_runner: Optional[Callable[..., Any]] = None,
+    output_dir: Optional[Path] = None,
+    patch_handoff_max_tabs: Optional[int] = None,
 ) -> int:
     """ローカルブリッジサーバーと拡張機能を準備し、ブラウザからの推論完了通知を待機する。"""
     if not project_root.exists() or not project_root.is_dir():
@@ -872,6 +934,8 @@ def run_bridge_server(
         require_tab_binding=require_tab_binding,
         auto_run=auto_run,
         structured_command_runner=structured_command_runner,
+        output_dir=output_dir,
+        patch_handoff_max_tabs=patch_handoff_max_tabs,
     )
 
     # --port 0(動的割当)でも実ポートを拡張機能へ反映させるため先にbindを実行
