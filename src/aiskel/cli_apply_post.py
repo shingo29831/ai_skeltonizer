@@ -65,26 +65,28 @@ def handle_partial_success(
     total_modified_files: Set[Path],
     confirm_fn: Optional[Callable[..., bool]] = None,
     rollback_fn: Optional[Callable[[Path, Set[Path]], bool]] = None,
+    non_interactive: bool = False,
 ) -> Tuple[bool, int]:
     confirm = confirm_fn or prompt_user_confirmation
     rollback = rollback_fn or rollback_modified_files
 
-    commit_msg_preview = initial_commit_msg or "chore: apply patch"
-    if initial_commit_msg:
-        print(f"\n📦 コミットメッセージを検出しました: {commit_msg_preview}")
-        commit_prompt = f"適用に成功した変更 ({total_success}箇所) をこのメッセージでコミットしますか？ [Enter/Space: y, 他: n]: "
-    else:
-        commit_prompt = f"\n適用に成功した変更 ({total_success}箇所) をコミットしますか？ [Enter/Space: y, 他: n]: "
+    if not non_interactive:
+        commit_msg_preview = initial_commit_msg or "chore: apply patch"
+        if initial_commit_msg:
+            print(f"\n📦 コミットメッセージを検出しました: {commit_msg_preview}")
+            commit_prompt = f"適用に成功した変更 ({total_success}箇所) をこのメッセージでコミットしますか？ [Enter/Space: y, 他: n]: "
+        else:
+            commit_prompt = f"\n適用に成功した変更 ({total_success}箇所) をコミットしますか？ [Enter/Space: y, 他: n]: "
 
-    if confirm(commit_prompt, default=False):
-        return True, total_success
+        if confirm(commit_prompt, default=False):
+            return True, total_success
 
-    rollback_prompt = "これまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
-    if confirm(rollback_prompt, default=False):
-        rollback(project_root, total_modified_files)
-        clear_pending_commit(project_root, total_modified_files)
-        total_modified_files.clear()
-        return False, 0
+        rollback_prompt = "これまでに適用した変更を元に戻しますか？ [Enter/Space: y, 他: n]: "
+        if confirm(rollback_prompt, default=False):
+            rollback(project_root, total_modified_files)
+            clear_pending_commit(project_root, total_modified_files)
+            total_modified_files.clear()
+            return False, 0
 
     _save_and_announce_pending_commit(
         project_root,
@@ -124,6 +126,7 @@ def finalize_apply_commit(
     confirm_fn: Optional[Callable[..., bool]] = None,
     commit_fn: Optional[Callable[..., Tuple[bool, bool, Optional[str], bool]]] = None,
     rollback_fn: Optional[Callable[[Path, Set[Path]], bool]] = None,
+    non_interactive: bool = False,
 ) -> Tuple[bool, bool]:
     confirm = confirm_fn or prompt_user_confirmation
     commit_exec = commit_fn or execute_git_commit
@@ -142,7 +145,7 @@ def finalize_apply_commit(
         else "このメッセージでコミットを実行しますか？ [Enter/Space: y, 他: n]: "
     )
     should_commit = True if commit_partial else (False if test_failed else auto_yes)
-    if not should_commit:
+    if not should_commit and not non_interactive:
         should_commit = confirm(prompt_msg, default=False)
 
     if should_commit:
@@ -163,6 +166,20 @@ def finalize_apply_commit(
             print("ℹ 変更内容が既存コードと同一のため、コミットをスキップしました。")
             clear_pending_commit(project_root, total_modified_files)
         return committed_successfully, False
+
+    if non_interactive:
+        notice = (
+            "ℹ 非対話モードのためテスト失敗後の変更を保持しコミットを保留しました。"
+            if test_failed
+            else "ℹ 非対話モードのため変更を適用しコミットは保留しました。"
+        )
+        _save_and_announce_pending_commit(
+            project_root,
+            initial_commit_msg,
+            total_modified_files,
+            notice,
+        )
+        return False, test_failed
 
     print("ℹ コミットを拒否（スキップ）しました。")
     if test_failed:

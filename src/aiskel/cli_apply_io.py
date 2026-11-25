@@ -18,6 +18,7 @@ def load_patch_text(
     is_revert: bool,
     allow_stdin_fallback: bool = True,
     clipboard_reader: Optional[Callable[[], str]] = None,
+    non_interactive: bool = False,
 ) -> Optional[str]:
     action_name = "リバート" if is_revert else "適用"
     if parsed_args.patch_file:
@@ -29,6 +30,9 @@ def load_patch_text(
         return patch_file.read_text(encoding="utf-8")
 
     if parsed_args.paste:
+        if non_interactive:
+            print("エラー: --non-interactive 指定時は -p/--paste による手動入力待機を使用できません。", file=sys.stderr)
+            return None
         if not allow_stdin_fallback and not sys.stdin.isatty():
             print("⚠ パイプ入力後の待機プロンプトでは -p/--paste を使用できません。クリップボード経由で 'aiskel a' を実行してください。", file=sys.stderr)
             return None
@@ -48,7 +52,7 @@ def load_patch_text(
             print("⚠ クリップボードが空です。")
         else:
             print("⚠ クリップボードに置換ブロック(<<<<)または削除指示が見つかりません。")
-        if not allow_stdin_fallback:
+        if non_interactive or not allow_stdin_fallback:
             print("   修正パッチをコピーしてから再度 'aiskel a' を実行してください。")
             return None
         print("🚀 AIの出力テキストをペーストしてください。")
@@ -118,6 +122,7 @@ def report_patch_result(
     is_revert: bool,
     is_dry_run: bool,
     clipboard_writer: Optional[Callable[[str], None]] = None,
+    copy_failure_report: bool = True,
 ) -> None:
     action_name = "リバート" if is_revert else "適用"
     mode_prefix = "[DRY-RUN] " if is_dry_run else ""
@@ -131,7 +136,7 @@ def report_patch_result(
     if fail > 0:
         print(f"✖ 失敗: {fail} 箇所")
         print_failed_details(failed_details)
-        if not is_dry_run and not is_revert:
+        if copy_failure_report and not is_dry_run and not is_revert:
             copy_failure_report_to_clipboard(
                 total_success=total_success,
                 fail=fail,

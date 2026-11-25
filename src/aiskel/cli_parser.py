@@ -154,6 +154,7 @@ def _create_subcommand_parser() -> Tuple[argparse.ArgumentParser, FrozenSet[str]
     apply_parser.add_argument("-y", "--yes", action="store_true", help="確認プロンプトをスキップし、自動的にコミットを承認・実行します")
     apply_parser.add_argument("--no-sync", action="store_true", help="置換成功後のスケルトン・バンドル自動同期をスキップします")
     apply_parser.add_argument("--no-bloat", action="store_true", help="置換適用後のファイル肥大化自動チェックをスキップします")
+    apply_parser.add_argument("--non-interactive", action="store_true", help="対話確認や継続待機プロンプトを表示せず非対話で実行します")
 
     revert_parser = subparsers.add_parser("revert", aliases=["r"], help="AIが出力した置換ブロックの変更を元に戻すリバート処理を行います")
     revert_parser.add_argument("patch_file", type=Path, nargs="?", default=None, help="AIの出力テキストが保存されたファイルのパス")

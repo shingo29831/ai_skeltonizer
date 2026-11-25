@@ -242,6 +242,84 @@ class PatchHandoffManager:
         # 上限を下げた後に再度上げた際の使用済み回数超過を維持するため符号付き残高を保持
         self._auto_tab_balance: Dict[str, int] = {}
         self._entry_balances: Dict[str, int] = {}
+        self._tab_patches: "OrderedDict[str, str]" = OrderedDict()
+        self._tab_lineage: Dict[str, str] = {}
+        self._last_detected_patch: Optional[str] = None
+
+    def _record_tab_patch_locked(self, tab_id: str, patch_text: str, overwrite: bool = True) -> None:
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid or not patch_text or not patch_text.strip():
+            return
+        if not overwrite and clean_tid in self._tab_patches:
+            return
+        self._tab_patches[clean_tid] = patch_text
+        self._tab_patches.move_to_end(clean_tid)
+        while len(self._tab_patches) > MAX_TRACKED_AUTO_TABS:
+            evicted_tid, _ = self._tab_patches.popitem(last=False)
+            self._tab_lineage.pop(evicted_tid, None)
+
+    def _record_lineage_locked(self, child_tab_id: str, source_tab_id: str) -> None:
+        clean_child = (child_tab_id or "").strip()
+        clean_source = (source_tab_id or "").strip()
+        if clean_child and clean_source and clean_child != clean_source:
+            self._tab_lineage[clean_child] = clean_source
+
+    def record_detected_patch(self, patch_text: str, tab_id: str = "") -> None:
+        """最後に検知した置換コード応答をタブ紐づけと合わせて保持する。"""
+        if not patch_text or not patch_text.strip():
+            return
+        with self._lock:
+            self._last_detected_patch = patch_text
+            if tab_id:
+                self._record_tab_patch_locked(tab_id, patch_text, overwrite=True)
+
+    def get_last_detected_patch(self, tab_id: str = "") -> Optional[str]:
+        """指定タブに引き継がれた置換コード、またはブリッジ全体で最後に検知した置換コードを返す。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            if clean_tid and clean_tid in self._tab_patches:
+                return self._tab_patches[clean_tid]
+            return self._last_detected_patch
+
+    def consume_detected_patch(self, tab_id: str = "", patch_text: Optional[str] = None) -> None:
+        """適用完了した置換コードを保持状態から解放し、後続ターンでの二重適用を防止する。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            seed_tids: Set[str] = set()
+            if clean_tid:
+                seed_tids.add(clean_tid)
+            if patch_text is not None:
+                for tid, stored in self._tab_patches.items():
+                    if stored == patch_text:
+                        seed_tids.add(tid)
+
+            # 引き継ぎ先タブで統合パッチ適用時、親タブに残る旧パッチも同時に無効化する
+            target_tids: Set[str] = set()
+            stack = list(seed_tids)
+            while stack:
+                cur = stack.pop()
+                if not cur or cur in target_tids:
+                    continue
+                target_tids.add(cur)
+                parent = self._tab_lineage.get(cur)
+                if parent and parent not in target_tids:
+                    stack.append(parent)
+
+            removed_patches: Set[str] = set()
+            for tid in target_tids:
+                removed = self._tab_patches.pop(tid, None)
+                if removed is not None:
+                    removed_patches.add(removed)
+                self._tab_lineage.pop(tid, None)
+
+            if patch_text is not None:
+                removed_patches.add(patch_text)
+
+            if self._last_detected_patch is not None:
+                if self._last_detected_patch in removed_patches or (
+                    patch_text is None and not clean_tid and not removed_patches
+                ):
+                    self._last_detected_patch = None
 
     def _record_auto_tab_locked(self, tab_id: str, remaining: int, balance: Optional[int] = None) -> None:
         clean_tid = (tab_id or "").strip()
@@ -380,6 +458,8 @@ class PatchHandoffManager:
                 existing.remaining_auto_tabs,
                 balance=self._entry_balances.get(clean_hid, existing.remaining_auto_tabs),
             )
+            self._record_tab_patch_locked(clean_tid, existing.response_text, overwrite=True)
+            self._record_lineage_locked(clean_tid, existing.source_tab_id)
             return updated
 
     def claim(self, handoff_id: str = "", tab_id: str = "") -> Optional[TabHandoffPayload]:
@@ -414,6 +494,8 @@ class PatchHandoffManager:
                         item.remaining_auto_tabs,
                         balance=self._entry_balances.get(clean_hid, item.remaining_auto_tabs),
                     )
+                    self._record_tab_patch_locked(clean_tid, item.response_text, overwrite=True)
+                    self._record_lineage_locked(clean_tid, item.source_tab_id)
                 return item
             if clean_tid:
                 for item in reversed(list(self._entries.values())):
@@ -423,6 +505,8 @@ class PatchHandoffManager:
                             item.remaining_auto_tabs,
                             balance=self._entry_balances.get(item.handoff_id, item.remaining_auto_tabs),
                         )
+                        self._record_tab_patch_locked(clean_tid, item.response_text, overwrite=True)
+                        self._record_lineage_locked(clean_tid, item.source_tab_id)
                         return item
         return None
 

@@ -76,11 +76,13 @@ def handle_apply_command(
                 rel_cfg = created_cfg
             print(f"✨ 設定ファイルを自動作成しました: {rel_cfg}")
 
+    is_non_interactive = getattr(parsed_args, "non_interactive", False)
     patch_text = _load_patch_text(
         parsed_args,
         is_revert=is_revert,
         allow_stdin_fallback=True,
         clipboard_reader=get_clipboard_text,
+        non_interactive=is_non_interactive,
     )
     if patch_text is None:
         return 1
@@ -144,9 +146,10 @@ def handle_apply_command(
             is_revert=is_revert,
             is_dry_run=is_dry_run,
             clipboard_writer=set_clipboard_text,
+            copy_failure_report=not is_non_interactive,
         )
 
-        if is_dry_run or is_revert or fail == 0:
+        if is_dry_run or is_revert or fail == 0 or is_non_interactive:
             break
 
         if success > 0:
@@ -172,6 +175,7 @@ def handle_apply_command(
             total_modified_files=total_modified_files,
             confirm_fn=prompt_user_confirmation,
             rollback_fn=rollback_modified_files,
+            non_interactive=is_non_interactive,
         )
 
     if is_dry_run:
@@ -200,6 +204,7 @@ def handle_apply_command(
             confirm_fn=prompt_user_confirmation,
             commit_fn=execute_git_commit,
             rollback_fn=rollback_modified_files,
+            non_interactive=is_non_interactive,
         )
         if aborted:
             return 1

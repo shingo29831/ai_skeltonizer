@@ -16,6 +16,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, TextIO, Tuple
 from urllib.parse import urlsplit
 
 from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
+from .aistudio_auto_apply import execute_auto_apply_patch
 from .aistudio_bridge_handler import build_bridge_request_handler_class
 from .aistudio_bridge_state import TabBindingManager
 from .aistudio_command import (
@@ -620,8 +621,57 @@ class AiskelBridgeServer:
         except ValueError as e:
             return None, str(e)
 
+    def _execute_auto_apply(self, patch_text: str) -> Tuple[int, str]:
+        return execute_auto_apply_patch(
+            project_root=self.project_root,
+            patch_text=patch_text,
+            command_runner=self.command_runner,
+            max_error_chars=MAX_ERROR_DETAIL_CHARS,
+        )
+
+    def _run_terminal_auto_apply(
+        self,
+        *,
+        req_tab_id: str,
+        target_patch: str,
+        has_patch: bool,
+        stop_signal_detected: bool,
+        limit_reached: bool,
+        remaining_auto_tabs: int,
+        success_message: str,
+        log_banner: str,
+    ) -> Tuple[int, Dict[str, object]]:
+        copied_to_clipboard = False
+        try:
+            self.clipboard_writer(target_patch)
+            copied_to_clipboard = True
+        except Exception as e:
+            print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[{timestamp}] {log_banner}", flush=True)
+        apply_exit_code, apply_message = self._execute_auto_apply(target_patch)
+        applied = apply_exit_code == 0
+        if applied:
+            self._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "skipped": True,
+            "stop_signal_detected": stop_signal_detected,
+            "limit_reached": limit_reached,
+            "has_patch": has_patch,
+            "has_target_patch": True,
+            "remaining_auto_tabs": remaining_auto_tabs,
+            "copied_to_clipboard": copied_to_clipboard,
+            "apply_attempted": True,
+            "applied": applied,
+            "apply_exit_code": apply_exit_code,
+            "apply_message": apply_message,
+            "message": success_message if applied else apply_message,
+        }
+
     def handle_handoff_create(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
-        """<<<< ==== >>>> 出力応答を受領し、応答コピー・要約読込・引き継ぎレコード登録を実行する。"""
+        """<<<< ==== >>>> 出力応答を受領し、応答コピー・要約読込・引き継ぎレコード登録またはaiskel a自動適用を実行する。"""
         req_tab_id, tab_err = self._validate_optional_tab_id(payload, required=self._binding_manager.require_binding)
         if tab_err is not None or req_tab_id is None:
             return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
@@ -661,59 +711,61 @@ class AiskelBridgeServer:
             max_tabs = self.get_patch_handoff_max_tabs()
             remaining_before = self._handoff_manager.get_remaining_auto_tabs(req_tab_id, default_limit=max_tabs)
             if stop_requested:
-                copied_to_clipboard = False
                 if has_patch:
-                    try:
-                        self.clipboard_writer(response_text)
-                        copied_to_clipboard = True
-                    except Exception as e:
-                        print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
+                    self._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
+                target_patch = response_text if has_patch else self._handoff_manager.get_last_detected_patch(req_tab_id)
+                if not target_patch:
+                    if dedup_key:
+                        self._recent_keys.append(dedup_key)
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(
+                        f"\n[{timestamp}] ✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 適用対象の置換コードがないため新規タブは作成しません",
+                        flush=True,
+                    )
+                    return int(HTTPStatus.OK), {
+                        "ok": True,
+                        "skipped": True,
+                        "stop_signal_detected": True,
+                        "has_patch": False,
+                        "has_target_patch": False,
+                        "limit_reached": False,
+                        "remaining_auto_tabs": remaining_before,
+                        "copied_to_clipboard": False,
+                        "apply_attempted": False,
+                        "applied": False,
+                        "apply_exit_code": None,
+                        "apply_message": "",
+                        "message": "完了合図を検知したため新規タブは作成しませんでした（適用対象の置換コードなし）",
+                    }
+                status_code, body = self._run_terminal_auto_apply(
+                    req_tab_id=req_tab_id,
+                    target_patch=target_patch,
+                    has_patch=has_patch,
+                    stop_signal_detected=True,
+                    limit_reached=False,
+                    remaining_auto_tabs=remaining_before,
+                    success_message="完了合図を検知したため最後に検知した置換コードを aiskel a で適用しました",
+                    log_banner=f"✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 最後に検知した置換コードを aiskel a で実行します",
+                )
                 if dedup_key:
                     self._recent_keys.append(dedup_key)
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                if has_patch:
-                    print(
-                        f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)と完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 応答をコピーしました（新規タブは作成しません）",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"\n[{timestamp}] ✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 新規タブは作成しません",
-                        flush=True,
-                    )
-                return int(HTTPStatus.OK), {
-                    "ok": True,
-                    "skipped": True,
-                    "stop_signal_detected": True,
-                    "has_patch": has_patch,
-                    "limit_reached": False,
-                    "remaining_auto_tabs": remaining_before,
-                    "copied_to_clipboard": copied_to_clipboard,
-                    "message": "完了合図を検知したため新規タブは作成しませんでした",
-                }
+                return status_code, body
 
             if remaining_before <= 0:
-                copied_to_clipboard = False
-                try:
-                    self.clipboard_writer(response_text)
-                    copied_to_clipboard = True
-                except Exception as e:
-                    print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
+                self._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
+                status_code, body = self._run_terminal_auto_apply(
+                    req_tab_id=req_tab_id,
+                    target_patch=response_text,
+                    has_patch=True,
+                    stop_signal_detected=False,
+                    limit_reached=True,
+                    remaining_auto_tabs=0,
+                    success_message="新規タブ自動作成の回数制限に達したため最後に検知した置換コードを aiskel a で適用しました",
+                    log_banner="📋 パッチ出力(<<<< ==== >>>>)を検知（新規タブ自動作成の回数制限到達） -> 最後に検知した置換コードを aiskel a で実行します",
+                )
                 if dedup_key:
                     self._recent_keys.append(dedup_key)
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(
-                    f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)を検知 -> 応答をコピーしました（新規タブ自動作成の回数制限に達したため新規タブは作成しません）",
-                    flush=True,
-                )
-                return int(HTTPStatus.OK), {
-                    "ok": True,
-                    "skipped": True,
-                    "limit_reached": True,
-                    "remaining_auto_tabs": 0,
-                    "copied_to_clipboard": copied_to_clipboard,
-                    "message": "新規タブ自動作成の回数制限に達したため新規タブは作成しませんでした",
-                }
+                return status_code, body
 
             try:
                 summary_text = load_project_summary_text(self.project_root)
@@ -730,6 +782,7 @@ class AiskelBridgeServer:
             except Exception as e:
                 print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
 
+            self._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
             next_remaining = remaining_before - 1
             review_prompt = load_prompt_for_pattern(self.project_root, PromptPattern.PATCH_REVIEW)
             handoff = self._handoff_manager.create(
