@@ -216,6 +216,7 @@ class AiskelBridgeServer:
         self._stop_event = threading.Event()
         self._use_main_thread_queue = False
         self._shutting_down = False
+        self._startup_ready_in_progress = False
 
     @staticmethod
     def _normalize_token(token: Optional[str]) -> Optional[str]:
@@ -239,10 +240,19 @@ class AiskelBridgeServer:
             return str(addr[0]), int(addr[1])
         return normalize_bind_host(self.host), self.port
 
+    def _set_startup_ready_in_progress(self, value: bool) -> None:
+        with self._queue_state_lock:
+            self._startup_ready_in_progress = value
+
+    def _is_startup_ready_in_progress(self) -> bool:
+        with self._queue_state_lock:
+            return self._startup_ready_in_progress
+
     def _enrich_binding_info(self, info: Dict[str, object]) -> Dict[str, object]:
         enriched = dict(info)
         enriched["auto_run_default"] = self._auto_run_mode == "enabled"
         enriched["auto_run_allowed"] = self._auto_run_mode != "disabled"
+        enriched["startup_paste_in_progress"] = self._is_startup_ready_in_progress()
         return enriched
 
     def get_prompt_payload(self, pattern: str = PromptPattern.DEFAULT.value) -> Tuple[int, Dict[str, object]]:
@@ -730,10 +740,13 @@ class AiskelBridgeServer:
         try:
             # なぜ必要か: UI/COM操作を含む起動後処理をメインスレッド上で安全に実行し、ログ混線と終了時競合を防ぐため
             if on_ready is not None:
+                self._set_startup_ready_in_progress(True)
                 try:
                     on_ready(self._stop_event)
                 except Exception as e:
                     print(f"⚠ ブリッジ起動後処理でエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                finally:
+                    self._set_startup_ready_in_progress(False)
 
             while not self._stop_event.is_set():
                 try:
