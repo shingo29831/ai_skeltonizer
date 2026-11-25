@@ -428,7 +428,7 @@ def build_userscript_handoff_transport_js() -> str:
         "      gmRequest('/api/handoff', 'POST', body, (res) => {\n"
         "        const data = (res && res.data) || {};\n"
         "        const ok = Boolean(res && res.connected && data.ok);\n"
-        "        if (ok && !data.skipped && data.handoff_id) {\n"
+        "        if (ok && !data.skipped && !data.stop_signal_detected && !(payload && payload.stop_handoff) && data.handoff_id) {\n"
         "          const baseNewUrl = data.new_chat_url || payload.new_chat_url || 'https://aistudio.google.com/prompts/new_chat';\n"
         "          const targetUrl = appendUserscriptHandoffHash(baseNewUrl, data.handoff_id);\n"
         "          if (typeof GM_openInTab === 'function') {\n"

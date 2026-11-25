@@ -27,10 +27,16 @@ from .aistudio_handoff import (
     MAX_HANDOFF_PAYLOAD_BYTES,
     PatchHandoffManager,
     format_summary_prompt_text,
+    has_handoff_stop_signal_in_text,
     has_patch_delimiters_in_text,
     load_project_summary_text,
 )
-from .aistudio_prompts import PromptPattern, list_prompt_patterns, load_prompt_for_pattern
+from .aistudio_prompts import (
+    PATCH_HANDOFF_STOP_SIGNAL,
+    PromptPattern,
+    list_prompt_patterns,
+    load_prompt_for_pattern,
+)
 from .browser_paste import trigger_browser_prompt_run
 from .clipboard import set_clipboard_text
 from .aistudio_extension import (
@@ -584,7 +590,9 @@ class AiskelBridgeServer:
 
         raw_response = payload.get("response_text")
         response_text = raw_response if isinstance(raw_response, str) else ""
-        if not response_text.strip() or not has_patch_delimiters_in_text(response_text):
+        stop_requested = (payload.get("stop_handoff") is True) or has_handoff_stop_signal_in_text(response_text)
+        has_patch = bool(response_text.strip() and has_patch_delimiters_in_text(response_text))
+        if not has_patch and not stop_requested:
             return int(HTTPStatus.BAD_REQUEST), {
                 "ok": False,
                 "message": "パッチ区切り記号(<<<< ==== >>>>)を含む有効な応答テキストがありません",
@@ -602,11 +610,46 @@ class AiskelBridgeServer:
                 return int(HTTPStatus.OK), {
                     "ok": True,
                     "skipped": True,
+                    "duplicate_skipped": True,
+                    "stop_signal_detected": stop_requested,
+                    "has_patch": has_patch,
                     "message": "同一ターンのパッチ引き継ぎは処理済みのためスキップしました",
                 }
 
             max_tabs = self.get_patch_handoff_max_tabs()
             remaining_before = self._handoff_manager.get_remaining_auto_tabs(req_tab_id, default_limit=max_tabs)
+            if stop_requested:
+                copied_to_clipboard = False
+                if has_patch:
+                    try:
+                        self.clipboard_writer(response_text)
+                        copied_to_clipboard = True
+                    except Exception as e:
+                        print(f"⚠ 応答のクリップボードコピーに失敗しました: {e}", file=sys.stderr, flush=True)
+                if dedup_key:
+                    self._recent_keys.append(dedup_key)
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                if has_patch:
+                    print(
+                        f"\n[{timestamp}] 📋 パッチ出力(<<<< ==== >>>>)と完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 応答をコピーしました（新規タブは作成しません）",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\n[{timestamp}] ✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 新規タブは作成しません",
+                        flush=True,
+                    )
+                return int(HTTPStatus.OK), {
+                    "ok": True,
+                    "skipped": True,
+                    "stop_signal_detected": True,
+                    "has_patch": has_patch,
+                    "limit_reached": False,
+                    "remaining_auto_tabs": remaining_before,
+                    "copied_to_clipboard": copied_to_clipboard,
+                    "message": "完了合図を検知したため新規タブは作成しませんでした",
+                }
+
             if remaining_before <= 0:
                 copied_to_clipboard = False
                 try:

@@ -647,7 +647,7 @@ def build_background_js(
         "    bridgeRequest('/api/handoff', 'POST', payload)\n"
         "      .then((res) => {\n"
         "        const data = res.data || {};\n"
-        "        if (!res.connected || !data.ok || data.skipped || !data.handoff_id) {\n"
+        "        if (!res.connected || !data.ok || data.skipped || data.stop_signal_detected || payload.stop_handoff || !data.handoff_id) {\n"
         "          sendResponse(res);\n"
         "          return;\n"
         "        }\n"

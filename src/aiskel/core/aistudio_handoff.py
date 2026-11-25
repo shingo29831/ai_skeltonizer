@@ -6,9 +6,10 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..config import SkeletonConfig, load_bundle_filename_from_meta
+from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
 from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, has_patch_delimiters
 
 MAX_HANDOFF_PAYLOAD_BYTES = 4 * 1024 * 1024
@@ -26,6 +27,10 @@ _PATCH_STRUCTURE_HINT_RE = re.compile(
     + re.escape(_COMMIT_TAG_OPEN)
     + r"[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
+)
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+_STOP_SIGNAL_LINE_RE = re.compile(
+    r"^[ \t]*`?" + re.escape(PATCH_HANDOFF_STOP_SIGNAL) + r"`?[ \t。.]*$"
 )
 
 
@@ -56,18 +61,14 @@ class TabHandoffPayload:
         }
 
 
-def has_patch_delimiters_in_text(text: str) -> bool:
-    """テキスト内にaiskelパッチ形式（<<<< ==== >>>> の順序ペアとヘッダ/commit構造）が含まれるか判定する。"""
-    if not text or not text.strip() or not has_patch_delimiters(text):
-        return False
-    if not _PATCH_STRUCTURE_HINT_RE.search(text):
-        return False
-    lines = text.splitlines()
+def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
+    excluded: Set[int] = set()
     total = len(lines)
     i = 0
     while i < total:
         if DELIMITER_START.match(lines[i]):
             has_mid = False
+            end_idx = -1
             for j in range(i + 1, total):
                 if DELIMITER_START.match(lines[j]):
                     break
@@ -76,9 +77,57 @@ def has_patch_delimiters_in_text(text: str) -> bool:
                     continue
                 if DELIMITER_END.match(lines[j]):
                     if has_mid:
-                        return True
+                        end_idx = j
                     break
+            if end_idx != -1:
+                excluded.update(range(i, end_idx + 1))
+                i = end_idx + 1
+                continue
         i += 1
+    return excluded
+
+
+def _find_excluded_stop_signal_line_indices(lines: List[str]) -> Set[int]:
+    # パッチ内自己言及やコードブロック内例示による誤停止を防ぐため対象範囲を除外
+    excluded = _find_valid_patch_line_indices(lines)
+    active_fence: Optional[Tuple[str, int]] = None
+    for idx, line in enumerate(lines):
+        if active_fence is not None:
+            excluded.add(idx)
+            fence_char, fence_len = active_fence
+            stripped = line.strip()
+            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
+                active_fence = None
+            continue
+        match = _FENCE_OPEN_RE.match(line)
+        if match:
+            marker, info = match.group(1), match.group(2)
+            if marker[0] == "~" or "`" not in info:
+                active_fence = (marker[0], len(marker))
+                excluded.add(idx)
+    return excluded
+
+
+def has_patch_delimiters_in_text(text: str) -> bool:
+    """テキスト内にaiskelパッチ形式（<<<< ==== >>>> の順序ペアとヘッダ/commit構造）が含まれるか判定する。"""
+    if not text or not text.strip() or not has_patch_delimiters(text):
+        return False
+    if not _PATCH_STRUCTURE_HINT_RE.search(text):
+        return False
+    return bool(_find_valid_patch_line_indices(text.splitlines()))
+
+
+def has_handoff_stop_signal_in_text(text: str) -> bool:
+    """応答テキストのコードブロック・パッチ外に新規タブ作成停止合図が含まれるか判定する。"""
+    if not text or not text.strip() or PATCH_HANDOFF_STOP_SIGNAL not in text:
+        return False
+    lines = text.splitlines()
+    excluded_indices = _find_excluded_stop_signal_line_indices(lines)
+    for idx, line in enumerate(lines):
+        if idx in excluded_indices:
+            continue
+        if _STOP_SIGNAL_LINE_RE.match(line):
+            return True
     return False
 
 
