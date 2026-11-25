@@ -727,6 +727,7 @@ class AiskelBridgeServer:
         with self._queue_state_lock:
             self._shutting_down = False
             self._use_main_thread_queue = True
+            self._startup_ready_in_progress = on_ready is not None
 
         httpd = self._httpd
         self._http_thread = threading.Thread(
@@ -740,7 +741,6 @@ class AiskelBridgeServer:
         try:
             # なぜ必要か: UI/COM操作を含む起動後処理をメインスレッド上で安全に実行し、ログ混線と終了時競合を防ぐため
             if on_ready is not None:
-                self._set_startup_ready_in_progress(True)
                 try:
                     on_ready(self._stop_event)
                 except Exception as e:
@@ -786,6 +786,7 @@ class AiskelBridgeServer:
             with self._queue_state_lock:
                 self._shutting_down = True
                 self._use_main_thread_queue = False
+                self._startup_ready_in_progress = False
                 self._drain_pending_jobs_locked()
 
     def shutdown(self) -> None:

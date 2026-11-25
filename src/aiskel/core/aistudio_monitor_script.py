@@ -111,6 +111,7 @@ def build_monitor_core_js(
         "    autoRunDefault: false,\n"
         "    autoRunAllowed: false,\n"
         "    autoRunEnabled: false,\n"
+        "    startupPasteInProgress: false,\n"
         "  };\n"
         "  let bindingUi = null;\n"
         "  let deferredBindPromptPending = false;\n"
