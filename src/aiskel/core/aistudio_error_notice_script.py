@@ -40,7 +40,7 @@ def build_error_notice_ui_js() -> str:
         "    clearErrorPanel();\n"
         "    const host = document.createElement('div');\n"
         "    host.setAttribute('data-aiskel-ui', 'true');\n"
-        "    const bottomOffset = hasBindingTransport ? '84px' : '20px';\n"
+        "    const bottomOffset = (typeof getBindingUiBottomOffsetPx === 'function' ? getBindingUiBottomOffsetPx(12) : (hasBindingTransport ? 84 : 20)) + 'px';\n"
         "    const shadow = host.attachShadow({ mode: 'open' });\n"
         "    applyShadowCss(shadow, [\n"
         "      ':host{all:initial !important;position:fixed !important;top:auto !important;left:auto !important;right:16px !important;bottom:' + bottomOffset + ' !important;z-index:2147483647 !important;display:block !important;visibility:visible !important;opacity:1 !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;transform:none !important;pointer-events:auto !important;font-family:system-ui,-apple-system,sans-serif !important;}',\n"
