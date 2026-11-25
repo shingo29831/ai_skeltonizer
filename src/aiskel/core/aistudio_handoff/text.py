@@ -3,9 +3,9 @@ import re
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
-from ..config import SkeletonConfig, load_bundle_filename_from_meta
-from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
-from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
+from ...config import SkeletonConfig, load_bundle_filename_from_meta
+from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
+from ..patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
 
 _DEFAULT_BUNDLE_FILENAMES = (
     "architecture_bundle.txt",
@@ -187,7 +187,7 @@ def _find_existing_bundle_file(project_root: Path, output_dir: Path) -> Optional
 def load_project_summary_text(project_root: Path) -> str:
     """対象プロジェクトを差分同期し、最新の要約バンドル文字列を取得する。"""
     # 循環インポート回避のためcli_syncを遅延参照し、.gitignore更新・config初期化・最新バンドル生成を統一実行
-    from ..cli_sync import resolve_output_dir, run_sync
+    from ...cli_sync import resolve_output_dir, run_sync
 
     resolved_root = project_root.resolve()
     output_dir = resolve_output_dir(resolved_root, None)

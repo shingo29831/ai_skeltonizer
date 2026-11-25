@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from ..write_path_policy import WritePathMode, normalize_write_path_mode
-from .aistudio_handoff_text import format_summary_prompt_text, load_project_summary_text
+from .aistudio_handoff.text import format_summary_prompt_text, load_project_summary_text
 from .aistudio_prompts import build_config_infer_prompt, load_default_prompt
 from .patch_applier_content import (
     apply_empty_search_chunk,
