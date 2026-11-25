@@ -205,8 +205,10 @@ def build_background_binding_handlers_js() -> str:
 def build_background_handoff_handlers_js() -> str:
     """パッチ/分割引き継ぎの新規タブ生成・取得・完了通知のメッセージハンドラJSを返す。"""
     return (
-        "  if (message.type === 'AISKEL_PATCH_HANDOFF' || message.type === 'AISKEL_SPLIT_HANDOFF') {\n"
-        "    const apiPath = message.type === 'AISKEL_SPLIT_HANDOFF' ? '/api/split/handoff' : '/api/handoff';\n"
+        "  if (message.type === 'AISKEL_PATCH_HANDOFF' || message.type === 'AISKEL_SPLIT_HANDOFF' || message.type === 'AISKEL_ORGANIZE_HANDOFF') {\n"
+        "    const apiPath = message.type === 'AISKEL_SPLIT_HANDOFF'\n"
+        "      ? '/api/split/handoff'\n"
+        "      : (message.type === 'AISKEL_ORGANIZE_HANDOFF' ? '/api/organize/handoff' : '/api/handoff');\n"
         "    const payload = Object.assign({}, message.payload || {});\n"
         "    const senderTabId = getSenderTabId(sender);\n"
         "    if (senderTabId) payload.tab_id = senderTabId;\n"

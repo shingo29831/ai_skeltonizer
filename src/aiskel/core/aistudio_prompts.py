@@ -195,3 +195,53 @@ def build_file_split_prompt(
             "{{BASE_RULES}}": base_rules,
         },
     )
+
+def build_dir_organize_prompt(
+    default_prompt: str,
+    target_rel_dir: str,
+    file_count: int,
+    max_files: int,
+    *,
+    allow_rename: bool = False,
+    dir_index: int = 1,
+    total_dirs: int = 1,
+    total_target_files: int = 1,
+    project_root: Optional[Path] = None,
+) -> str:
+    """過密な単一ディレクトリを責務別サブディレクトリへ階層整理するための専用プロンプトを組み立てる。"""
+    builtin_sections = _load_builtin_sections()
+    project_sections = _load_project_sections(project_root)
+    organize_template = project_sections.get("dir_organize") or builtin_sections["dir_organize"]
+
+    if allow_rename:
+        rename_title = "許可（移動およびファイル名変更の両方を許可）"
+        rename_rules = (
+            "ファイル名変更（リネーム）は許可されている。責務別サブディレクトリへの移動（`移動: old -> new`）に加え、"
+            "責務や命名規則に沿ったファイル名変更（`名前変更: old -> new` または移動と同時のリネーム）を必要に応じて行ってよい。\n"
+            "- リネーム・移動を行う場合は、関連する全ての `import`・参照パス・再エクスポート・テスト・設定参照を漏れなく同一パッチ内で更新すること。"
+        )
+    else:
+        rename_title = "不許可（ファイル名変更禁止・ディレクトリ移動のみ）"
+        rename_rules = (
+            "【厳守】ファイル名の変更（リネーム）は禁止する。各ファイルのファイル名（basename）は一切変更せず、"
+            "責務別のサブディレクトリへの移動のみを行うこと（例: `移動: dir/foo.py -> dir/sub/foo.py`）。\n"
+            "- ファイル名を変える移動（例: `foo.py -> bar.py`）や、削除+新規作成による実質的なリネームは禁止する。\n"
+            "- 移動に伴う関連ファイルの `import`・参照パス・再エクスポートの更新は必ず同一パッチ内で行うこと。"
+        )
+
+    stripped = (default_prompt or "").strip()
+    base_rules = stripped if stripped else builtin_sections["default"]
+    return _render_template(
+        organize_template,
+        {
+            "{{TARGET_DIR}}": target_rel_dir,
+            "{{FILE_COUNT}}": str(file_count),
+            "{{MAX_FILES}}": str(max_files),
+            "{{DIR_INDEX}}": str(dir_index),
+            "{{TOTAL_DIRS}}": str(total_dirs),
+            "{{TOTAL_TARGET_FILES}}": str(total_target_files),
+            "{{RENAME_POLICY_TITLE}}": rename_title,
+            "{{RENAME_POLICY_RULES}}": rename_rules,
+            "{{BASE_RULES}}": base_rules,
+        },
+    )

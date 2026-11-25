@@ -5,6 +5,12 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 from urllib.parse import urlsplit
 
+from .aistudio_auto_organize import (
+    build_organize_combined_text,
+    collect_organize_targets_sorted_by_count,
+    format_organize_targets_payload,
+    validate_organize_target_request,
+)
 from .aistudio_auto_split import (
     build_split_combined_text,
     collect_bloat_targets_sorted_by_size,
@@ -141,6 +147,7 @@ def handle_split_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, D
             }
         if req_tab_id:
             bridge._handoff_manager.clear_tab_patch(req_tab_id)
+            bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -193,6 +200,7 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
                 "message": f"分割プロンプトの生成に失敗しました: {e}",
             }
         bridge._handoff_manager.clear_tab_patch(req_tab_id)
+        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         raw_notice = payload.get("source_command_notice")
         cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
@@ -225,4 +233,179 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
         "new_chat_url": handoff.new_chat_url,
         "target_file": target_info["rel_path"],
         "message": "次ファイルの自動分割を新規タブへ引き継ぎます",
+    }
+
+def handle_organize_targets(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+    """同一階層のファイル数が多いディレクトリを検出し、ファイル数降順の一覧を返す。"""
+    tab_error = bridge._binding_manager.validate_execute_payload(payload)
+    if tab_error is not None:
+        return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+    with bridge._exec_lock:
+        try:
+            dirs, max_files = collect_organize_targets_sorted_by_count(
+                bridge.project_root,
+                bridge.output_dir,
+            )
+        except (OSError, ValueError, RuntimeError) as e:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                "ok": False,
+                "message": f"階層整理対象ディレクトリの検出に失敗しました: {e}",
+            }
+
+    total_target_files = sum(item.file_count for item in dirs)
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(
+        f"\n[{timestamp}] 📁 階層整理対象抽出: 対象ファイル {total_target_files} 件 "
+        f"({len(dirs)} 階層, 基準: 同一階層ファイル数 >= {max_files})",
+        flush=True,
+    )
+    return int(HTTPStatus.OK), format_organize_targets_payload(
+        bridge.project_root,
+        dirs,
+        max_files=max_files,
+    )
+
+def handle_organize_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+    """現在の空タブで自動階層整理を開始するための対象ディレクトリ整理指示+最新要約テキストを返す。"""
+    req_tab_id, tab_err = bridge._validate_optional_tab_id(payload, required=bridge._binding_manager.require_binding)
+    if tab_err is not None or req_tab_id is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+    tab_error = bridge._binding_manager.validate_execute_payload(payload)
+    if tab_error is not None:
+        return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+    target_info, target_err = validate_organize_target_request(
+        bridge.project_root,
+        payload,
+        output_dir=bridge.output_dir,
+    )
+    if target_err is not None or target_info is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": target_err or "対象ディレクトリ指定が不正です"}
+
+    if int(target_info["file_count"]) == 0:
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "skipped_empty": True,
+            "target_dir": target_info["rel_dir"],
+            "file_count": 0,
+            "message": f"対象ディレクトリ直下に整理対象ファイルが残っていません: {target_info['rel_dir']}",
+        }
+
+    allow_rename = bool(target_info["allow_rename"])
+    with bridge._exec_lock:
+        try:
+            summary_text = load_project_summary_text(bridge.project_root)
+            combined_text = build_organize_combined_text(bridge.project_root, target_info, summary_text)
+        except (OSError, ValueError, RuntimeError) as e:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                "ok": False,
+                "message": f"階層整理プロンプトの生成に失敗しました: {e}",
+            }
+        if req_tab_id:
+            bridge._handoff_manager.clear_tab_patch(req_tab_id)
+            bridge._handoff_manager.set_tab_organize_policy(req_tab_id, allow_rename)
+            bridge._handoff_manager.consume_auto_tab_if_tracked(
+                req_tab_id,
+                bridge.get_patch_handoff_max_tabs(),
+            )
+        else:
+            bridge._handoff_manager.clear_tab_patch("")
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    rename_label = "リネーム許可" if allow_rename else "リネーム禁止"
+    print(
+        f"\n[{timestamp}] 📁 階層整理開始 ({target_info['dir_index']}/{target_info['total_dirs']}): "
+        f"{target_info['rel_dir']} ({target_info['file_count']} ファイル / {rename_label})",
+        flush=True,
+    )
+    return int(HTTPStatus.OK), {
+        "ok": True,
+        "target_dir": target_info["rel_dir"],
+        "file_count": target_info["file_count"],
+        "allow_rename": allow_rename,
+        "combined_text": combined_text,
+    }
+
+def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+    """次の階層整理対象ディレクトリを新しいチャットタブへ最新要約とともに引き継ぐレコードを作成する。"""
+    req_tab_id, tab_err = bridge._validate_optional_tab_id(payload, required=bridge._binding_manager.require_binding)
+    if tab_err is not None or req_tab_id is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
+    tab_error = bridge._binding_manager.validate_execute_payload(payload)
+    if tab_error is not None:
+        return int(HTTPStatus.CONFLICT), {"ok": False, "skipped": True, "message": tab_error}
+
+    target_info, target_err = validate_organize_target_request(
+        bridge.project_root,
+        payload,
+        output_dir=bridge.output_dir,
+    )
+    if target_err is not None or target_info is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": target_err or "対象ディレクトリ指定が不正です"}
+
+    if int(target_info["file_count"]) == 0:
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "skipped_empty": True,
+            "target_dir": target_info["rel_dir"],
+            "file_count": 0,
+            "message": f"対象ディレクトリ直下に整理対象ファイルが残っていません: {target_info['rel_dir']}",
+        }
+
+    new_chat_url = str(payload.get("new_chat_url") or DEFAULT_NEW_CHAT_URL).strip()
+    parsed_url = urlsplit(new_chat_url)
+    if parsed_url.scheme.lower() != "https" or (parsed_url.hostname or "").lower() != "aistudio.google.com":
+        new_chat_url = DEFAULT_NEW_CHAT_URL
+
+    allow_rename = bool(target_info["allow_rename"])
+    with bridge._exec_lock:
+        try:
+            summary_text = load_project_summary_text(bridge.project_root)
+            combined_text = build_organize_combined_text(bridge.project_root, target_info, summary_text)
+        except (OSError, ValueError, RuntimeError) as e:
+            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                "ok": False,
+                "message": f"階層整理プロンプトの生成に失敗しました: {e}",
+            }
+        bridge._handoff_manager.clear_tab_patch(req_tab_id)
+        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        max_tabs = bridge.get_patch_handoff_max_tabs()
+        raw_notice = payload.get("source_command_notice")
+        cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
+        source_notice = (cleaned_notice[:357] + "...") if len(cleaned_notice) > 360 else cleaned_notice
+        source_is_error = bool(payload.get("source_command_is_error"))
+        handoff = bridge._handoff_manager.create(
+            source_tab_id="",
+            new_chat_url=new_chat_url,
+            response_text="",
+            summary_text=summary_text,
+            remaining_auto_tabs=max_tabs,
+            handoff_kind=HandoffKind.DIR_ORGANIZE,
+            target_file=str(target_info["rel_dir"]),
+            raw_combined_text=combined_text,
+            source_command_notice=source_notice,
+            source_command_is_error=source_is_error,
+            allow_rename=allow_rename,
+        )
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    rename_label = "リネーム許可" if allow_rename else "リネーム禁止"
+    print(
+        f"\n[{timestamp}] 📁 階層整理引き継ぎ ({target_info['dir_index']}/{target_info['total_dirs']}): "
+        f"{target_info['rel_dir']} ({target_info['file_count']} ファイル / {rename_label}) -> 新規タブへ移行します (自動新タブ上限: {max_tabs})",
+        flush=True,
+    )
+    return int(HTTPStatus.OK), {
+        "ok": True,
+        "skipped": False,
+        "remaining_auto_tabs": max_tabs,
+        "handoff_id": handoff.handoff_id,
+        "new_chat_url": handoff.new_chat_url,
+        "target_dir": target_info["rel_dir"],
+        "file_count": target_info["file_count"],
+        "allow_rename": allow_rename,
+        "message": "次ディレクトリの階層整理を新規タブへ引き継ぎます",
     }

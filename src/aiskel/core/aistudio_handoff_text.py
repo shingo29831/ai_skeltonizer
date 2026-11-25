@@ -5,7 +5,7 @@ from typing import List, Optional, Set, Tuple
 
 from ..config import SkeletonConfig, load_bundle_filename_from_meta
 from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
-from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, has_patch_delimiters
+from .patch_parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
 
 _DEFAULT_BUNDLE_FILENAMES = (
     "architecture_bundle.txt",
@@ -76,6 +76,34 @@ def has_patch_delimiters_in_text(text: str) -> bool:
     if not _PATCH_STRUCTURE_HINT_RE.search(text):
         return False
     return bool(_find_valid_patch_line_indices(text.splitlines()))
+
+def has_move_patch_in_text(text: str) -> bool:
+    """移動・名前変更ディレクティブのみのパッチブロック(コードブロック内またはcommitタグ付き)が含まれるか判定する。"""
+    if not text or not text.strip() or not is_file_move_patch(text):
+        return False
+    if _COMMIT_TAG_OPEN in text:
+        return True
+    active_fence: Optional[Tuple[str, int]] = None
+    for line in text.splitlines():
+        if active_fence is not None:
+            fence_char, fence_len = active_fence
+            stripped = line.strip()
+            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
+                active_fence = None
+                continue
+            if MOVE_HEADER_PATTERN.match(line):
+                return True
+            continue
+        match = _FENCE_OPEN_RE.match(line)
+        if match:
+            marker, info = match.group(1), match.group(2)
+            if marker[0] == "~" or "`" not in info:
+                active_fence = (marker[0], len(marker))
+    return False
+
+def has_applicable_patch_in_text(text: str) -> bool:
+    """置換ブロックまたは移動・名前変更パッチブロックが含まれるか判定する。"""
+    return has_patch_delimiters_in_text(text) or has_move_patch_in_text(text)
 
 def has_handoff_stop_signal_in_text(text: str) -> bool:
     """応答テキストのコードブロック・パッチ外に新規タブ作成停止合図が含まれるか判定する。"""

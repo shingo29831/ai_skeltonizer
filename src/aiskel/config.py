@@ -34,6 +34,13 @@ from .write_path_policy_loader import (
 _META_CANDIDATE_CONFIG_FILES = META_CANDIDATE_CONFIG_FILES
 PENDING_COMMIT_FILENAME = "pending_commit.json"
 DEFAULT_PATCH_HANDOFF_MAX_TABS = 1
+DEFAULT_ORGANIZE_MAX_FILES = 10
+_ORGANIZE_MAX_FILES_KEYS = (
+    "organize_max_files",
+    "hierarchy_max_files",
+    "dir_max_files",
+    "max_files_per_dir",
+)
 _PATCH_HANDOFF_MAX_TABS_KEYS = (
     "patch_handoff_max_tabs",
     "handoff_max_tabs",
@@ -380,6 +387,52 @@ def load_bloat_config_from_meta(
 
     return max_lines, max_chars, exclude_paths
 
+def load_organize_config_from_meta(
+    project_root: Path, output_dir: Optional[Path] = None
+) -> Tuple[Optional[int], Set[str]]:
+    """ai_meta等の設定ファイルから階層整理の対象閾値(同一階層ファイル数)および除外パスを取得する"""
+    _, _, exclude_paths = load_bloat_config_from_meta(project_root, output_dir)
+    max_files: Optional[int] = None
+
+    for target in _iter_meta_config_files(project_root, output_dir):
+        try:
+            content = target.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if not content:
+            continue
+
+        if target.suffix.lower() == ".json" or content.startswith("{"):
+            try:
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    for k in _ORGANIZE_MAX_FILES_KEYS:
+                        if k in data:
+                            val = data[k]
+                            if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+                                max_files = val
+                                break
+                continue
+            except Exception:
+                if target.suffix.lower() == ".json":
+                    continue
+
+        for k in _ORGANIZE_MAX_FILES_KEYS:
+            pattern = re.compile(
+                rf"^[ \t]*{re.escape(k)}[ \t]*[:=][ \t]*([\"']?)(\d+)\1[ \t]*(?:[#;].*)?$",
+                re.MULTILINE | re.IGNORECASE,
+            )
+            m = pattern.search(content)
+            if m:
+                try:
+                    parsed = int(m.group(2))
+                    if parsed > 0:
+                        max_files = parsed
+                        break
+                except ValueError:
+                    pass
+
+    return max_files, exclude_paths
 
 def load_patch_handoff_max_tabs_from_meta(
     project_root: Path, output_dir: Optional[Path] = None

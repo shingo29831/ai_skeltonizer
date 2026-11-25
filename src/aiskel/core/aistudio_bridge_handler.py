@@ -174,6 +174,9 @@ def build_bridge_request_handler_class(
                                 "bloat_targets": "/api/bloat/targets",
                                 "split_prompt": "/api/split/prompt",
                                 "split_handoff": "/api/split/handoff",
+                                "organize_targets": "/api/organize/targets",
+                                "organize_prompt": "/api/organize/prompt",
+                                "organize_handoff": "/api/organize/handoff",
                                 "execute": "/api/execute",
                                 "run_command": "/api/run_command",
                             },
@@ -412,6 +415,48 @@ def build_bridge_request_handler_class(
                     self._send_json(status_code, body)
                 except Exception as e:
                     print(f"✖ 自動分割引き継ぎ処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/organize/targets":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_organize_targets_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 階層整理対象取得中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/organize/prompt":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_organize_prompt_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 階層整理プロンプト取得中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/organize/handoff":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=False)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_organize_handoff_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 階層整理引き継ぎ処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
                     self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 

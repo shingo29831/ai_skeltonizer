@@ -35,6 +35,9 @@ from .aistudio_bridge_handoff import (
 from .aistudio_bridge_prompts import (
     get_prompt_response,
     handle_bloat_targets,
+    handle_organize_handoff,
+    handle_organize_prompt,
+    handle_organize_targets,
     handle_split_handoff,
     handle_split_prompt,
     handle_summary_prompt,
@@ -232,6 +235,18 @@ class AiskelBridgeServer:
         """次の分割対象ファイルを新しいチャットタブへ最新要約とともに引き継ぐレコードを作成する。"""
         return handle_split_handoff(self, payload)
 
+    def handle_organize_targets_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """同一階層のファイル数が多い整理対象ディレクトリ一覧をファイル数降順で返す。"""
+        return handle_organize_targets(self, payload)
+
+    def handle_organize_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """現在の空タブで階層整理を開始するための対象ディレクトリ整理指示+最新要約テキストを返す。"""
+        return handle_organize_prompt(self, payload)
+
+    def handle_organize_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """次の階層整理対象ディレクトリを新しいチャットタブへ最新要約とともに引き継ぐレコードを作成する。"""
+        return handle_organize_handoff(self, payload)
+
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
         return self._enrich_binding_info(self._binding_manager.get_info())
@@ -353,6 +368,7 @@ class AiskelBridgeServer:
         remaining_auto_tabs: int,
         success_message: str,
         log_banner: str,
+        allow_rename: Optional[bool] = None,
     ) -> Tuple[int, Dict[str, object]]:
         return _run_terminal_auto_apply_impl(
             self,
@@ -364,6 +380,7 @@ class AiskelBridgeServer:
             remaining_auto_tabs=remaining_auto_tabs,
             success_message=success_message,
             log_banner=log_banner,
+            allow_rename=allow_rename,
         )
 
     def handle_handoff_create(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
@@ -404,6 +421,15 @@ class AiskelBridgeServer:
 
     def _dispatch_split_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="split_handoff")
+
+    def _dispatch_organize_targets_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="organize_targets")
+
+    def _dispatch_organize_prompt_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="organize_prompt")
+
+    def _dispatch_organize_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="organize_handoff")
 
     def _dispatch_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="run_command")

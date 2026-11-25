@@ -8,7 +8,9 @@ from typing import Dict, Optional, Set, Union
 from .aistudio_handoff_text import (
     format_handoff_prompt_text,
     format_summary_prompt_text,
+    has_applicable_patch_in_text,
     has_handoff_stop_signal_in_text,
+    has_move_patch_in_text,
     has_patch_delimiters_in_text,
     load_project_summary_text,
 )
@@ -31,7 +33,9 @@ __all__ = [
     "TabHandoffPayload",
     "format_handoff_prompt_text",
     "format_summary_prompt_text",
+    "has_applicable_patch_in_text",
     "has_handoff_stop_signal_in_text",
+    "has_move_patch_in_text",
     "has_patch_delimiters_in_text",
     "load_project_summary_text",
 ]
@@ -49,6 +53,7 @@ class PatchHandoffManager:
         self._entry_balances: Dict[str, int] = {}
         self._tab_patches: "OrderedDict[str, str]" = OrderedDict()
         self._tab_lineage: Dict[str, str] = {}
+        self._tab_organize_policies: "OrderedDict[str, bool]" = OrderedDict()
         self._last_detected_patch: Optional[str] = None
 
     def _record_tab_patch_locked(self, tab_id: str, patch_text: str, overwrite: bool = True) -> None:
@@ -132,6 +137,38 @@ class PatchHandoffManager:
         with self._lock:
             self._last_detected_patch = None
 
+    def set_tab_organize_policy(self, tab_id: str, allow_rename: Optional[bool]) -> None:
+        """指定タブで実行中の階層整理モードにおけるファイル名変更許可設定を記録または解除する。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            if allow_rename is None:
+                if clean_tid:
+                    self._tab_organize_policies.pop(clean_tid, None)
+                else:
+                    self._tab_organize_policies.clear()
+                return
+            if not clean_tid:
+                return
+            self._tab_organize_policies[clean_tid] = bool(allow_rename)
+            self._tab_organize_policies.move_to_end(clean_tid)
+            while len(self._tab_organize_policies) > MAX_TRACKED_AUTO_TABS:
+                self._tab_organize_policies.popitem(last=False)
+
+    def get_tab_organize_policy(self, tab_id: str = "") -> Optional[bool]:
+        """指定タブ（またはその系譜）の階層整理ファイル名変更許可設定を返す。"""
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid:
+            return None
+        with self._lock:
+            visited: Set[str] = set()
+            cur = clean_tid
+            while cur and cur not in visited:
+                if cur in self._tab_organize_policies:
+                    return self._tab_organize_policies[cur]
+                visited.add(cur)
+                cur = self._tab_lineage.get(cur, "")
+        return None
+
     def _record_auto_tab_locked(self, tab_id: str, remaining: int, balance: Optional[int] = None) -> None:
         clean_tid = (tab_id or "").strip()
         if not clean_tid:
@@ -199,6 +236,7 @@ class PatchHandoffManager:
                     target_file=item.target_file,
                     source_command_notice=item.source_command_notice,
                     source_command_is_error=item.source_command_is_error,
+                    allow_rename=item.allow_rename,
                 )
 
     def _prune_expired_locked(self, now: float) -> None:
@@ -228,6 +266,7 @@ class PatchHandoffManager:
         check_error: Optional[str] = None,
         source_command_notice: str = "",
         source_command_is_error: bool = False,
+        allow_rename: Optional[bool] = None,
     ) -> TabHandoffPayload:
         """新規引き継ぎレコードを生成して登録する。"""
         now = time.monotonic()
@@ -260,6 +299,7 @@ class PatchHandoffManager:
             target_file=target_file,
             source_command_notice=str(source_command_notice or ""),
             source_command_is_error=bool(source_command_is_error),
+            allow_rename=allow_rename,
         )
         with self._lock:
             self._prune_expired_locked(now)
@@ -275,9 +315,14 @@ class PatchHandoffManager:
         )
         if item.response_text.strip():
             self._record_tab_patch_locked(tab_id, item.response_text, overwrite=True)
-        # 新規分割タスク開始時は旧ファイルのパッチ系譜を引き継がない
-        if item.handoff_kind != HandoffKind.FILE_SPLIT.value:
+        # 新規分割・階層整理タスク開始時は旧タスクのパッチ系譜を引き継がない
+        if item.handoff_kind not in (HandoffKind.FILE_SPLIT.value, HandoffKind.DIR_ORGANIZE.value):
             self._record_lineage_locked(tab_id, item.source_tab_id)
+        elif clean_tid := (tab_id or "").strip():
+            self._tab_organize_policies.pop(clean_tid, None)
+        if item.allow_rename is not None and (clean_tid := (tab_id or "").strip()):
+            self._tab_organize_policies[clean_tid] = bool(item.allow_rename)
+            self._tab_organize_policies.move_to_end(clean_tid)
 
     def assign_tab(self, handoff_id: str, tab_id: str) -> Optional[TabHandoffPayload]:
         """指定引き継ぎIDに新規生成タブのtab_idを関連付ける。"""
@@ -305,6 +350,7 @@ class PatchHandoffManager:
                 target_file=existing.target_file,
                 source_command_notice=existing.source_command_notice,
                 source_command_is_error=existing.source_command_is_error,
+                allow_rename=existing.allow_rename,
             )
             self._entries[clean_hid] = updated
             # unbind・リロード後も自動生成タブの残り回数を保持するため記録
@@ -339,6 +385,7 @@ class PatchHandoffManager:
                         target_file=item.target_file,
                         source_command_notice=item.source_command_notice,
                         source_command_is_error=item.source_command_is_error,
+                        allow_rename=item.allow_rename,
                     )
                     self._entries[clean_hid] = item
                 if clean_tid:
