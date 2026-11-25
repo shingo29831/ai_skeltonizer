@@ -209,7 +209,7 @@ def _match_write_pattern(
         return bool(
             _compile_glob_regex(
                 abs_pat,
-                allow_dir_descendants=is_dir_glob,
+                allow_dir_descendants=is_dir_glob and not abs_pat.endswith("/**"),
                 allow_dir_exact=allow_dir_exact,
             ).match(resolved_target.as_posix())
         )
@@ -221,16 +221,21 @@ def _match_write_pattern(
         return bool(
             _compile_glob_regex(
                 pat_body,
-                allow_dir_descendants=is_dir_glob,
+                allow_dir_descendants=is_dir_glob and pat_body != "**" and not pat_body.endswith("/**"),
                 allow_dir_exact=allow_dir_exact,
             ).match(rel_posix)
         )
 
     if "/" not in pat_body:
         if not is_dir_glob:
+            # なぜ必要か: 相対Globでプロジェクトルート外が誤許可されるのを防ぐため
+            if rel_posix is None:
+                return False
             return bool(_compile_glob_regex(pat_body).match(resolved_target.name))
         if rel_posix is None:
             return False
+        if pat_body == "**":
+            return True
         dir_re = _compile_glob_regex(pat_body, allow_dir_descendants=False)
         segments = rel_posix.split("/") if allow_dir_exact else rel_posix.split("/")[:-1]
         return any(bool(dir_re.match(seg)) for seg in segments)
@@ -240,7 +245,7 @@ def _match_write_pattern(
     return bool(
         _compile_glob_regex(
             pat_body,
-            allow_dir_descendants=is_dir_glob,
+            allow_dir_descendants=is_dir_glob and not pat_body.endswith("/**"),
             allow_dir_exact=allow_dir_exact,
         ).match(rel_posix)
     )

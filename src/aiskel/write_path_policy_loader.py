@@ -223,17 +223,32 @@ def split_inline_list_items(inner: str) -> List[str]:
         items.append(token)
     return items
 
-def _strip_inline_comment(text: str) -> str:
+def _strip_inline_comment(
+    text: str,
+    *,
+    allow_semicolon: bool = True,
+    require_hash_boundary: bool = False,
+) -> str:
     quote_char: Optional[str] = None
+    just_closed_quote = False
     for idx, ch in enumerate(text):
         if quote_char:
             if ch == quote_char:
                 quote_char = None
-        else:
-            if ch in ('"', "'"):
+                just_closed_quote = True
+            continue
+        if ch in ('"', "'"):
+            # なぜ必要か: 要素先頭や空白直後のクォートのみ文字列囲みとみなすため
+            if idx == 0 or text[idx - 1].isspace():
                 quote_char = ch
-            elif ch in ("#", ";"):
+                just_closed_quote = False
+                continue
+        if ch == "#":
+            if not require_hash_boundary or idx == 0 or text[idx - 1].isspace() or just_closed_quote:
                 return text[:idx].strip()
+        elif allow_semicolon and ch == ";":
+            return text[:idx].strip()
+        just_closed_quote = False
     return text.strip()
 
 def _extract_bracket_list_inner(lines: List[str], start_idx: int, initial_rhs: str) -> str:
@@ -339,10 +354,12 @@ def _parse_path_list_from_text(
                 if next_indent < base_indent:
                     break
                 if stripped_next.startswith("- ") or stripped_next == "-":
-                    item_raw = stripped_next[1:].strip()
-                    if item_raw and not item_raw.startswith("#"):
-                        if not item_raw.startswith(('"', "'")):
-                            item_raw = item_raw.split(" #", 1)[0].strip()
+                    item_raw = _strip_inline_comment(
+                        stripped_next[1:].strip(),
+                        allow_semicolon=False,
+                        require_hash_boundary=True,
+                    )
+                    if item_raw:
                         cleaned = strip_matching_quotes(item_raw)
                         if cleaned:
                             yaml_items.append(cleaned)
