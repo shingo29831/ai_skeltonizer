@@ -1,7 +1,7 @@
 """Module: @role: Google AI Studio応答テキストからのaiskel cコマンド抽出・パッチ完結性検証・停止合図検知のJSヘルパー群を生成する。"""
 import json
 
-from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
+from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
 
 def build_monitor_dom_parser_js() -> str:
     """コマンド抽出・パッチ構文検出・引き継ぎ停止合図検知を行うJSヘルパー関数群を返す。"""
