@@ -275,12 +275,25 @@ def extract_original_user_request(user_prompt_text: str, discovery_prompt: str =
     prompt_trimmed = (discovery_prompt or "").replace("\r\n", "\n").strip()
     if prompt_trimmed and prompt_trimmed in cleaned:
         cleaned = cleaned.replace(prompt_trimmed, "")
-    # HTMLレンダリングで装飾記号が落ちた場合もプロンプト本文（複数タスク形式・旧形式双方）を除去する
+    # ユーザー本文中のタグ言及で原文が欠落しないようRole見出し付きブロックを優先除去する
+    role_prefix = r"\[AISKEL-DISCOVERY\]\s*Role:[ \t]*エキスパートソフトウェアエンジニア（調査・設計フェーズ）"
     next_cleaned = re.sub(
-        r"\[AISKEL-DISCOVERY\][\s\S]*?=== 出力フォーマット[\s\S]*?path/to/dir2(?:\s*</dirs>)?\s*",
+        role_prefix + r"[\s\S]*?=== 出力フォーマット[\s\S]*?path/to/dir2(?:\s*</dirs>)?\s*",
         "",
         cleaned,
     )
+    if next_cleaned == cleaned:
+        next_cleaned = re.sub(
+            role_prefix + r"[\s\S]*?=== 出力フォーマット[\s\S]*?(?:</dirs>|path/to/file\.py)\s*",
+            "",
+            cleaned,
+        )
+    if next_cleaned == cleaned:
+        next_cleaned = re.sub(
+            r"\[AISKEL-DISCOVERY\][\s\S]*?=== 出力フォーマット[\s\S]*?path/to/dir2(?:\s*</dirs>)?\s*",
+            "",
+            cleaned,
+        )
     if next_cleaned == cleaned:
         next_cleaned = re.sub(
             r"\[AISKEL-DISCOVERY\][\s\S]*?=== 出力フォーマット[\s\S]*?(?:</dirs>|path/to/file\.py)\s*",
@@ -313,6 +326,9 @@ def format_discovery_handoff_text(
             f"現在は分割された全 {total_tasks} 件のタスクを1件ずつ順番に解決する逐次実行フローです。",
             f"このタブでは **タスク {task_index}/{total_tasks} のみ** を解決してください（`aiskel a` 成功後に後続タスクを別タブで順次実行します）。",
             "他タスクの範囲には手を付けず、他タスク用ファイルの `aiskel c` 要求やパッチ出力も行わないでください。",
+            "コード詳細が不足している場合は、まず本タスク対象に限定した 1 行の `aiskel c` コードブロックを出力して取得し、取得後の同一タブ内で続けて実装パッチを出力してください。",
+            "実装・修正を行う場合は、調査結果や方針解説のみで応答を終えず、必ず `aiskel a` 準拠の完全なパッチコードブロック（`ファイルパス: ...`・`<<<< ==== >>>>` / `移動:` / `削除:`・`<commit>...</commit>`）を出力してください。",
+            f"精査の結果、本タスクでファイル変更が一切不要と確定した場合に限り、ダミーや不完全なコードブロックは出力せず、変更不要である根拠と確認済み箇所を簡潔に報告した上で、応答の最末尾（コードブロック外の単独行）に `{PATCH_HANDOFF_STOP_SIGNAL}` を出力してください。",
         ]
         if task_plan_lines:
             plan_lines.append("")

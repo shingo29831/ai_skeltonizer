@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from .aistudio_prompt_rules import PATCH_HANDOFF_STOP_SIGNAL
+
 _PROMPT_FILE_NAME = "prompts.txt"
 
 _REQUIRED_BUILTIN_KEYS: Tuple[str, ...] = (
@@ -63,6 +65,7 @@ _TOKEN_UNESCAPE_MAP: Tuple[Tuple[str, str], ...] = (
     ("{{MOVE_HEADER}}", "移" + "動:"),
     ("{{COMMIT_OPEN}}", "<" + "commit>"),
     ("{{COMMIT_CLOSE}}", "</" + "commit>"),
+    ("{{STOP_SIGNAL}}", PATCH_HANDOFF_STOP_SIGNAL),
 )
 
 def _decode_prompt_bytes(raw: bytes) -> str:
