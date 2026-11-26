@@ -13,6 +13,7 @@ from .aistudio_extension import (
     load_or_create_bridge_token,
     resolve_client_host,
 )
+from .aistudio_handoff.task_queue import register_bridge_session, unregister_bridge_session
 
 def run_bridge_lifecycle(
     server: Any,
@@ -32,6 +33,7 @@ def run_bridge_lifecycle(
         print(f"エラー: ブリッジサーバーの起動に失敗しました ({host}:{port}): {e}", file=sys.stderr)
         return 1
 
+    registered_session_url: Optional[str] = None
     try:
         try:
             extension_dir = (
@@ -89,6 +91,13 @@ def run_bridge_lifecycle(
         print("   ※ タブ紐づけ : AI Studioタブを開くと自動で紐づきます（解除・別タブへの切替はタブ上UIまたは拡張機能アイコンから操作）")
         print("   推論完了時の `aiskel c` コマンドを待機中... (終了するには Ctrl+C)")
 
+        registered_session_url = f"http://{client_url_host}:{bound_port}"
+        register_bridge_session(
+            server.project_root,
+            registered_session_url,
+            active_token,
+            output_dir=getattr(server, "output_dir", None),
+        )
         server.serve_forever(on_ready=on_ready)
     except (OSError, ValueError) as e:
         print(f"エラー: ブリッジサーバーの実行中にエラーが発生しました: {e}", file=sys.stderr)
@@ -96,5 +105,7 @@ def run_bridge_lifecycle(
     except KeyboardInterrupt:
         print("\n⏹ ブリッジサーバーを終了しました。")
     finally:
+        if registered_session_url is not None:
+            unregister_bridge_session(server.project_root, expected_url=registered_session_url)
         server.shutdown()
     return 0

@@ -27,6 +27,9 @@ _DICT_RESPONSE_ACTIONS = frozenset(
         "organize_handoff",
         "config_prompt",
         "config_handoff",
+        "tasks_advance",
+        "tasks_consume_open",
+        "tasks_clear",
         "run_command",
     }
 )

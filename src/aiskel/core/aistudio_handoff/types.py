@@ -1,7 +1,7 @@
 """Module: @role: 新規タブ引き継ぎの共有定数・用途種別・ペイロードデータモデルを定義する。"""
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 MAX_HANDOFF_PAYLOAD_BYTES = 4 * 1024 * 1024
 HANDOFF_TTL_SEC = 120.0
@@ -18,6 +18,13 @@ class HandoffKind(str, Enum):
     FILE_SPLIT = "file_split"
     DIR_ORGANIZE = "dir_organize"
     CONFIG_INFER = "config_infer"
+
+@dataclass(frozen=True)
+class DiscoveryTask:
+    """1度目探索で分割された単一タスクの要件と対象パス群を保持する。"""
+
+    task_text: str
+    dirs: Tuple[str, ...]
 
 @dataclass(frozen=True)
 class TabHandoffPayload:

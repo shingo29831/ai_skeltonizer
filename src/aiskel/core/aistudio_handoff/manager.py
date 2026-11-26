@@ -3,7 +3,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
-from typing import Dict, Optional, Set, Union
+from typing import Any, Dict, Optional, Set, Union
 
 from .text import format_handoff_prompt_text
 from .types import (
@@ -31,6 +31,9 @@ class PatchHandoffManager:
         self._tab_lineage: Dict[str, str] = {}
         self._tab_organize_policies: "OrderedDict[str, bool]" = OrderedDict()
         self._tab_config_infer_targets: "OrderedDict[str, str]" = OrderedDict()
+        self._tab_modes: "OrderedDict[str, str]" = OrderedDict()
+        self._discovery_queue: Optional[Any] = None
+        self._pending_external_task_handoff: Optional[Dict[str, object]] = None
         self._last_detected_patch: Optional[str] = None
 
     def _record_tab_patch_locked(self, tab_id: str, patch_text: str, overwrite: bool = True) -> None:
@@ -184,6 +187,90 @@ class PatchHandoffManager:
                 visited.add(cur)
                 cur = self._tab_lineage.get(cur, "")
         return None
+
+    def _set_tab_mode_locked(self, tab_id: str, mode: Optional[str]) -> None:
+        clean_tid = (tab_id or "").strip()
+        clean_mode = (mode or "").strip() if isinstance(mode, str) else ""
+        if not clean_mode:
+            if clean_tid:
+                visited: Set[str] = set()
+                cur = clean_tid
+                while cur and cur not in visited:
+                    visited.add(cur)
+                    self._tab_modes.pop(cur, None)
+                    cur = self._tab_lineage.get(cur, "")
+            else:
+                self._tab_modes.clear()
+            return
+        if not clean_tid:
+            return
+        self._tab_modes[clean_tid] = clean_mode
+        self._tab_modes.move_to_end(clean_tid)
+        while len(self._tab_modes) > MAX_TRACKED_AUTO_TABS:
+            self._tab_modes.popitem(last=False)
+
+    def set_tab_mode(self, tab_id: str, mode: Optional[str]) -> None:
+        """指定タブで実行中の引き継ぎ種別モードを記録または解除する。"""
+        with self._lock:
+            self._set_tab_mode_locked(tab_id, mode)
+
+    def get_tab_mode(self, tab_id: str = "") -> Optional[str]:
+        """指定タブ（またはその系譜）の引き継ぎ種別モードを返す。"""
+        clean_tid = (tab_id or "").strip()
+        if not clean_tid:
+            return None
+        with self._lock:
+            visited: Set[str] = set()
+            cur = clean_tid
+            while cur and cur not in visited:
+                if cur in self._tab_modes:
+                    return self._tab_modes[cur]
+                visited.add(cur)
+                cur = self._tab_lineage.get(cur, "")
+        return None
+
+    def set_discovery_queue(self, queue: Optional[Any]) -> None:
+        """現在アクティブな分割Discoveryタスクキューを保持する。"""
+        with self._lock:
+            self._discovery_queue = queue
+
+    def get_discovery_queue(self) -> Optional[Any]:
+        """保持中の分割Discoveryタスクキューを返す。"""
+        with self._lock:
+            return self._discovery_queue
+
+    def clear_discovery_queue(self) -> None:
+        """保持中の分割Discoveryタスクキューと保留外部引き継ぎをクリアする。"""
+        with self._lock:
+            self._discovery_queue = None
+            self._pending_external_task_handoff = None
+
+    def set_pending_external_task_handoff(self, info: Optional[Dict[str, object]]) -> None:
+        """外部CLIからの次タスク起動通知を保持する。"""
+        with self._lock:
+            self._pending_external_task_handoff = dict(info) if info is not None else None
+
+    def get_pending_external_task_handoff(self) -> Optional[Dict[str, object]]:
+        """保留中の外部次タスク起動通知のスナップショットを返す。"""
+        with self._lock:
+            return dict(self._pending_external_task_handoff) if self._pending_external_task_handoff is not None else None
+
+    def consume_pending_external_task_handoff(self) -> Optional[Dict[str, object]]:
+        """保留中の外部次タスク起動通知を原子的に取り出して解放する。"""
+        with self._lock:
+            current = self._pending_external_task_handoff
+            self._pending_external_task_handoff = None
+            return dict(current) if current is not None else None
+
+    def has_active_handoff(self, handoff_id: str) -> bool:
+        """指定引き継ぎIDがTTL内で未消費のまま保持されているか返す。"""
+        clean_hid = (handoff_id or "").strip()
+        if not clean_hid:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            self._prune_expired_locked(now)
+            return clean_hid in self._entries
 
     def _record_auto_tab_locked(self, tab_id: str, remaining: int, balance: Optional[int] = None) -> None:
         clean_tid = (tab_id or "").strip()
@@ -343,14 +430,27 @@ class PatchHandoffManager:
         ):
             self._record_lineage_locked(tab_id, item.source_tab_id)
         elif clean_tid := (tab_id or "").strip():
+            self._tab_lineage.pop(clean_tid, None)
             self._tab_organize_policies.pop(clean_tid, None)
             self._tab_config_infer_targets.pop(clean_tid, None)
+        if clean_tid := (tab_id or "").strip():
+            if item.handoff_kind in (
+                HandoffKind.DISCOVERY.value,
+                HandoffKind.FILE_SPLIT.value,
+                HandoffKind.DIR_ORGANIZE.value,
+                HandoffKind.CONFIG_INFER.value,
+            ):
+                self._set_tab_mode_locked(clean_tid, item.handoff_kind)
         if item.allow_rename is not None and (clean_tid := (tab_id or "").strip()):
             self._tab_organize_policies[clean_tid] = bool(item.allow_rename)
             self._tab_organize_policies.move_to_end(clean_tid)
+            while len(self._tab_organize_policies) > MAX_TRACKED_AUTO_TABS:
+                self._tab_organize_policies.popitem(last=False)
         if item.config_infer_target and (clean_tid := (tab_id or "").strip()):
             self._tab_config_infer_targets[clean_tid] = item.config_infer_target
             self._tab_config_infer_targets.move_to_end(clean_tid)
+            while len(self._tab_config_infer_targets) > MAX_TRACKED_AUTO_TABS:
+                self._tab_config_infer_targets.popitem(last=False)
 
     def assign_tab(self, handoff_id: str, tab_id: str) -> Optional[TabHandoffPayload]:
         """指定引き継ぎIDに新規生成タブのtab_idを関連付ける。"""
@@ -415,6 +515,7 @@ class PatchHandoffManager:
                         source_command_notice=item.source_command_notice,
                         source_command_is_error=item.source_command_is_error,
                         allow_rename=item.allow_rename,
+                        config_infer_target=item.config_infer_target,
                     )
                     self._entries[clean_hid] = item
                 if clean_tid:

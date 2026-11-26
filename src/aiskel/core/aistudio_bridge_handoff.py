@@ -10,13 +10,18 @@ from .aistudio_auto_apply import AutoApplyOutcome, execute_auto_check_patch_deta
 from .aistudio_auto_organize import validate_patch_against_rename_policy
 from .aistudio_bridge_types import MAX_ERROR_DETAIL_CHARS, MAX_PATCH_HANDOFF_MAX_TABS
 from .aistudio_config_infer import resolve_target_config_file, validate_config_infer_patch
-from .aistudio_discovery_handoff import handle_discovery_handoff
+from .aistudio_discovery_handoff import (
+    advance_next_discovery_task_handoff,
+    handle_discovery_handoff,
+)
 from .aistudio_handoff import (
+    HandoffKind,
     has_applicable_patch_in_text,
     has_handoff_stop_signal_in_text,
     load_project_summary_text,
 )
-from .aistudio_handoff.text import extract_discovery_directives
+from .aistudio_handoff.task_queue import bridge_terminal_apply_scope
+from .aistudio_handoff.text import extract_discovery_tasks
 from .aistudio_prompts import (
     PATCH_HANDOFF_STOP_SIGNAL,
     PromptPattern,
@@ -139,32 +144,77 @@ def run_terminal_auto_apply(
         apply_phase = "config_policy" if config_infer_target else "organize_policy"
         apply_test_failed = False
     elif hasattr(bridge, "_execute_auto_apply_detailed"):
-        if config_infer_target:
-            outcome = bridge._execute_auto_apply_detailed(
-                target_patch,
-                no_test=True,
-                no_static_analysis=True,
-                allow_config_write=True,
-                config_target=config_infer_target,
-            )
-        else:
-            outcome = bridge._execute_auto_apply_detailed(target_patch)
+        begin_fn = getattr(bridge, "begin_terminal_apply", None)
+        end_fn = getattr(bridge, "end_terminal_apply", None)
+        if callable(begin_fn):
+            begin_fn()
+        try:
+            with bridge_terminal_apply_scope():
+                if config_infer_target:
+                    outcome = bridge._execute_auto_apply_detailed(
+                        target_patch,
+                        no_test=True,
+                        no_static_analysis=True,
+                        allow_config_write=True,
+                        config_target=config_infer_target,
+                    )
+                else:
+                    outcome = bridge._execute_auto_apply_detailed(target_patch)
+        finally:
+            if callable(end_fn):
+                end_fn()
         apply_exit_code = outcome.exit_code
         apply_message = outcome.message
         apply_phase = outcome.phase
         apply_error_report = outcome.error_report
         apply_test_failed = bool(getattr(outcome, "test_failed", False))
     else:
-        apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
+        begin_fn = getattr(bridge, "begin_terminal_apply", None)
+        end_fn = getattr(bridge, "end_terminal_apply", None)
+        if callable(begin_fn):
+            begin_fn()
+        try:
+            with bridge_terminal_apply_scope():
+                apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
+        finally:
+            if callable(end_fn):
+                end_fn()
         apply_phase = "apply"
         apply_error_report = "" if apply_exit_code == 0 else apply_message
         apply_test_failed = False
     applied = apply_exit_code == 0
+    next_task_info: Dict[str, object] = {}
     if applied:
+        tab_mode = (
+            bridge._handoff_manager.get_tab_mode(req_tab_id)
+            if hasattr(bridge._handoff_manager, "get_tab_mode")
+            else None
+        )
+        if hasattr(bridge._handoff_manager, "set_tab_mode"):
+            bridge._handoff_manager.set_tab_mode(req_tab_id, None)
         bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
-    return int(HTTPStatus.OK), {
+        if (
+            not config_infer_target
+            and allow_rename is None
+            and tab_mode == HandoffKind.DISCOVERY.value
+        ):
+            next_task_info = advance_next_discovery_task_handoff(
+                bridge,
+                source_tab_id=req_tab_id,
+                prev_apply_message=apply_message,
+                prev_test_failed=apply_test_failed,
+                store_pending_external=False,
+            )
+            if next_task_info.get("error"):
+                print(
+                    f"⚠ 次タスクの引き継ぎ生成に失敗しました: {next_task_info['error']}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    resp_body: Dict[str, object] = {
         "ok": True,
         "skipped": True,
         "stop_signal_detected": stop_signal_detected,
@@ -182,6 +232,19 @@ def run_terminal_auto_apply(
         "apply_test_failed": apply_test_failed,
         "message": success_message if applied else apply_message,
     }
+    if next_task_info.get("advanced"):
+        resp_body["next_task_handoff"] = True
+        resp_body["handoff_id"] = next_task_info.get("handoff_id")
+        resp_body["new_chat_url"] = next_task_info.get("new_chat_url")
+        resp_body["task_index"] = next_task_info.get("task_index")
+        resp_body["total_tasks"] = next_task_info.get("total_tasks")
+        resp_body["target_file"] = next_task_info.get("target_file")
+    elif next_task_info.get("all_tasks_completed"):
+        resp_body["all_tasks_completed"] = True
+        resp_body["total_tasks"] = next_task_info.get("total_tasks")
+    elif next_task_info.get("error"):
+        resp_body["next_task_error"] = str(next_task_info["error"])
+    return int(HTTPStatus.OK), resp_body
 
 def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
     """<<<< ==== >>>> 出力応答を受領し、応答コピー・要約読込・引き継ぎレコード登録またはaiskel a自動適用を実行する。"""
@@ -197,11 +260,28 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
     response_text = raw_response if isinstance(raw_response, str) else ""
     stop_requested = (payload.get("stop_handoff") is True) or has_handoff_stop_signal_in_text(response_text)
     has_patch = bool(response_text.strip() and has_applicable_patch_in_text(response_text))
+    current_tab_mode = (
+        bridge._handoff_manager.get_tab_mode(req_tab_id)
+        if req_tab_id and hasattr(bridge._handoff_manager, "get_tab_mode")
+        else None
+    )
+    discovery_allowed_by_mode = (
+        payload.get("discovery_mode") is True
+        or (
+            payload.get("discovery_mode") is not False
+            and current_tab_mode not in (
+                HandoffKind.DISCOVERY.value,
+                HandoffKind.FILE_SPLIT.value,
+                HandoffKind.DIR_ORGANIZE.value,
+                HandoffKind.CONFIG_INFER.value,
+            )
+        )
+    )
     has_discovery = bool(
         not has_patch
         and not stop_requested
-        and payload.get("discovery_mode") is not False
-        and extract_discovery_directives(response_text) is not None
+        and discovery_allowed_by_mode
+        and extract_discovery_tasks(response_text)
     )
 
     turn_id = str(payload.get("turn_id") or "").strip()
@@ -233,12 +313,7 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         stop_requested = False
         ignored_self_stop = True
 
-    turn_id = str(payload.get("turn_id") or "").strip()
     dedup_key = f"HANDOFF::{req_tab_id}::{turn_id}" if turn_id else ""
-
-    new_chat_url = str(payload.get("new_chat_url") or DEFAULT_NEW_CHAT_URL).strip()
-    if not new_chat_url.startswith("https://aistudio.google.com/"):
-        new_chat_url = DEFAULT_NEW_CHAT_URL
 
     with bridge._exec_lock:
         if dedup_key and dedup_key in bridge._recent_keys:

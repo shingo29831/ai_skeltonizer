@@ -144,6 +144,19 @@ def build_handoff_session_js() -> str:
         "        resetAutoApplyErrorRetries();\n"
         "        if (typeof clearErrorPanel === 'function') clearErrorPanel();\n"
         "        showToast(formatAppliedCommandNotice(data, appliedMessage), Boolean(data.apply_test_failed));\n"
+        "        if (data.next_task_handoff) {\n"
+        "          showToast(\n"
+        "            'aiskel 分割タスク (' + (data.task_index || '?') + '/' + (data.total_tasks || '?') + ') を新タブで開始します',\n"
+        "            false\n"
+        "          );\n"
+        "        } else if (data.all_tasks_completed) {\n"
+        "          showToast(\n"
+        "            'aiskel 分割タスク: 全 ' + (data.total_tasks || 0) + ' 件の実装・適用が完了しました！',\n"
+        "            false\n"
+        "          );\n"
+        "        } else if (data.next_task_error) {\n"
+        "          showToast('aiskel 次タスク引き継ぎエラー: ' + data.next_task_error, true);\n"
+        "        }\n"
         "      } else {\n"
         "        const detail = data.apply_message || 'パッチの自動適用に失敗しました';\n"
         "        const errorTitle = data.apply_phase === 'check'\n"
@@ -218,9 +231,15 @@ def build_handoff_session_js() -> str:
 
         "            if (data.discovery_handoff) {\n"
 
+        "              const taskTag = (typeof data.total_tasks === 'number' && data.total_tasks > 1)\n"
+
+        "                ? (' [タスク 1/' + data.total_tasks + ']')\n"
+
+        "                : '';\n"
+
         "              showToast(\n"
 
-        "                'aiskel 探索結果のスコープ限定バンドル (対象 ' +\n"
+        "                'aiskel 探索結果のスコープ限定バンドル' + taskTag + ' (対象 ' +\n"
 
         "                (data.scoped_primary_count || 0) + ' + 依存 ' + (data.scoped_dependency_count || 0) +\n"
 
@@ -277,6 +296,8 @@ def build_handoff_session_js() -> str:
         "                !data.copied_to_clipboard\n"
         "              )\n"
         "            );\n"
+        "          } else if (data.next_task_handoff && !data.duplicate_skipped) {\n"
+        "            handleTerminalAutoApplyNotice(data, 'aiskel a でパッチを適用しました', () => {});\n"
         "          }\n"
         "          return;\n"
         "        }\n"

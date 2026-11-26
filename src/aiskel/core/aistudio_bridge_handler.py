@@ -179,6 +179,9 @@ def build_bridge_request_handler_class(
                                 "organize_handoff": "/api/organize/handoff",
                                 "config_prompt": "/api/config/prompt",
                                 "config_handoff": "/api/config/handoff",
+                                "tasks_advance": "/api/tasks/advance",
+                                "tasks_consume_open": "/api/tasks/consume_open",
+                                "tasks_clear": "/api/tasks/clear",
                                 "execute": "/api/execute",
                                 "run_command": "/api/run_command",
                             },
@@ -487,6 +490,48 @@ def build_bridge_request_handler_class(
                     self._send_json(status_code, body)
                 except Exception as e:
                     print(f"✖ 設定推論引き継ぎ処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/tasks/advance":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_tasks_advance_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 次タスク進行処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/tasks/consume_open":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_tasks_consume_open_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ 保留タスク引き継ぎ取得中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/tasks/clear":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_tasks_clear_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ タスクキュー破棄中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
                     self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 

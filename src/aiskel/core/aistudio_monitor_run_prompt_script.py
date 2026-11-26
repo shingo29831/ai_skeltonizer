@@ -30,7 +30,7 @@ def build_monitor_run_prompt_js() -> str:
         "    if (/^[ \\t]*\\[AISKEL-DISCOVERY\\][ \\t]*$/m.test(nonCode)) return true;\n"
         "    if (/^[ \\t]*【(?:依頼タスク|自動分割モード|階層整理モード|設定推論モード):/m.test(nonCode)) return true;\n"
         "    if (/^[ \\t]*<proposed_implementation(?:_\\d+)?>[ \\t]*$/im.test(nonCode)) return true;\n"
-        "    if (/^[ \\t]*=== (?:事前検証結果 \\(aiskel a --check エラー\\)|指定ディレクトリ解決エラー|ユーザーリクエスト（原文）|整理済みタスク・確認方針) ===[ \\t]*$/m.test(nonCode)) {\n"
+        "    if (/^[ \\t]*=== (?:事前検証結果 \\(aiskel a --check エラー\\)|指定ディレクトリ解決エラー|ユーザーリクエスト（原文）|分割タスク実行指示(?: \\(\\d+\\/\\d+\\))?|整理済みタスク・確認方針(?: \\(\\d+\\/\\d+\\))?) ===[ \\t]*$/m.test(nonCode)) {\n"
         "      return true;\n"
         "    }\n"
         "    if (/^[ \\t]*(?:階層整理モードでは「ファイル名変更を許可」が無効|設定推論モードでは|設定推論パッチ(?:に置換ブロック|の構文))/m.test(nonCode)) {\n"

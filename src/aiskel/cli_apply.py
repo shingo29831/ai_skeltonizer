@@ -42,6 +42,7 @@ from .config import (
     load_static_analysis_command_from_meta,
     load_test_command_from_meta,
 )
+from .core.aistudio_handoff.task_queue import advance_task_queue_after_cli_apply
 from .core.clipboard import get_clipboard_text, set_clipboard_text
 from .core.patch.applier import apply_patch
 from .core.test_runner import run_static_analysis, run_validation_test
@@ -284,4 +285,15 @@ def handle_apply_command(
         if on_auto_sync:
             on_auto_sync(project_root, action_name, should_bloat)
 
-    return 0 if (last_fail == 0 or committed_successfully) else 1
+    exit_code = 0 if (last_fail == 0 or committed_successfully) else 1
+    if (
+        exit_code == 0
+        and not is_revert
+        and not is_check
+        and not is_dry_run
+        and last_fail == 0
+        and not test_failed
+        and (total_success > 0 or total_skipped > 0)
+    ):
+        advance_task_queue_after_cli_apply(project_root, clipboard_writer=set_clipboard_text)
+    return exit_code

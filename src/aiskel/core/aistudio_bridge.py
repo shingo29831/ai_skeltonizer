@@ -56,6 +56,12 @@ from .aistudio_bridge_runtime import (
     shutdown_bridge_server,
 )
 from .aistudio_bridge_state import TabBindingManager
+from .aistudio_discovery_handoff import (
+    handle_tasks_advance as _handle_tasks_advance,
+    handle_tasks_clear as _handle_tasks_clear,
+    handle_tasks_consume_open as _handle_tasks_consume_open,
+)
+from .aistudio_handoff.task_queue import load_pending_task_queue, summarize_task_title
 from .aistudio_bridge_types import (
     ALLOWED_EXTENSION_SCHEMES,
     EXECUTION_WAIT_TIMEOUT_SEC,
@@ -154,6 +160,8 @@ class AiskelBridgeServer:
         self._active_shell_procs_lock = threading.Lock()
         self._active_shell_procs: Set[Any] = set()
         self._queue_state_lock = threading.Lock()
+        self._terminal_apply_lock = threading.Lock()
+        self._terminal_apply_depth = 0
         self._recent_keys: Deque[str] = deque(maxlen=MAX_DEDUP_HISTORY)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._http_thread: Optional[threading.Thread] = None
@@ -223,6 +231,26 @@ class AiskelBridgeServer:
         else:
             enriched["remaining_auto_tabs"] = max_tabs
             enriched["is_auto_generated_tab"] = False
+        queue = self._handoff_manager.get_discovery_queue()
+        if queue is None:
+            queue = load_pending_task_queue(self.project_root, self.output_dir)
+            if queue is not None:
+                self._handoff_manager.set_discovery_queue(queue)
+        if queue is not None and queue.total_tasks > 1:
+            cur_idx = min(queue.current_index, queue.total_tasks - 1)
+            enriched["discovery_task_active"] = True
+            enriched["discovery_task_index"] = cur_idx + 1
+            enriched["discovery_task_total"] = queue.total_tasks
+            enriched["discovery_task_title"] = summarize_task_title(
+                queue.tasks[cur_idx].task_text,
+                cur_idx + 1,
+            )
+        else:
+            enriched["discovery_task_active"] = False
+            enriched["discovery_task_index"] = 0
+            enriched["discovery_task_total"] = 0
+            enriched["discovery_task_title"] = ""
+        enriched["pending_task_handoff"] = self._handoff_manager.get_pending_external_task_handoff()
         return enriched
 
     def get_prompt_payload(self, pattern: str = PromptPattern.DEFAULT.value) -> Tuple[int, Dict[str, object]]:
@@ -435,6 +463,34 @@ class AiskelBridgeServer:
         """新規タブへの貼り付け完了通知を受理し、引き継ぎレコードを解放する。"""
         return _handle_handoff_ack(self, payload)
 
+    def begin_terminal_apply(self) -> None:
+        """終端自動適用実行中フラグを開始する。"""
+        with self._terminal_apply_lock:
+            self._terminal_apply_depth += 1
+
+    def end_terminal_apply(self) -> None:
+        """終端自動適用実行中フラグを終了する。"""
+        with self._terminal_apply_lock:
+            if self._terminal_apply_depth > 0:
+                self._terminal_apply_depth -= 1
+
+    def is_terminal_apply_in_progress(self) -> bool:
+        """ブリッジ主導の終端自動適用が現在実行中か返す。"""
+        with self._terminal_apply_lock:
+            return self._terminal_apply_depth > 0
+
+    def handle_tasks_advance_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """外部CLIからのaiskel a成功通知を受理し、次タスクの新タブ引き継ぎを生成する。"""
+        return _handle_tasks_advance(self, payload)
+
+    def handle_tasks_consume_open_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """保留中の外部次タスク起動通知を1度だけ原子的に取得して返す。"""
+        return _handle_tasks_consume_open(self, payload)
+
+    def handle_tasks_clear_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """保持中の分割タスクキューを破棄する。"""
+        return _handle_tasks_clear(self, payload)
+
     def _execute_action(self, action: str, payload: Dict[str, object]) -> Tuple[int, Any]:
         return execute_bridge_action(self, action, payload)
 
@@ -476,6 +532,16 @@ class AiskelBridgeServer:
 
     def _dispatch_config_handoff_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="config_handoff")
+
+    def _dispatch_tasks_advance_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        # 終端自動適用中のサブプロセス呼び出しによるメインスレッドデッドロックを防止するため直接処理する
+        return self.handle_tasks_advance_payload(payload)
+
+    def _dispatch_tasks_consume_open_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self.handle_tasks_consume_open_payload(payload)
+
+    def _dispatch_tasks_clear_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self.handle_tasks_clear_payload(payload)
 
     def _dispatch_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="run_command")
