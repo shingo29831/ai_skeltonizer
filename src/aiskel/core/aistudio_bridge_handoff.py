@@ -195,6 +195,8 @@ def run_terminal_auto_apply(
         bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
+        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         if (
             not config_infer_target
             and allow_rename is None
@@ -340,17 +342,48 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 bridge._handoff_manager.record_detected_patch(response_text, tab_id=req_tab_id)
             target_patch = response_text if has_patch else bridge._handoff_manager.get_last_detected_patch(req_tab_id)
             if not target_patch:
-                if req_tab_id:
-                    bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
-                    bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
-                if dedup_key:
-                    bridge._recent_keys.append(dedup_key)
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(
-                    f"\n[{timestamp}] ✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 適用対象の置換コードがないため新規タブは作成しません",
-                    flush=True,
+                tab_mode = (
+                    bridge._handoff_manager.get_tab_mode(req_tab_id)
+                    if req_tab_id and hasattr(bridge._handoff_manager, "get_tab_mode")
+                    else None
                 )
-                return int(HTTPStatus.OK), {
+                next_task_info: Dict[str, object] = {}
+                if (
+                    not config_infer_target
+                    and allow_rename is None
+                    and tab_mode == HandoffKind.DISCOVERY.value
+                ):
+                    next_task_info = advance_next_discovery_task_handoff(
+                        bridge,
+                        source_tab_id=req_tab_id,
+                        prev_apply_message="変更なし完了（完了合図検知）",
+                        prev_test_failed=False,
+                        store_pending_external=False,
+                        prev_task_outcome="no_change",
+                    )
+                if not next_task_info.get("error"):
+                    if req_tab_id:
+                        if hasattr(bridge._handoff_manager, "set_tab_mode"):
+                            bridge._handoff_manager.set_tab_mode(req_tab_id, None)
+                        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+                        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
+                        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+                    if dedup_key:
+                        bridge._recent_keys.append(dedup_key)
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                if next_task_info.get("error"):
+                    print(
+                        f"⚠ 次タスクの引き継ぎ生成に失敗しました: {next_task_info['error']}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                elif not next_task_info.get("advanced") and not next_task_info.get("all_tasks_completed"):
+                    print(
+                        f"\n[{timestamp}] ✅ 欠陥なし完了合図({PATCH_HANDOFF_STOP_SIGNAL})を検知 -> 適用対象の置換コードがないため新規タブは作成しません",
+                        flush=True,
+                    )
+                resp_body: Dict[str, object] = {
                     "ok": True,
                     "skipped": True,
                     "stop_signal_detected": True,
@@ -365,6 +398,27 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                     "apply_message": "",
                     "message": "完了合図を検知したため新規タブは作成しませんでした（適用対象の置換コードなし）",
                 }
+                if next_task_info.get("advanced"):
+                    task_idx = next_task_info.get("task_index")
+                    task_tot = next_task_info.get("total_tasks")
+                    resp_body["no_change_completed"] = True
+                    resp_body["next_task_handoff"] = True
+                    resp_body["handoff_id"] = next_task_info.get("handoff_id")
+                    resp_body["new_chat_url"] = next_task_info.get("new_chat_url")
+                    resp_body["task_index"] = task_idx
+                    resp_body["total_tasks"] = task_tot
+                    resp_body["target_file"] = next_task_info.get("target_file")
+                    resp_body["message"] = f"完了合図により変更なし完了とし、次タスク ({task_idx}/{task_tot}) へ引き継ぎます"
+                elif next_task_info.get("all_tasks_completed"):
+                    resp_body["no_change_completed"] = True
+                    resp_body["all_tasks_completed"] = True
+                    resp_body["total_tasks"] = next_task_info.get("total_tasks")
+                    resp_body["message"] = "完了合図により変更なし完了とし、全分割タスクが完了しました"
+                elif next_task_info.get("error"):
+                    err_text = str(next_task_info["error"])
+                    resp_body["next_task_error"] = err_text
+                    resp_body["message"] = f"完了合図を検知しましたが、次タスクの引き継ぎ生成に失敗しました: {err_text}"
+                return int(HTTPStatus.OK), resp_body
             # 最終適用フェーズ到達後は適用失敗リトライ時に再度レビュー新タブを開かないよう残数を確定消費
             bridge._handoff_manager.consume_auto_tab_if_tracked(req_tab_id, 0)
             status_code, body = bridge._run_terminal_auto_apply(

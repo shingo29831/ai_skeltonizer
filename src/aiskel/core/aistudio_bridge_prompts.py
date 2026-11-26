@@ -223,6 +223,8 @@ def handle_split_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, D
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
             bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
             bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.FILE_SPLIT.value)
+            if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -278,6 +280,8 @@ def handle_split_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
         bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.FILE_SPLIT.value)
+        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         raw_notice = payload.get("source_command_notice")
         cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
@@ -385,6 +389,8 @@ def handle_organize_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, allow_rename)
             bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
             bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.DIR_ORGANIZE.value)
+            if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -455,6 +461,8 @@ def handle_organize_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[in
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
         bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.DIR_ORGANIZE.value)
+        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         raw_notice = payload.get("source_command_notice")
         cleaned_notice = raw_notice.strip() if isinstance(raw_notice, str) else ""
@@ -523,6 +531,8 @@ def handle_config_prompt(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
             bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, target_rel_path)
             bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.CONFIG_INFER.value)
+            if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
             bridge._handoff_manager.consume_auto_tab_if_tracked(
                 req_tab_id,
                 bridge.get_patch_handoff_max_tabs(),
@@ -574,6 +584,8 @@ def handle_config_handoff(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
         bridge._handoff_manager.set_tab_mode(req_tab_id, HandoffKind.CONFIG_INFER.value)
+        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         max_tabs = bridge.get_patch_handoff_max_tabs()
         handoff = bridge._handoff_manager.create(
             source_tab_id="",

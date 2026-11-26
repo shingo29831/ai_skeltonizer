@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from ..config import load_two_stage_config_from_meta
+from .aistudio_bridge_state import sanitize_console_text
 from .aistudio_handoff.task_queue import (
     DiscoveryTaskQueue,
     clear_pending_task_queue,
@@ -156,6 +157,8 @@ def handle_discovery_handoff(
             ),
             source_command_is_error=False,
         )
+        if req_tab_id and hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         if dedup_key:
             bridge._recent_keys.append(dedup_key)
 
@@ -195,6 +198,7 @@ def _create_task_handoff_record(
     source_tab_id: str,
     prev_apply_message: str,
     prev_test_failed: bool,
+    prev_task_outcome: str = "completed",
 ) -> Tuple[Any, str, str]:
     combined_text, target_summary, primary_cnt, dep_cnt = prepare_task_combined_text(
         bridge.project_root,
@@ -207,8 +211,14 @@ def _create_task_handoff_record(
     max_tabs = bridge.get_patch_handoff_max_tabs()
     display_target = f"[{task_num}/{total_tasks}] {target_summary}"
     apply_note = prev_apply_message.strip() or "aiskel a でパッチを適用しました"
+    if prev_task_outcome == "no_change":
+        prefix_label = "前タスク変更なし完了"
+    elif prev_task_outcome == "skipped":
+        prefix_label = "前タスクスキップ"
+    else:
+        prefix_label = "前タスク適用完了"
     notice = (
-        f"前タスク適用完了 ({apply_note}) -> タスク {task_num}/{total_tasks} を開始します "
+        f"{prefix_label} ({apply_note}) -> タスク {task_num}/{total_tasks} を開始します "
         f"(対象 {primary_cnt} + 依存 {dep_cnt} ファイル)"
     )
     handoff = bridge._handoff_manager.create(
@@ -232,8 +242,9 @@ def advance_next_discovery_task_handoff(
     prev_apply_message: str = "",
     prev_test_failed: bool = False,
     store_pending_external: bool = False,
+    prev_task_outcome: str = "completed",
 ) -> Dict[str, object]:
-    """aiskel a成功後に次タスクが存在する場合は新タブ引き継ぎを作成し、全完了時はキューを解放する。"""
+    """aiskel a成功後または変更なし完了後に次タスクが存在する場合は新タブ引き継ぎを作成し、全完了時はキューを解放する。"""
     queue = bridge._handoff_manager.get_discovery_queue()
     if queue is None:
         queue = load_pending_task_queue(bridge.project_root, bridge.output_dir)
@@ -242,20 +253,26 @@ def advance_next_discovery_task_handoff(
     if queue is None:
         return {"has_queue": False, "advanced": False, "all_tasks_completed": False}
 
+    normalized_outcome = prev_task_outcome if prev_task_outcome in ("completed", "no_change", "skipped") else "completed"
     if not queue.has_next():
         total = queue.total_tasks
         bridge._handoff_manager.clear_discovery_queue()
         clear_pending_task_queue(bridge.project_root, bridge.output_dir)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"\n[{timestamp}] 🎉 分割タスク全 {total} 件の適用が完了しました！", flush=True)
+        done_verb = "の適用が完了しました" if normalized_outcome == "completed" else "の進行が完了しました"
+        print(f"\n[{timestamp}] 🎉 分割タスク全 {total} 件{done_verb}！", flush=True)
         return {
             "has_queue": True,
             "advanced": False,
             "all_tasks_completed": True,
             "total_tasks": total,
+            "prev_task_outcome": normalized_outcome,
         }
 
     next_index_0 = queue.current_index + 1
+    prev_outcomes = dict(queue.task_outcomes)
+    if normalized_outcome != "completed":
+        queue.task_outcomes[queue.current_index] = normalized_outcome
     try:
         handoff, display_target, target_summary = _create_task_handoff_record(
             bridge,
@@ -264,8 +281,10 @@ def advance_next_discovery_task_handoff(
             source_tab_id=source_tab_id,
             prev_apply_message=prev_apply_message,
             prev_test_failed=prev_test_failed,
+            prev_task_outcome=normalized_outcome,
         )
     except (OSError, ValueError, RuntimeError) as e:
+        queue.task_outcomes = prev_outcomes
         return {
             "has_queue": True,
             "advanced": False,
@@ -291,8 +310,13 @@ def advance_next_discovery_task_handoff(
         )
 
     timestamp = datetime.now().strftime("%H:%M:%S")
+    step_label = (
+        "変更なし完了"
+        if normalized_outcome == "no_change"
+        else ("スキップ" if normalized_outcome == "skipped" else "適用完了")
+    )
     print(
-        f"\n[{timestamp}] 🚀 タスク {task_num - 1}/{total_tasks} 適用完了 -> "
+        f"\n[{timestamp}] 🚀 タスク {task_num - 1}/{total_tasks} {step_label} -> "
         f"タスク {task_num}/{total_tasks} ({target_summary}) を新規タブへ引き継ぎます",
         flush=True,
     )
@@ -300,6 +324,7 @@ def advance_next_discovery_task_handoff(
         "has_queue": True,
         "advanced": True,
         "all_tasks_completed": False,
+        "prev_task_outcome": normalized_outcome,
         "handoff_id": handoff.handoff_id,
         "new_chat_url": handoff.new_chat_url,
         "task_index": task_num,
@@ -309,6 +334,10 @@ def advance_next_discovery_task_handoff(
 
 def handle_tasks_advance(bridge: Any, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
     """外部CLIからのaiskel a成功通知を受理し、次タスクの新タブ引き継ぎを生成する。"""
+    clean_tid, tab_err = bridge._validate_optional_tab_id(payload, required=False)
+    if tab_err is not None or clean_tid is None:
+        return int(HTTPStatus.BAD_REQUEST), {"ok": False, "message": tab_err or "tab_id が不正です"}
+
     raw_root = payload.get("project_root")
     if isinstance(raw_root, str) and raw_root.strip():
         try:
@@ -330,6 +359,21 @@ def handle_tasks_advance(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             "all_tasks_completed": False,
         }
 
+    raw_reason = str(payload.get("reason") or payload.get("outcome") or "completed").strip().lower()
+    if raw_reason == "no_change":
+        prev_outcome = "no_change"
+        default_msg = "変更なし完了"
+    elif raw_reason in ("skip", "skipped"):
+        prev_outcome = "skipped"
+        default_msg = "タスクをスキップしました"
+    else:
+        prev_outcome = "completed"
+        default_msg = "aiskel a でパッチを適用しました"
+    raw_prev_msg = payload.get("prev_apply_message")
+    prev_msg = sanitize_console_text(raw_prev_msg, 200) if isinstance(raw_prev_msg, str) and raw_prev_msg.strip() else default_msg
+    raw_store = payload.get("store_pending_external")
+    store_pending_external = raw_store if isinstance(raw_store, bool) else True
+
     with bridge._exec_lock:
         binding_info = bridge._binding_manager.get_info()
         if not binding_info.get("bound"):
@@ -346,11 +390,17 @@ def handle_tasks_advance(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
             }
         res = advance_next_discovery_task_handoff(
             bridge,
-            source_tab_id="",
-            prev_apply_message="aiskel a でパッチを適用しました",
+            source_tab_id=clean_tid,
+            prev_apply_message=prev_msg,
             prev_test_failed=False,
-            store_pending_external=True,
+            store_pending_external=store_pending_external,
+            prev_task_outcome=prev_outcome,
         )
+        if clean_tid and prev_outcome != "completed" and not res.get("error") and (res.get("advanced") or res.get("all_tasks_completed")):
+            if hasattr(bridge._handoff_manager, "set_tab_mode"):
+                bridge._handoff_manager.set_tab_mode(clean_tid, None)
+            if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(clean_tid)
     if res.get("error"):
         return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
             "ok": False,
@@ -361,6 +411,7 @@ def handle_tasks_advance(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
         "has_queue": bool(res.get("has_queue")),
         "advanced": bool(res.get("advanced")),
         "all_tasks_completed": bool(res.get("all_tasks_completed")),
+        "prev_task_outcome": res.get("prev_task_outcome"),
         "handoff_id": res.get("handoff_id"),
         "new_chat_url": res.get("new_chat_url"),
         "task_index": res.get("task_index"),

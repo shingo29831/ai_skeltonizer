@@ -146,8 +146,11 @@ def handle_execute_command(bridge: Any, payload: Dict[str, object]) -> Tuple[int
                 if isinstance(e.code, str) and e.code.strip():
                     system_exit_note = e.code.strip()
 
-        if exit_code == 0 and dedup_key:
-            bridge._recent_keys.append(dedup_key)
+        if exit_code == 0:
+            if dedup_key:
+                bridge._recent_keys.append(dedup_key)
+            if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
 
         # なぜ必要か: aiskel c失敗時に自動コピーされたエラー内容も成功時同様に貼り付け・自動送信可能にするため
         paste_suppressed = effective_no_focus or effective_no_paste

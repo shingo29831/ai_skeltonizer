@@ -61,6 +61,7 @@ from .aistudio_discovery_handoff import (
     handle_tasks_clear as _handle_tasks_clear,
     handle_tasks_consume_open as _handle_tasks_consume_open,
 )
+from .aistudio_no_patch_handoff import handle_tasks_no_patch as _handle_tasks_no_patch
 from .aistudio_handoff.task_queue import load_pending_task_queue, summarize_task_title
 from .aistudio_bridge_types import (
     ALLOWED_EXTENSION_SCHEMES,
@@ -491,6 +492,10 @@ class AiskelBridgeServer:
         """保持中の分割タスクキューを破棄する。"""
         return _handle_tasks_clear(self, payload)
 
+    def handle_tasks_no_patch_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        """コードブロックやコマンド未出力で推論が完了した際の再試行・完了制御を実行する。"""
+        return _handle_tasks_no_patch(self, payload)
+
     def _execute_action(self, action: str, payload: Dict[str, object]) -> Tuple[int, Any]:
         return execute_bridge_action(self, action, payload)
 
@@ -542,6 +547,9 @@ class AiskelBridgeServer:
 
     def _dispatch_tasks_clear_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self.handle_tasks_clear_payload(payload)
+
+    def _dispatch_tasks_no_patch_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
+        return self._dispatch_job(payload, action="tasks_no_patch")
 
     def _dispatch_run_command_payload(self, payload: Dict[str, object]) -> Tuple[int, Dict[str, object]]:
         return self._dispatch_job(payload, action="run_command")

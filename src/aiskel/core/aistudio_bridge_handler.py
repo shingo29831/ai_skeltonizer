@@ -182,6 +182,7 @@ def build_bridge_request_handler_class(
                                 "tasks_advance": "/api/tasks/advance",
                                 "tasks_consume_open": "/api/tasks/consume_open",
                                 "tasks_clear": "/api/tasks/clear",
+                                "tasks_no_patch": "/api/tasks/no_patch",
                                 "execute": "/api/execute",
                                 "run_command": "/api/run_command",
                             },
@@ -532,6 +533,20 @@ def build_bridge_request_handler_class(
                     self._send_json(status_code, body)
                 except Exception as e:
                     print(f"✖ タスクキュー破棄中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
+                    self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
+                return
+
+            if req_path == "/api/tasks/no_patch":
+                if not self._verify_access():
+                    return
+                payload = self._read_json_body(allow_empty=True, max_bytes=max_handoff_payload_bytes)
+                if payload is None:
+                    return
+                try:
+                    status_code, body = bridge._dispatch_tasks_no_patch_payload(payload)
+                    self._send_json(status_code, body)
+                except Exception as e:
+                    print(f"✖ パッチ未出力完了処理中にエラーが発生しました: {e}", file=sys.stderr, flush=True)
                     self._send_json(int(HTTPStatus.INTERNAL_SERVER_ERROR), {"ok": False, "message": str(e)})
                 return
 

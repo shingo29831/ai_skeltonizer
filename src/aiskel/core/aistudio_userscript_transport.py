@@ -252,6 +252,7 @@ def build_userscript_handoff_transport_js() -> str:
         "    createSplitHandoff: (payload, onDone) => sendUserscriptHandoffRequest('/api/split/handoff', payload, onDone),\n"
         "    createOrganizeHandoff: (payload, onDone) => sendUserscriptHandoffRequest('/api/organize/handoff', payload, onDone),\n"
         "    createConfigHandoff: (payload, onDone) => sendUserscriptHandoffRequest('/api/config/handoff', payload, onDone),\n"
+        "    reportNoPatchTask: (payload, onDone) => sendUserscriptHandoffRequest('/api/tasks/no_patch', payload, onDone),\n"
         "    claimHandoff: (cb) => {\n"
         "      const handoffId = readPendingUserscriptHandoffId();\n"
         "      if (!handoffId) {\n"

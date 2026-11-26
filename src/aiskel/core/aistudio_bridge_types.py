@@ -30,6 +30,7 @@ _DICT_RESPONSE_ACTIONS = frozenset(
         "tasks_advance",
         "tasks_consume_open",
         "tasks_clear",
+        "tasks_no_patch",
         "run_command",
     }
 )

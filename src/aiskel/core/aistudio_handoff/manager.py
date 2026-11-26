@@ -35,6 +35,7 @@ class PatchHandoffManager:
         self._discovery_queue: Optional[Any] = None
         self._pending_external_task_handoff: Optional[Dict[str, object]] = None
         self._last_detected_patch: Optional[str] = None
+        self._tab_no_patch_retries: "OrderedDict[str, int]" = OrderedDict()
 
     def _record_tab_patch_locked(self, tab_id: str, patch_text: str, overwrite: bool = True) -> None:
         clean_tid = (tab_id or "").strip()
@@ -54,14 +55,39 @@ class PatchHandoffManager:
         if clean_child and clean_source and clean_child != clean_source:
             self._tab_lineage[clean_child] = clean_source
 
+    def get_no_patch_retries(self, tab_id: str = "") -> int:
+        """指定タブにおけるコードブロック・パッチ未出力の連続回数を返す。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            return self._tab_no_patch_retries.get(clean_tid, 0)
+
+    def increment_no_patch_retries(self, tab_id: str = "") -> int:
+        """指定タブのコードブロック・パッチ未出力回数を1加算して最新値を返す。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            next_val = self._tab_no_patch_retries.get(clean_tid, 0) + 1
+            self._tab_no_patch_retries[clean_tid] = next_val
+            self._tab_no_patch_retries.move_to_end(clean_tid)
+            while len(self._tab_no_patch_retries) > MAX_TRACKED_AUTO_TABS:
+                self._tab_no_patch_retries.popitem(last=False)
+            return next_val
+
+    def reset_no_patch_retries(self, tab_id: str = "") -> None:
+        """指定タブのコードブロック・パッチ未出力カウントをリセットする。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            self._tab_no_patch_retries.pop(clean_tid, None)
+
     def record_detected_patch(self, patch_text: str, tab_id: str = "") -> None:
         """最後に検知した置換コード応答をタブ紐づけと合わせて保持する。"""
         if not patch_text or not patch_text.strip():
             return
+        clean_tid = (tab_id or "").strip()
         with self._lock:
             self._last_detected_patch = patch_text
-            if tab_id:
-                self._record_tab_patch_locked(tab_id, patch_text, overwrite=True)
+            self._tab_no_patch_retries.pop(clean_tid, None)
+            if clean_tid:
+                self._record_tab_patch_locked(clean_tid, patch_text, overwrite=True)
 
     def get_last_detected_patch(self, tab_id: str = "") -> Optional[str]:
         """指定タブに引き継がれた置換コード、またはブリッジ全体で最後に検知した置換コードを返す。"""
@@ -69,6 +95,9 @@ class PatchHandoffManager:
         with self._lock:
             if clean_tid and clean_tid in self._tab_patches:
                 return self._tab_patches[clean_tid]
+            # 探索・分割・整理・設定推論タスクタブが別タブの旧パッチへ誤フォールバックするのを防ぐ
+            if clean_tid and clean_tid in self._tab_modes:
+                return None
             return self._last_detected_patch
 
     def consume_detected_patch(self, tab_id: str = "", patch_text: Optional[str] = None) -> None:
@@ -101,6 +130,9 @@ class PatchHandoffManager:
                 if removed is not None:
                     removed_patches.add(removed)
                 self._tab_lineage.pop(tid, None)
+                self._tab_no_patch_retries.pop(tid, None)
+            if not clean_tid:
+                self._tab_no_patch_retries.pop("", None)
 
             if patch_text is not None:
                 removed_patches.add(patch_text)
@@ -244,6 +276,7 @@ class PatchHandoffManager:
         with self._lock:
             self._discovery_queue = None
             self._pending_external_task_handoff = None
+            self._tab_no_patch_retries.clear()
 
     def set_pending_external_task_handoff(self, info: Optional[Dict[str, object]]) -> None:
         """外部CLIからの次タスク起動通知を保持する。"""
@@ -441,6 +474,10 @@ class PatchHandoffManager:
                 HandoffKind.CONFIG_INFER.value,
             ):
                 self._set_tab_mode_locked(clean_tid, item.handoff_kind)
+                self._tab_no_patch_retries.pop(clean_tid, None)
+                # 新規タスクタブが過去タスクの旧パッチを保持しないよう初期化する
+                if not item.response_text.strip():
+                    self._tab_patches.pop(clean_tid, None)
         if item.allow_rename is not None and (clean_tid := (tab_id or "").strip()):
             self._tab_organize_policies[clean_tid] = bool(item.allow_rename)
             self._tab_organize_policies.move_to_end(clean_tid)

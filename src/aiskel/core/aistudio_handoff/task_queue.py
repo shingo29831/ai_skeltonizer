@@ -7,7 +7,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -79,6 +79,7 @@ class DiscoveryTaskQueue:
     current_index: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    task_outcomes: Dict[int, str] = field(default_factory=dict)
 
     @property
     def total_tasks(self) -> int:
@@ -97,7 +98,13 @@ class DiscoveryTaskQueue:
         total = len(self.tasks)
         for idx, task in enumerate(self.tasks):
             if idx < active_index:
-                status = "完了"
+                outcome = self.task_outcomes.get(idx, "completed")
+                if outcome == "no_change":
+                    status = "変更なし完了"
+                elif outcome == "skipped":
+                    status = "スキップ"
+                else:
+                    status = "完了"
             elif idx == active_index:
                 status = "今回担当"
             else:
@@ -110,7 +117,7 @@ class DiscoveryTaskQueue:
         return lines
 
     def to_dict(self) -> Dict[str, object]:
-        return {
+        data: Dict[str, object] = {
             "version": 1,
             "queue_id": self.queue_id,
             "project_root": self.project_root,
@@ -124,6 +131,9 @@ class DiscoveryTaskQueue:
                 for t in self.tasks
             ],
         }
+        if self.task_outcomes:
+            data["task_outcomes"] = {str(k): v for k, v in sorted(self.task_outcomes.items())}
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, object]) -> Optional["DiscoveryTaskQueue"]:
@@ -154,6 +164,18 @@ class DiscoveryTaskQueue:
         if updated_at > 0 and (time.time() - updated_at) > TASK_QUEUE_TTL_SEC:
             return None
         created_at = _safe_float(data.get("created_at"), 0.0)
+        parsed_outcomes: Dict[int, str] = {}
+        raw_outcomes = data.get("task_outcomes")
+        if isinstance(raw_outcomes, dict):
+            for k, v in raw_outcomes.items():
+                if isinstance(k, (bool, float)):
+                    continue
+                try:
+                    idx_key = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx_key < len(parsed_tasks) and isinstance(v, str) and v in ("completed", "no_change", "skipped"):
+                    parsed_outcomes[idx_key] = v
         return cls(
             queue_id=str(data.get("queue_id") or ""),
             project_root=str(data.get("project_root") or ""),
@@ -163,6 +185,7 @@ class DiscoveryTaskQueue:
             current_index=idx,
             created_at=created_at,
             updated_at=updated_at,
+            task_outcomes=parsed_outcomes,
         )
 
 def _get_pending_tasks_candidates(project_root: Path, output_dir: Optional[Path] = None) -> List[Path]:
@@ -311,6 +334,7 @@ def notify_bridge_advance_task(
     *,
     session_dir: Optional[Path] = None,
     timeout_sec: float = 5.0,
+    reason: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
     """稼働中ローカルブリッジへ次タスク進行をHTTP通知する。"""
     session = load_bridge_session(project_root, session_dir=session_dir)
@@ -320,7 +344,10 @@ def notify_bridge_advance_task(
     headers = {"Content-Type": "application/json"}
     if session.get("token"):
         headers["X-Aiskel-Token"] = session["token"]
-    body = json.dumps({"project_root": str(project_root.resolve())}).encode("utf-8")
+    payload: Dict[str, object] = {"project_root": str(project_root.resolve())}
+    if reason:
+        payload["reason"] = reason
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:

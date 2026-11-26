@@ -57,6 +57,8 @@ def execute_bridge_action(bridge: Any, action: str, payload: Dict[str, object]) 
         return bridge.handle_tasks_consume_open_payload(payload)
     if action == "tasks_clear":
         return bridge.handle_tasks_clear_payload(payload)
+    if action == "tasks_no_patch":
+        return bridge.handle_tasks_no_patch_payload(payload)
     if action == "run_command":
         return bridge.handle_run_command_payload(payload)
     return bridge.handle_execute_payload(payload)
