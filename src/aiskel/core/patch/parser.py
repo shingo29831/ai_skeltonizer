@@ -71,17 +71,22 @@ def _resolve_patch_path(raw_str: str, project_root: Path) -> Path:
 
 def is_file_deletion_patch(patch_text: str) -> bool:
     """区切り記号がないパッチで、明示的なファイル削除ディレクティブのみが含まれているか判定する"""
-    file_header_matches = list(FILE_HEADER_PATTERN.finditer(patch_text))
-    return bool(
-        file_header_matches
-        and any(
+    in_block = False
+    for line in patch_text.splitlines():
+        if not in_block and DELIMITER_START.match(line):
+            in_block = True
+            continue
+        if in_block:
+            if DELIMITER_END.match(line):
+                in_block = False
+            continue
+        m = FILE_HEADER_PATTERN.search(line)
+        if m and (
             bool(m.group(3))
-            or any(line.strip().lower().startswith(kw) for kw in ("削除:", "delete:", "remove:"))
-            for m in file_header_matches
-            for line in patch_text.splitlines()
-            if m.group(0) in line
-        )
-    )
+            or line.strip().lower().startswith(("削除:", "delete:", "remove:"))
+        ):
+            return True
+    return False
 
 
 def is_file_move_patch(patch_text: str) -> bool:

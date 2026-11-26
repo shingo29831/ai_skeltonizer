@@ -5,7 +5,15 @@ from typing import List, Optional, Sequence, Set, Tuple
 
 from ...config import SkeletonConfig, load_bundle_filename_from_meta
 from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
-from ..patch.parser import DELIMITER_END, DELIMITER_MID, DELIMITER_START, MOVE_HEADER_PATTERN, has_patch_delimiters, is_file_move_patch
+from ..patch.parser import (
+    DELIMITER_END,
+    DELIMITER_MID,
+    DELIMITER_START,
+    MOVE_HEADER_PATTERN,
+    has_patch_delimiters,
+    is_file_deletion_patch,
+    is_file_move_patch,
+)
 from .types import DiscoveryTask
 
 _DEFAULT_BUNDLE_FILENAMES = (
@@ -14,6 +22,10 @@ _DEFAULT_BUNDLE_FILENAMES = (
     "architecture_bundle.xml",
 )
 _COMMIT_TAG_OPEN = "<" + "commit>"
+_COMMIT_TAG_LINE_RE = re.compile(
+    r"^[ \t]*" + re.escape(_COMMIT_TAG_OPEN) + r"[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _PATCH_STRUCTURE_HINT_RE = re.compile(
     r"^[ \t]*(?:ファイルパス|File(?:\s+path)?|Path|削除|移動|名前変更|リネーム|ファイル移動|move|mv|rename)[ \t]*[:：]|^[ \t]*"
     + re.escape(_COMMIT_TAG_OPEN)
@@ -102,9 +114,37 @@ def has_move_patch_in_text(text: str) -> bool:
                 active_fence = (marker[0], len(marker))
     return False
 
+def has_delete_patch_in_text(text: str) -> bool:
+    """ファイル削除ディレクティブのみのパッチブロック(コードブロック内またはcommitタグ付き)が含まれるか判定する。"""
+    if not text or not text.strip() or not is_file_deletion_patch(text):
+        return False
+    if _COMMIT_TAG_LINE_RE.search(text):
+        return True
+    active_fence: Optional[Tuple[str, int]] = None
+    fence_lines: List[str] = []
+    for line in text.splitlines():
+        if active_fence is not None:
+            fence_char, fence_len = active_fence
+            stripped = line.strip()
+            if len(stripped) >= fence_len and set(stripped) == {fence_char}:
+                if is_file_deletion_patch("\n".join(fence_lines)):
+                    return True
+                active_fence = None
+                fence_lines = []
+                continue
+            fence_lines.append(line)
+            continue
+        match = _FENCE_OPEN_RE.match(line)
+        if match:
+            marker, info = match.group(1), match.group(2)
+            if marker[0] == "~" or "`" not in info:
+                active_fence = (marker[0], len(marker))
+                fence_lines = []
+    return False
+
 def has_applicable_patch_in_text(text: str) -> bool:
-    """置換ブロックまたは移動・名前変更パッチブロックが含まれるか判定する。"""
-    return has_patch_delimiters_in_text(text) or has_move_patch_in_text(text)
+    """置換ブロック、移動・名前変更、または削除パッチブロックが含まれるか判定する。"""
+    return has_patch_delimiters_in_text(text) or has_move_patch_in_text(text) or has_delete_patch_in_text(text)
 
 def has_handoff_stop_signal_in_text(text: str) -> bool:
     """応答テキストのコードブロック・パッチ外に新規タブ作成停止合図が含まれるか判定する。"""

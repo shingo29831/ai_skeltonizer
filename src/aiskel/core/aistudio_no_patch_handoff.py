@@ -65,6 +65,7 @@ def _build_no_patch_retry_report(
     has_code_blocks: bool,
     config_infer_target: Optional[str],
     queue: Optional[DiscoveryTaskQueue],
+    has_apply_command_mention: bool = False,
 ) -> str:
     task_hint = ""
     if queue is not None:
@@ -89,6 +90,14 @@ def _build_no_patch_retry_report(
         if tab_mode == HandoffKind.DIR_ORGANIZE.value
         else "`ファイルパス:` / `<<<<`・`====`・`>>>>` / `<commit>` 形式のパッチ"
     )
+    if has_apply_command_mention:
+        return (
+            f"=== パッチ未添付エラー{task_hint} ===\n"
+            f"`aiskel a` の実行指示が記載されていましたが、適用可能なパッチ（{patch_format_note}）が含まれていませんでした。\n"
+            "`aiskel a` 単体ではパッチ本体なしに適用を実行できないため、以下を出力してください。\n"
+            f"- 変更を適用する場合: コードブロック内に {patch_format_note} を出力してください。\n"
+            f"- 変更が一切不要な場合のみ: コードブロック外の単独行に `{PATCH_HANDOFF_STOP_SIGNAL}` を出力してください。"
+        )
     if has_code_blocks:
         return (
             f"=== パッチ形式不備エラー{task_hint} ===\n"
@@ -180,6 +189,7 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
     )
     effective_mode = "no_change" if (raw_mode == "auto" and stop_signal_detected) else raw_mode
     has_code_blocks = payload.get("has_code_blocks") is True
+    has_apply_command_mention = payload.get("has_apply_command_mention") is True
     allow_advance_on_exhausted = payload.get("allow_advance_on_exhausted") is True
     store_pending_external = payload.get("store_pending_external") is True
     turn_id = str(payload.get("turn_id") or "").strip()
@@ -308,6 +318,7 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 "exhausted": False,
                 "has_queue": has_queue,
                 "stop_signal_detected": stop_signal_detected,
+                "has_apply_command_mention": has_apply_command_mention,
                 "message": "待機中の次タスクがないためスキップしました",
             }
 
@@ -329,6 +340,7 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 has_code_blocks=has_code_blocks,
                 config_infer_target=config_infer_target,
                 queue=active_queue_for_hint,
+                has_apply_command_mention=has_apply_command_mention,
             )
             if dedup_key:
                 bridge._recent_keys.append(dedup_key)
