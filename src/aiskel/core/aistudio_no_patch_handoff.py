@@ -1,4 +1,5 @@
 """Module: @role: コードブロックやコマンド未出力時の再試行指示・変更なし完了・安全停止制御を担当する。"""
+import re
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any, Dict, Optional, Tuple
@@ -25,6 +26,7 @@ NON_DISCOVERY_TASK_MODES = frozenset(
         HandoffKind.CONFIG_INFER.value,
     }
 )
+_DISCOVERY_TASK_TAG_RE = re.compile(r"<task>\s*[\s\S]*?\s*</task>", re.IGNORECASE)
 
 def _resolve_no_patch_organize_policy(bridge: Any, payload: Dict[str, object], req_tab_id: str) -> Tuple[bool, Optional[bool]]:
     raw_allow = payload.get("allow_rename")
@@ -66,7 +68,25 @@ def _build_no_patch_retry_report(
     config_infer_target: Optional[str],
     queue: Optional[DiscoveryTaskQueue],
     has_apply_command_mention: bool = False,
+    is_first_stage_discovery: bool = False,
+    has_task_tags: bool = False,
 ) -> str:
+    if is_first_stage_discovery:
+        missing_detail = (
+            "`<task>...</task>` は出力されていましたが、対応する有効な `<dirs>...</dirs>`（実在パス指定）が見つかりませんでした。"
+            if has_task_tags
+            else "応答に有効な `<task>...</task>` と `<dirs>...</dirs>` のペアが含まれていませんでした。"
+        )
+        return (
+            "=== 探索出力フォーマットエラー（<task> / <dirs> 未出力） ===\n"
+            "現在は**1度目探索フェーズ（タスク分割・対象選定）**です。"
+            "このフェーズでは `aiskel a` パッチや `aiskel c` コマンドは実行・出力しません。\n"
+            f"{missing_detail}\n"
+            "- 修正パッチ（`<<<<`・`====`・`>>>>`）や `aiskel c` コマンドは出力せず、"
+            "先の `<ai_directory_index>` に記載された実在ディレクトリ・ファイルパスを指定して "
+            "`<task>...</task>` と `<dirs>...</dirs>` の組を出力してください。\n"
+            "- `...` や `path/to/dir1` などのダミーパスは使用しないでください。"
+        )
     task_hint = ""
     if queue is not None:
         task_hint = f"（現在タスク {queue.current_index + 1}/{queue.total_tasks}）"
@@ -333,20 +353,24 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             else (HandoffKind.CONFIG_INFER.value if (config_infer_target and not tab_mode) else tab_mode)
         )
         active_queue_for_hint = queue if is_discovery_tab_eligible else None
+        has_task_tags = bool(response_text.strip() and _DISCOVERY_TASK_TAG_RE.search(response_text))
         if retry_count <= max_retries:
             error_report = _build_no_patch_retry_report(
                 tab_mode=effective_tab_mode,
-                has_pending_patch=bool(pending_patch),
+                has_pending_patch=False if is_first_stage_discovery else bool(pending_patch),
                 has_code_blocks=has_code_blocks,
                 config_infer_target=config_infer_target,
                 queue=active_queue_for_hint,
                 has_apply_command_mention=has_apply_command_mention,
+                is_first_stage_discovery=is_first_stage_discovery,
+                has_task_tags=has_task_tags,
             )
             if dedup_key:
                 bridge._recent_keys.append(dedup_key)
             timestamp = datetime.now().strftime("%H:%M:%S")
+            detect_label = "1度目探索タスク(<task>/<dirs>)未出力" if is_first_stage_discovery else "コードブロック・パッチ未出力"
             print(
-                f"\n[{timestamp}] ⚠ コードブロック・パッチ未出力を検知 ({retry_count}/{max_retries}) -> 再送指示を返却します",
+                f"\n[{timestamp}] ⚠ {detect_label}を検知 ({retry_count}/{max_retries}) -> 再送指示を返却します",
                 flush=True,
             )
             return int(HTTPStatus.OK), {
@@ -356,13 +380,14 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 "exhausted": False,
                 "retry_count": retry_count,
                 "max_retries": max_retries,
+                "discovery_mode": is_first_stage_discovery,
                 "has_queue": has_queue,
                 "has_next_task": has_next_task,
-                "has_pending_patch": bool(pending_patch),
+                "has_pending_patch": False if is_first_stage_discovery else bool(pending_patch),
                 "tab_mode": effective_tab_mode or "",
                 "apply_error_report": error_report,
                 "retry_prompt": error_report,
-                "message": f"コードブロック・パッチ未出力のため再出力を要求します ({retry_count}/{max_retries})",
+                "message": f"{detect_label}のため再出力を要求します ({retry_count}/{max_retries})",
             }
 
         if allow_advance_on_exhausted and has_queue and is_discovery_tab_eligible:
@@ -409,8 +434,9 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         if dedup_key:
             bridge._recent_keys.append(dedup_key)
         timestamp = datetime.now().strftime("%H:%M:%S")
+        stop_label = "1度目探索タスク(<task>/<dirs>)未出力" if is_first_stage_discovery else "コードブロック・パッチ未出力"
         print(
-            f"\n[{timestamp}] ✖ コードブロック・パッチ未出力が再試行上限 ({max_retries} 回) に達したため自動進行を停止しました",
+            f"\n[{timestamp}] ✖ {stop_label}が再試行上限 ({max_retries} 回) に達したため自動進行を停止しました",
             flush=True,
         )
         return int(HTTPStatus.OK), {
@@ -420,13 +446,14 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             "exhausted": True,
             "retry_count": retry_count,
             "max_retries": max_retries,
+            "discovery_mode": is_first_stage_discovery,
             "has_queue": has_queue,
             "has_next_task": has_next_task,
             "can_skip_task": has_queue and is_discovery_tab_eligible,
-            "has_pending_patch": bool(pending_patch),
+            "has_pending_patch": False if is_first_stage_discovery else bool(pending_patch),
             "tab_mode": effective_tab_mode or "",
             "task_index": (queue.current_index + 1) if (queue is not None and is_discovery_tab_eligible) else None,
             "total_tasks": queue.total_tasks if (queue is not None and is_discovery_tab_eligible) else None,
             "apply_error_report": "",
-            "message": f"コードブロック・パッチ未出力が連続したため自動進行を停止しました（再試行上限 {max_retries} 回到達）",
+            "message": f"{stop_label}が連続したため自動進行を停止しました（再試行上限 {max_retries} 回到達）",
         }
