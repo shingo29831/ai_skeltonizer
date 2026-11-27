@@ -4,7 +4,11 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
 
 from ...config import SkeletonConfig, load_bundle_filename_from_meta
-from ..aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
+from ..aistudio_prompts import (
+    NO_OUTPUT_STOP_SIGNAL,
+    PATCH_HANDOFF_STOP_SIGNAL,
+    STOP_SIGNALS,
+)
 from ..patch.parser import (
     DELIMITER_END,
     DELIMITER_MID,
@@ -33,8 +37,16 @@ _PATCH_STRUCTURE_HINT_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+_STOP_SIGNAL_ALT = "|".join(re.escape(sig) for sig in STOP_SIGNALS)
 _STOP_SIGNAL_LINE_RE = re.compile(
-    r"^[ \t]*`?" + re.escape(PATCH_HANDOFF_STOP_SIGNAL) + r"`?[ \t。.]*$"
+    rf"^[ \t]*(?:[-*•][ \t]+)?\**`?(?:{_STOP_SIGNAL_ALT})`?\**[ \t。.]*$"
+)
+# AI Studioの単一改行段落結合で末尾文と連結した場合のみ救済（例示・指示文中の引用を誤検知しない）
+_STOP_SIGNAL_TRAILING_RE = re.compile(
+    rf"(?:^|\s)\**(?:{_STOP_SIGNAL_ALT})\**[ \t。.]*$"
+)
+_STOP_SIGNAL_EXAMPLE_HINT_RE = re.compile(
+    r"(?:出力してください|出力せよ|記述せよ|ではなく|例[:：])"
 )
 
 def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
@@ -147,16 +159,25 @@ def has_applicable_patch_in_text(text: str) -> bool:
     return has_patch_delimiters_in_text(text) or has_move_patch_in_text(text) or has_delete_patch_in_text(text)
 
 def has_handoff_stop_signal_in_text(text: str) -> bool:
-    """応答テキストのコードブロック・パッチ外に新規タブ作成停止合図が含まれるか判定する。"""
-    if not text or not text.strip() or PATCH_HANDOFF_STOP_SIGNAL not in text:
+    """応答テキストのコードブロック・パッチ外に終了合図が含まれるか判定する。"""
+    if not text or not text.strip() or not any(sig in text for sig in STOP_SIGNALS):
         return False
     lines = text.splitlines()
     excluded_indices = _find_excluded_stop_signal_line_indices(lines)
+    last_non_empty_line = ""
     for idx, line in enumerate(lines):
         if idx in excluded_indices:
             continue
         if _STOP_SIGNAL_LINE_RE.match(line):
             return True
+        if line.strip():
+            last_non_empty_line = line
+    if (
+        last_non_empty_line
+        and _STOP_SIGNAL_TRAILING_RE.search(last_non_empty_line)
+        and not _STOP_SIGNAL_EXAMPLE_HINT_RE.search(last_non_empty_line)
+    ):
+        return True
     return False
 
 def _wrap_proposed_implementation(resp: str) -> str:
@@ -225,28 +246,11 @@ def _parse_discovery_dirs_body(raw_body: str) -> List[str]:
                 items.append(cleaned)
     return items
 
-def extract_discovery_tasks(text: str) -> List[DiscoveryTask]:
-    """1度目探索応答から(<task>, <dirs>)のペア一覧を実行順で抽出する。"""
-    if not text or not text.strip() or has_applicable_patch_in_text(text) or has_handoff_stop_signal_in_text(text):
-        return []
-
-    task_matches = list(_DISCOVERY_TASK_TAG_RE.finditer(text))
-    task_spans = [(m.start(), m.end()) for m in task_matches]
-    events: List[Tuple[int, int, str, str]] = []
-    for match in task_matches:
-        events.append((match.start(), 0, "task", match.group(1).strip()))
-    for match in _DISCOVERY_DIRS_TAG_RE.finditer(text):
-        # <task>本文内の例示<dirs>によるタスク誤確定を防ぐ
-        if any(t_start <= match.start() < t_end for t_start, t_end in task_spans):
-            continue
-        events.append((match.start(), 1, "dirs", match.group(1)))
-    if not events:
-        return []
-
-    events.sort(key=lambda item: (item[0], item[1]))
+def _collect_discovery_tasks_from_events(events: List[Tuple[int, int, str, str]]) -> List[DiscoveryTask]:
+    ordered = sorted(events, key=lambda item: (item[0], item[1]))
     tasks: List[DiscoveryTask] = []
     pending_task: Optional[str] = None
-    for _, _, kind, body in events:
+    for _, _, kind, body in ordered:
         if kind == "task":
             pending_task = body
             continue
@@ -256,6 +260,39 @@ def extract_discovery_tasks(text: str) -> List[DiscoveryTask]:
         tasks.append(DiscoveryTask(task_text=pending_task or "", dirs=tuple(dirs)))
         pending_task = None
     return tasks
+
+def extract_discovery_tasks(text: str) -> List[DiscoveryTask]:
+    """1度目探索応答から(<task>, <dirs>)のペア一覧を実行順で抽出する。"""
+    if not text or not text.strip() or has_applicable_patch_in_text(text) or has_handoff_stop_signal_in_text(text):
+        return []
+
+    task_matches = list(_DISCOVERY_TASK_TAG_RE.finditer(text))
+    task_spans = [(m.start(), m.end()) for m in task_matches]
+    task_events: List[Tuple[int, int, str, str]] = [
+        (match.start(), 0, "task", match.group(1).strip())
+        for match in task_matches
+    ]
+    outer_dir_events: List[Tuple[int, int, str, str]] = []
+    inner_dir_events: List[Tuple[int, int, str, str]] = []
+    for match in _DISCOVERY_DIRS_TAG_RE.finditer(text):
+        item = (match.start(), 1, "dirs", match.group(1))
+        if any(t_start <= match.start() < t_end for t_start, t_end in task_spans):
+            inner_dir_events.append(item)
+        else:
+            outer_dir_events.append(item)
+
+    if outer_dir_events:
+        tasks = _collect_discovery_tasks_from_events(task_events + outer_dir_events)
+        if tasks:
+            return tasks
+    # <task>外に有効な<dirs>が無い場合のみ、<task>内に誤配置された非ダミー<dirs>を救済抽出する
+    if inner_dir_events:
+        return _collect_discovery_tasks_from_events(task_events + inner_dir_events)
+    return []
+
+def has_valid_discovery_dirs_in_text(text: str) -> bool:
+    """応答テキスト内に有効な<dirs>...</dirs>指定が含まれるか判定する。"""
+    return bool(extract_discovery_tasks(text))
 
 def extract_discovery_directives(text: str) -> Optional[Tuple[str, List[str]]]:
     """1度目探索応答から整理済みタスク(<task>)と対象ディレクトリ/ファイル群(<dirs>)を抽出する。"""
@@ -328,7 +365,7 @@ def format_discovery_handoff_text(
             "他タスクの範囲には手を付けず、他タスク用ファイルの `aiskel c` 要求やパッチ出力も行わないでください。",
             "コード詳細が不足している場合は、まず本タスク対象に限定した 1 行の `aiskel c` コードブロックを出力して取得し、取得後の同一タブ内で続けて実装パッチを出力してください。",
             "実装・修正を行う場合は、調査結果や方針解説のみで応答を終えず、必ず `aiskel a` 準拠の完全なパッチコードブロック（`ファイルパス: ...`・`<<<< ==== >>>>` / `移動:` / `削除:`・`<commit>...</commit>`）を出力してください。",
-            f"精査の結果、本タスクでファイル変更が一切不要と確定した場合に限り、ダミーや不完全なコードブロックは出力せず、変更不要である根拠と確認済み箇所を簡潔に報告した上で、応答の最末尾（コードブロック外の単独行）に `{PATCH_HANDOFF_STOP_SIGNAL}` を出力してください。",
+            f"精査の結果、本タスクでファイル変更が一切不要と確定した場合に限り、ダミーや不完全なコードブロックは出力せず、変更不要である根拠と確認済み箇所を簡潔に報告した上で、空行を挟んで応答の最末尾（コードブロック外の単独行）に `{NO_OUTPUT_STOP_SIGNAL}`（または `{PATCH_HANDOFF_STOP_SIGNAL}`）を出力してください。",
         ]
         if task_plan_lines:
             plan_lines.append("")

@@ -21,7 +21,7 @@ from .aistudio_handoff.text import (
     format_discovery_handoff_text,
 )
 from .aistudio_handoff.types import HandoffKind
-from .aistudio_prompts import PromptPattern, load_prompt_for_pattern
+from .aistudio_prompts import NO_OUTPUT_STOP_SIGNAL, PromptPattern, load_prompt_for_pattern
 from .scope_builder import build_scoped_bundle_text
 
 def handle_discovery_handoff(
@@ -75,7 +75,8 @@ def handle_discovery_handoff(
                 "=== 指定ディレクトリ解決エラー ===\n"
                 f"1度目の応答の `<dirs>` で指定されたパスがプロジェクト内に存在しませんでした: {missing_list}\n"
                 "先の `<ai_directory_index>` に記載された正確なディレクトリパスまたはファイルパスのみを指定し、"
-                "`<task>...</task>` と `<dirs>...</dirs>` を再出力してください。"
+                "`<task>...</task>` と `<dirs>...</dirs>` を再出力してください。\n"
+                f"もし探索・変更が一切不要と判明した場合は、`<task>`/`<dirs>` を出力せず空行を挟んで最末尾の単独行に `{NO_OUTPUT_STOP_SIGNAL}` を出力してください。"
             )
             return int(HTTPStatus.OK), {
                 "ok": True,

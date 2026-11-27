@@ -23,8 +23,10 @@ from .aistudio_prompt_loader import (
     _unescape_prompt_tokens,
 )
 from .aistudio_prompt_rules import (
+    NO_OUTPUT_STOP_SIGNAL,
     PATCH_HANDOFF_STOP_SIGNAL,
     PromptPattern,
+    STOP_SIGNALS,
     _BUILTIN_REVIEW_BASE_RULES,
     _COMMIT_CLOSE,
     _COMMIT_OPEN,
@@ -114,6 +116,7 @@ def build_patch_review_prompt(
         review_template,
         {
             "{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL,
+            "{{DONE_SIGNAL}}": NO_OUTPUT_STOP_SIGNAL,
             "{{BASE_SECTION}}": base_section,
             "{{BASE_RULES}}": base_rules,
         },
@@ -172,9 +175,13 @@ def load_prompt_for_pattern(project_root: Path, pattern: Union[PromptPattern, st
         if custom_discovery is None:
             custom_discovery = _load_project_sections(resolved).get(PromptPattern.DISCOVERY.value)
         if custom_discovery is not None:
+            replacements = {
+                "{{STOP_SIGNAL}}": PATCH_HANDOFF_STOP_SIGNAL,
+                "{{DONE_SIGNAL}}": NO_OUTPUT_STOP_SIGNAL,
+            }
             if "{{BASE_RULES}}" in custom_discovery:
-                return _render_template(custom_discovery, {"{{BASE_RULES}}": load_default_prompt(resolved)})
-            return custom_discovery
+                replacements["{{BASE_RULES}}"] = load_default_prompt(resolved)
+            return _render_template(custom_discovery, replacements)
         return _load_builtin_sections()["discovery"]
 
     raise ValueError(f"未対応のプロンプトパターンです: {pattern}")

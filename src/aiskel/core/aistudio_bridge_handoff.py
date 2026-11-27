@@ -303,6 +303,27 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             dedup_key=discovery_dedup_key,
         )
 
+    if payload.get("discovery_mode") is True and stop_requested and not has_patch:
+        if req_tab_id and hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(
+            f"\n[{timestamp}] ✅ 1度目探索の終了合図を検知 -> タスク分割を行わず正常終了しました",
+            flush=True,
+        )
+        return int(HTTPStatus.OK), {
+            "ok": True,
+            "skipped": True,
+            "discovery_stopped": True,
+            "stop_signal_detected": True,
+            "has_patch": False,
+            "has_target_patch": False,
+            "limit_reached": False,
+            "apply_attempted": False,
+            "applied": False,
+            "message": "終了合図を検知したため1度目探索を終了しました",
+        }
+
     if not has_patch and not stop_requested:
         return int(HTTPStatus.BAD_REQUEST), {
             "ok": False,

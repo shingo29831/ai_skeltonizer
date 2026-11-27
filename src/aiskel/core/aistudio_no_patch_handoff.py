@@ -14,7 +14,7 @@ from .aistudio_handoff.text import (
     has_handoff_stop_signal_in_text,
 )
 from .aistudio_handoff.types import HandoffKind
-from .aistudio_prompts import PATCH_HANDOFF_STOP_SIGNAL
+from .aistudio_prompts import NO_OUTPUT_STOP_SIGNAL, PATCH_HANDOFF_STOP_SIGNAL
 
 DEFAULT_NO_PATCH_MAX_RETRIES = 2
 MAX_NO_PATCH_MAX_RETRIES = 5
@@ -85,7 +85,8 @@ def _build_no_patch_retry_report(
             "- 修正パッチ（`<<<<`・`====`・`>>>>`）や `aiskel c` コマンドは出力せず、"
             "先の `<ai_directory_index>` に記載された実在ディレクトリ・ファイルパスを指定して "
             "`<task>...</task>` と `<dirs>...</dirs>` の組を出力してください。\n"
-            "- `...` や `path/to/dir1` などのダミーパスは使用しないでください。"
+            "- `...` や `path/to/dir1` などのダミーパスは使用しないでください。\n"
+            f"- 対象なし・変更不要・質問のみで `<dirs>` を出力せず終了する場合は、空行を挟んで最末尾の単独行に `{NO_OUTPUT_STOP_SIGNAL}` を出力してください。"
         )
     task_hint = ""
     if queue is not None:
@@ -127,15 +128,15 @@ def _build_no_patch_retry_report(
             "- 変更を適用する場合は、通常の解説用コードではなく `aiskel a` 準拠のパッチブロックを出力してください。\n"
             f"- 調査のみ・修正不要で変更が一切ない場合のみ、コードブロック外の単独行に `{PATCH_HANDOFF_STOP_SIGNAL}` を出力してください。"
         )
-    return (
-        f"=== コードブロック／コマンド未出力エラー{task_hint} ===\n"
-        "推論結果にコードブロック・`aiskel c` コマンド・適用可能パッチのいずれも出力されなかったため、"
-        "`aiskel a` を実行できず次の処理へ進めませんでした。\n"
-        "以下のいずれかを必ず出力してください。\n"
-        "1. 追加ファイル確認が必要な場合: コードブロック内に `aiskel c ...` コマンド\n"
-        f"2. 実装・修正を行う場合: コードブロック内に {patch_format_note}\n"
-        f"3. このタスクでコード変更が一切不要な場合のみ: コードブロック外の単独行に `{PATCH_HANDOFF_STOP_SIGNAL}`"
-    )
+        return (
+            f"=== コードブロック／コマンド未出力エラー{task_hint} ===\n"
+            "推論結果にコードブロック・`aiskel c` コマンド・適用可能パッチのいずれも出力されなかったため、"
+            "`aiskel a` を実行できず次の処理へ進めませんでした。\n"
+            "以下のいずれかを必ず出力してください。\n"
+            "1. 追加ファイル確認が必要な場合: コードブロック内に `aiskel c ...` コマンド\n"
+            f"2. 実装・修正を行う場合: コードブロック内に {patch_format_note}\n"
+            f"3. このタスクでコード変更が一切不要、または確認のみで終了する場合のみ: 空行を挟んでコードブロック外の最末尾単独行に `{NO_OUTPUT_STOP_SIGNAL}`（または `{PATCH_HANDOFF_STOP_SIGNAL}`）"
+        )
 
 def _clear_tab_task_state(bridge: Any, req_tab_id: str) -> None:
     if not req_tab_id:
@@ -266,6 +267,30 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
             and (not config_infer_target)
             and (not is_first_stage_discovery)
         )
+
+        if is_first_stage_discovery and stop_signal_detected:
+            # 1度目探索が終了サインで完結した場合は既存キューや旧パッチへ干渉せず正常終了させる
+            if req_tab_id and hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+                bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+            if dedup_key:
+                bridge._recent_keys.append(dedup_key)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(
+                f"\n[{timestamp}] ✅ 1度目探索の終了合図を検知 -> タスク分割を行わず正常終了しました",
+                flush=True,
+            )
+            return int(HTTPStatus.OK), {
+                "ok": True,
+                "action": "discovery_stopped",
+                "skipped": True,
+                "should_retry": False,
+                "exhausted": False,
+                "discovery_mode": True,
+                "discovery_stopped": True,
+                "stop_signal_detected": True,
+                "has_queue": has_queue,
+                "message": "終了合図を検知したため1度目探索を終了しました",
+            }
 
         if effective_mode in ("no_change", "skip"):
             if effective_mode == "no_change" and pending_patch:

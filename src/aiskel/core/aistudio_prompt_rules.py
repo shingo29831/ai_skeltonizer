@@ -9,6 +9,8 @@ _D_END = ">" * 4
 _COMMIT_OPEN = "<" + "commit>"
 _COMMIT_CLOSE = "</" + "commit>"
 PATCH_HANDOFF_STOP_SIGNAL = "[AISKEL-NO-DEFECTS]"
+NO_OUTPUT_STOP_SIGNAL = "[AISKEL-DONE]"
+STOP_SIGNALS: Tuple[str, ...] = (PATCH_HANDOFF_STOP_SIGNAL, NO_OUTPUT_STOP_SIGNAL)
 
 _OUTPUT_FLOW_SECTION_RE = re.compile(
     r"^(?P<indent>[ \t]*)2\.[ \t]*コード修正・出力フロー[^\n]*\n[\s\S]*?(?=^(?P=indent)3\.[ \t]|\Z)",
@@ -69,7 +71,7 @@ _DEFAULT_OUTPUT_RULES = f"""2. コード修正・出力フロー（トークン�
   - パッチ提示時: 「原因と根本解決策（箇条書き各1〜2行）」＋ パッチブロックのみ出力。
 - 【コードブロック出力必須（解説完結禁止）】:
   - 実装・修正が必要なタスクで、調査報告・設計提案・手順説明などのテキストのみ（コードブロックなし）で応答を終えてはならない。情報不足時は `aiskel c` コードブロック、変更確定時は必ず `aiskel a` 準拠の完全なパッチコードブロックを出力せよ。
-  - 精査の結果、本当にコード変更が一切不要と確定した場合に限り、ダミーパッチや不正なコードブロックは出力せず、変更不要である根拠と確認対象を簡潔に報告した上で、応答の最末尾（コードブロック外の単独行）に `{PATCH_HANDOFF_STOP_SIGNAL}` を出力せよ。
+  - 精査の結果、本当にコード変更が一切不要と確定した場合や、確認・質問のみでコードブロックを出力せず応答を終了する場合は、ダミーパッチや不正なコードブロックは出力せず、その根拠または質問内容を簡潔に報告した上で、空行を挟んで応答の最末尾（コードブロック外の単独行）に `{NO_OUTPUT_STOP_SIGNAL}`（または `{PATCH_HANDOFF_STOP_SIGNAL}`）を出力せよ。
 - 自動適用フォーマット (aiskel a 準拠):
   - コードブロック内部にファイル名コメント記述禁止（`ファイルパス: ...` および `{_COMMIT_OPEN}...{_COMMIT_CLOSE}` のみ）。
   - ネスト崩れ防止のため外枠バッククォートの階層化を徹底せよ。
