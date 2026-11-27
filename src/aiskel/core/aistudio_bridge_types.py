@@ -1,7 +1,9 @@
 """Module: @role: ローカルHTTPブリッジで共有する定数・実行結果モデル・ジョブ定義・Origin検証および入出力ヘルパーを提供する。"""
 import io
 import threading
+import time
 from dataclasses import dataclass, field
+from enum import Enum
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, TextIO, Tuple
 from urllib.parse import urlsplit
@@ -11,8 +13,46 @@ MAX_DEDUP_HISTORY = 100
 EXECUTION_WAIT_TIMEOUT_SEC = 120.0
 SOCKET_TIMEOUT_SEC = 10.0
 MAX_ERROR_DETAIL_CHARS = 240
+MAX_COMMAND_KIND_CHARS = 64
+MAX_RUNNING_COMMAND_CHARS = 240
 MAX_PATCH_HANDOFF_MAX_TABS = 999
 ALLOWED_EXTENSION_SCHEMES = frozenset({"chrome-extension", "moz-extension", "edge-extension"})
+
+class BridgeCommandKind(str, Enum):
+    """ブリッジ上で実行されるコマンド種別を表す列挙型。"""
+
+    EXECUTE = "execute"
+    RUN_COMMAND = "run_command"
+    AUTO_APPLY = "auto_apply"
+    AUTO_CHECK = "auto_check"
+
+@dataclass(frozen=True)
+class RunningCommandInfo:
+    """現在実行中のブリッジコマンド情報を保持する。"""
+
+    execution_id: str
+    kind: str
+    command: str
+    tab_id: str = ""
+    started_at: str = ""
+    started_at_ms: int = 0
+    started_monotonic: Optional[float] = None
+
+    def to_dict(self, now_monotonic: Optional[float] = None) -> Dict[str, object]:
+        if self.started_monotonic is None:
+            elapsed_ms = 0
+        else:
+            current_mono = time.monotonic() if now_monotonic is None else now_monotonic
+            elapsed_ms = max(0, int((current_mono - self.started_monotonic) * 1000))
+        return {
+            "execution_id": self.execution_id,
+            "kind": self.kind,
+            "command": self.command,
+            "tab_id": self.tab_id,
+            "started_at": self.started_at,
+            "started_at_ms": self.started_at_ms,
+            "elapsed_ms": elapsed_ms,
+        }
 
 _DICT_RESPONSE_ACTIONS = frozenset(
     {

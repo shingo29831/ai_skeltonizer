@@ -22,7 +22,9 @@ from .aistudio_bridge_shell import (
     _truncate_shell_output,
     handle_run_shell_command,
 )
+from .aistudio_bridge_state import bridge_command_scope
 from .aistudio_bridge_types import (
+    BridgeCommandKind,
     BridgeExecutionResult,
     TeeTextIO,
     extract_error_detail,
@@ -123,28 +125,34 @@ def handle_execute_command(bridge: Any, payload: Dict[str, object]) -> Tuple[int
         system_exit_note = ""
         exec_pasted = False
         exec_paste_reason = ""
-        with contextlib.redirect_stderr(tee_stderr):
-            try:
-                if bridge.structured_command_runner is not None:
-                    raw_res = bridge.structured_command_runner(
-                        argv,
-                        focus_browser=focus_browser,
-                        allowed_title_keywords=target_title_keywords,
-                    )
-                else:
-                    raw_res = bridge.command_runner(argv)
+        with bridge_command_scope(
+            bridge,
+            kind=BridgeCommandKind.EXECUTE.value,
+            command=display_cmd,
+            tab_id=req_tab_id,
+        ):
+            with contextlib.redirect_stderr(tee_stderr):
+                try:
+                    if bridge.structured_command_runner is not None:
+                        raw_res = bridge.structured_command_runner(
+                            argv,
+                            focus_browser=focus_browser,
+                            allowed_title_keywords=target_title_keywords,
+                        )
+                    else:
+                        raw_res = bridge.command_runner(argv)
 
-                if isinstance(raw_res, int):
-                    exit_code = int(raw_res)
-                else:
-                    exit_code = int(getattr(raw_res, "exit_code", 1))
-                    exec_pasted = bool(getattr(raw_res, "pasted", False))
-                    exec_paste_reason = str(getattr(raw_res, "paste_reason", "") or "")
-            except SystemExit as e:
-                # argparse等のSystemExitでブリッジワーカーループが崩壊するのを防止
-                exit_code = normalize_system_exit_code(e)
-                if isinstance(e.code, str) and e.code.strip():
-                    system_exit_note = e.code.strip()
+                    if isinstance(raw_res, int):
+                        exit_code = int(raw_res)
+                    else:
+                        exit_code = int(getattr(raw_res, "exit_code", 1))
+                        exec_pasted = bool(getattr(raw_res, "pasted", False))
+                        exec_paste_reason = str(getattr(raw_res, "paste_reason", "") or "")
+                except SystemExit as e:
+                    # argparse等のSystemExitでブリッジワーカーループが崩壊するのを防止
+                    exit_code = normalize_system_exit_code(e)
+                    if isinstance(e.code, str) and e.code.strip():
+                        system_exit_note = e.code.strip()
 
         if exit_code == 0:
             if dedup_key:

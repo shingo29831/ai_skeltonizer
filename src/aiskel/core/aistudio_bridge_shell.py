@@ -12,7 +12,8 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO, Tuple
 
-from .aistudio_bridge_state import sanitize_console_text
+from .aistudio_bridge_state import bridge_command_scope, sanitize_console_text
+from .aistudio_bridge_types import BridgeCommandKind
 
 DEFAULT_SHELL_COMMAND_TIMEOUT_SEC = 60
 MAX_SHELL_COMMAND_TIMEOUT_SEC = 110
@@ -275,115 +276,124 @@ def handle_run_shell_command(bridge: Any, payload: Dict[str, object]) -> Tuple[i
         safe_cmd_log = sanitize_console_text(command, 200)
         _safe_print_line(f"\n[{timestamp}] 💻 拡張機能からコマンド実行 ({exec_cwd}): {safe_cmd_log}")
 
+        raw_tab_id = payload.get("tab_id")
+        req_tab_id = raw_tab_id.strip() if isinstance(raw_tab_id, str) else ""
+
         proc: Any = None
         reader_thread: Optional[threading.Thread] = None
-        try:
-            popen_kwargs: Dict[str, Any] = {
-                "shell": True,
-                "cwd": exec_cwd,
-                "stdin": subprocess.DEVNULL,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.STDOUT,
-                "env": env,
-            }
-            if sys.platform == "win32":
-                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-            else:
-                popen_kwargs["start_new_session"] = True
-
-            proc = subprocess.Popen(command, **popen_kwargs)
-            if callable(register_proc):
-                register_proc(proc)
-            capture: Dict[str, Any] = {
-                "head": bytearray(),
-                "tail": bytearray(),
-                "byte_truncated": False,
-                "lock": threading.Lock(),
-            }
-            reader_thread = threading.Thread(
-                target=_drain_process_stdout,
-                args=(proc.stdout, capture),
-                daemon=True,
-            )
-            reader_thread.start()
-
-            timed_out, aborted = _wait_for_shell_process(bridge, proc, stop_event, timeout_sec)
-
+        with bridge_command_scope(
+            bridge,
+            kind=BridgeCommandKind.RUN_COMMAND.value,
+            command=command,
+            tab_id=req_tab_id,
+        ):
             try:
-                proc.wait(timeout=2.0)
-            except Exception:
-                pass
-            reader_thread.join(timeout=1.0)
+                popen_kwargs: Dict[str, Any] = {
+                    "shell": True,
+                    "cwd": exec_cwd,
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "env": env,
+                }
+                if sys.platform == "win32":
+                    popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                else:
+                    popen_kwargs["start_new_session"] = True
 
-            output_text, truncated = _format_captured_output(capture)
+                proc = subprocess.Popen(command, **popen_kwargs)
+                if callable(register_proc):
+                    register_proc(proc)
+                capture: Dict[str, Any] = {
+                    "head": bytearray(),
+                    "tail": bytearray(),
+                    "byte_truncated": False,
+                    "lock": threading.Lock(),
+                }
+                reader_thread = threading.Thread(
+                    target=_drain_process_stdout,
+                    args=(proc.stdout, capture),
+                    daemon=True,
+                )
+                reader_thread.start()
 
-            if aborted:
-                return _build_shutdown_shell_response(command, exec_cwd, output_text=output_text, truncated=truncated)
+                timed_out, aborted = _wait_for_shell_process(bridge, proc, stop_event, timeout_sec)
 
-            if timed_out:
-                status_msg = f"コマンド実行がタイムアウトしました ({timeout_sec}秒)"
-                _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] ✖ {status_msg}", stream=sys.stderr)
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                reader_thread.join(timeout=1.0)
+
+                output_text, truncated = _format_captured_output(capture)
+
+                if aborted:
+                    return _build_shutdown_shell_response(command, exec_cwd, output_text=output_text, truncated=truncated)
+
+                if timed_out:
+                    status_msg = f"コマンド実行がタイムアウトしました ({timeout_sec}秒)"
+                    _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] ✖ {status_msg}", stream=sys.stderr)
+                    return int(HTTPStatus.OK), {
+                        "ok": False,
+                        "exit_code": -1,
+                        "command": command,
+                        "cwd": str(exec_cwd),
+                        "output": output_text,
+                        "truncated": truncated,
+                        "timed_out": True,
+                        "message": status_msg,
+                    }
+
+                exit_code = int(proc.returncode) if proc.returncode is not None else -1
+                if output_text.strip():
+                    preview = output_text if len(output_text) <= 4000 else output_text[-4000:]
+                    _safe_write_console(preview, flush=False)
+                    if not preview.endswith("\n"):
+                        _safe_write_console("\n", flush=False)
+                    sys.stdout.flush()
+                status_msg = (
+                    "コマンドを実行しました (終了コード 0)"
+                    if exit_code == 0
+                    else f"コマンドが終了コード {exit_code} で終了しました"
+                )
+                _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] {status_msg}")
                 return int(HTTPStatus.OK), {
-                    "ok": False,
-                    "exit_code": -1,
+                    "ok": exit_code == 0,
+                    "exit_code": exit_code,
                     "command": command,
                     "cwd": str(exec_cwd),
                     "output": output_text,
                     "truncated": truncated,
-                    "timed_out": True,
+                    "timed_out": False,
                     "message": status_msg,
                 }
-
-            exit_code = int(proc.returncode) if proc.returncode is not None else -1
-            if output_text.strip():
-                preview = output_text if len(output_text) <= 4000 else output_text[-4000:]
-                _safe_write_console(preview, flush=False)
-                if not preview.endswith("\n"):
-                    _safe_write_console("\n", flush=False)
-                sys.stdout.flush()
-            status_msg = (
-                "コマンドを実行しました (終了コード 0)"
-                if exit_code == 0
-                else f"コマンドが終了コード {exit_code} で終了しました"
-            )
-            _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] {status_msg}")
-            return int(HTTPStatus.OK), {
-                "ok": exit_code == 0,
-                "exit_code": exit_code,
-                "command": command,
-                "cwd": str(exec_cwd),
-                "output": output_text,
-                "truncated": truncated,
-                "timed_out": False,
-                "message": status_msg,
-            }
-        except Exception as exc:
-            status_msg = f"コマンドの実行に失敗しました: {exc}"
-            _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] ✖ {status_msg}", stream=sys.stderr)
-            return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
-                "ok": False,
-                "exit_code": -1,
-                "command": command,
-                "cwd": str(exec_cwd),
-                "output": "",
-                "truncated": False,
-                "timed_out": False,
-                "message": status_msg,
-            }
-        finally:
-            if proc is not None:
-                if proc.poll() is None:
-                    _terminate_process_tree(proc)
-                    try:
-                        proc.wait(timeout=1.0)
-                    except Exception:
-                        pass
-                if callable(unregister_proc):
-                    unregister_proc(proc)
-                if proc.stdout is not None:
-                    try:
-                        proc.stdout.close()
-                    except Exception:
-                        pass
-            if reader_thread is not None and reader_thread.is_alive():
-                reader_thread.join(timeout=0.5)
+            except Exception as exc:
+                status_msg = f"コマンドの実行に失敗しました: {exc}"
+                _safe_print_line(f"[{datetime.now().strftime('%H:%M:%S')}] ✖ {status_msg}", stream=sys.stderr)
+                return int(HTTPStatus.INTERNAL_SERVER_ERROR), {
+                    "ok": False,
+                    "exit_code": -1,
+                    "command": command,
+                    "cwd": str(exec_cwd),
+                    "output": "",
+                    "truncated": False,
+                    "timed_out": False,
+                    "message": status_msg,
+                }
+            finally:
+                if proc is not None:
+                    if proc.poll() is None:
+                        _terminate_process_tree(proc)
+                        try:
+                            proc.wait(timeout=1.0)
+                        except Exception:
+                            pass
+                    if callable(unregister_proc):
+                        unregister_proc(proc)
+                    if proc.stdout is not None:
+                        try:
+                            proc.stdout.close()
+                        except Exception:
+                            pass
+                if reader_thread is not None and reader_thread.is_alive():
+                    reader_thread.join(timeout=0.5)

@@ -8,7 +8,12 @@ from urllib.parse import urlsplit
 from ..config import DEFAULT_PATCH_HANDOFF_MAX_TABS, load_patch_handoff_max_tabs_from_meta
 from .aistudio_auto_apply import AutoApplyOutcome, execute_auto_check_patch_detailed
 from .aistudio_auto_organize import validate_patch_against_rename_policy
-from .aistudio_bridge_types import MAX_ERROR_DETAIL_CHARS, MAX_PATCH_HANDOFF_MAX_TABS
+from .aistudio_bridge_state import bridge_command_scope
+from .aistudio_bridge_types import (
+    MAX_ERROR_DETAIL_CHARS,
+    MAX_PATCH_HANDOFF_MAX_TABS,
+    BridgeCommandKind,
+)
 from .aistudio_config_infer import resolve_target_config_file, validate_config_infer_patch
 from .aistudio_discovery_handoff import (
     advance_next_discovery_task_handoff,
@@ -149,17 +154,23 @@ def run_terminal_auto_apply(
         if callable(begin_fn):
             begin_fn()
         try:
-            with bridge_terminal_apply_scope():
-                if config_infer_target:
-                    outcome = bridge._execute_auto_apply_detailed(
-                        target_patch,
-                        no_test=True,
-                        no_static_analysis=True,
-                        allow_config_write=True,
-                        config_target=config_infer_target,
-                    )
-                else:
-                    outcome = bridge._execute_auto_apply_detailed(target_patch)
+            with bridge_command_scope(
+                bridge,
+                kind=BridgeCommandKind.AUTO_APPLY.value,
+                command="aiskel a",
+                tab_id=req_tab_id,
+            ):
+                with bridge_terminal_apply_scope():
+                    if config_infer_target:
+                        outcome = bridge._execute_auto_apply_detailed(
+                            target_patch,
+                            no_test=True,
+                            no_static_analysis=True,
+                            allow_config_write=True,
+                            config_target=config_infer_target,
+                        )
+                    else:
+                        outcome = bridge._execute_auto_apply_detailed(target_patch)
         finally:
             if callable(end_fn):
                 end_fn()
@@ -174,8 +185,14 @@ def run_terminal_auto_apply(
         if callable(begin_fn):
             begin_fn()
         try:
-            with bridge_terminal_apply_scope():
-                apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
+            with bridge_command_scope(
+                bridge,
+                kind=BridgeCommandKind.AUTO_APPLY.value,
+                command="aiskel a",
+                tab_id=req_tab_id,
+            ):
+                with bridge_terminal_apply_scope():
+                    apply_exit_code, apply_message = bridge._execute_auto_apply(target_patch)
         finally:
             if callable(end_fn):
                 end_fn()
@@ -487,26 +504,38 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         if hasattr(bridge, "_execute_auto_check"):
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
-            check_outcome = (
-                bridge._execute_auto_check(
-                    response_text,
-                    allow_config_write=True,
-                    config_target=config_infer_target,
+            with bridge_command_scope(
+                bridge,
+                kind=BridgeCommandKind.AUTO_CHECK.value,
+                command="aiskel a --check",
+                tab_id=req_tab_id,
+            ):
+                check_outcome = (
+                    bridge._execute_auto_check(
+                        response_text,
+                        allow_config_write=True,
+                        config_target=config_infer_target,
+                    )
+                    if config_infer_target
+                    else bridge._execute_auto_check(response_text)
                 )
-                if config_infer_target
-                else bridge._execute_auto_check(response_text)
-            )
         elif getattr(bridge, "command_runner", None) is not None:
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"\n[{timestamp}] 🔍 パッチ出力(<<<< ==== >>>>)を検知 -> aiskel a --check を実行します", flush=True)
-            check_outcome = execute_auto_check_patch_detailed(
-                project_root=bridge.project_root,
-                patch_text=response_text,
-                command_runner=bridge.command_runner,
-                max_error_chars=MAX_ERROR_DETAIL_CHARS,
-                allow_config_write=bool(config_infer_target),
-                config_target=config_infer_target,
-            )
+            with bridge_command_scope(
+                bridge,
+                kind=BridgeCommandKind.AUTO_CHECK.value,
+                command="aiskel a --check",
+                tab_id=req_tab_id,
+            ):
+                check_outcome = execute_auto_check_patch_detailed(
+                    project_root=bridge.project_root,
+                    patch_text=response_text,
+                    command_runner=bridge.command_runner,
+                    max_error_chars=MAX_ERROR_DETAIL_CHARS,
+                    allow_config_write=bool(config_infer_target),
+                    config_target=config_infer_target,
+                )
 
         check_attempted = check_outcome is not None
         check_passed = True if check_outcome is None else (check_outcome.exit_code == 0)

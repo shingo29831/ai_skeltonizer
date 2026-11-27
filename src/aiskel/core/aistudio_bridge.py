@@ -294,6 +294,18 @@ class AiskelBridgeServer:
         """aiskel同期を実行し、設定ファイル推論タスクを新しいチャットタブへ引き継ぐレコードを作成する。"""
         return handle_config_handoff(self, payload)
 
+    def begin_command(self, kind: str, command: str, tab_id: str = "") -> str:
+        """実行中コマンドの開始を登録し、実行IDを返す。"""
+        return self._binding_manager.begin_command(kind=kind, command=command, tab_id=tab_id)
+
+    def end_command(self, execution_id: str) -> bool:
+        """指定された実行IDのコマンド実行中状態を解除する。"""
+        return self._binding_manager.end_command(execution_id)
+
+    def get_execution_status(self) -> Dict[str, object]:
+        """現在のコマンド実行中状態を返す。"""
+        return self._binding_manager.get_execution_status()
+
     def get_binding_info(self) -> Dict[str, object]:
         """現在のブラウザタブ紐づけ状態を返す。"""
         return self._enrich_binding_info(self._binding_manager.get_info())

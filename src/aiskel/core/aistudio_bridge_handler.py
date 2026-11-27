@@ -75,6 +75,30 @@ def build_bridge_request_handler_class(
             raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
             self._send_bytes(status_code, raw, "application/json; charset=utf-8", include_cors=True)
 
+        def _get_execution_status(self) -> Dict[str, object]:
+            getter = getattr(bridge, "get_execution_status", None)
+            if callable(getter):
+                status = getter()
+                if isinstance(status, dict):
+                    return status
+            binding_manager = getattr(bridge, "_binding_manager", None)
+            bm_getter = getattr(binding_manager, "get_execution_status", None)
+            if callable(bm_getter):
+                status = bm_getter()
+                if isinstance(status, dict):
+                    return status
+            return {
+                "running": False,
+                "count": 0,
+                "kind": None,
+                "command": "",
+                "tab_id": "",
+                "started_at": None,
+                "started_at_ms": None,
+                "elapsed_ms": 0,
+                "commands": [],
+            }
+
         def _verify_access(self) -> bool:
             origin = self.headers.get("Origin")
             token_verified = False
@@ -165,6 +189,7 @@ def build_bridge_request_handler_class(
                             "message": "aiskel AI Studio ローカルブリッジは稼働中です。https://aistudio.google.com/ から拡張機能経由で利用してください。",
                             "endpoints": {
                                 "health": "/api/health",
+                                "status": "/api/status",
                                 "binding": "/api/binding",
                                 "bind": "/api/bind",
                                 "unbind": "/api/unbind",
@@ -201,6 +226,20 @@ def build_bridge_request_handler_class(
                     return
                 self._send_json(int(HTTPStatus.OK), bridge.get_binding_info())
                 return
+            if req_path == "/api/status":
+                if not self._verify_access():
+                    return
+                exec_status = self._get_execution_status()
+                self._send_json(
+                    int(HTTPStatus.OK),
+                    {
+                        **exec_status,
+                        "ok": True,
+                        "command_running": bool(exec_status.get("running")),
+                        "running_command": exec_status,
+                    },
+                )
+                return
             if req_path == "/api/prompt":
                 if not self._verify_access():
                     return
@@ -219,6 +258,8 @@ def build_bridge_request_handler_class(
             if not self._verify_access():
                 return
             binding_info = bridge.get_binding_info()
+            embedded_status = binding_info.get("running_command") if isinstance(binding_info, dict) else None
+            exec_status = embedded_status if isinstance(embedded_status, dict) else self._get_execution_status()
             self._send_json(
                 int(HTTPStatus.OK),
                 {
@@ -226,6 +267,8 @@ def build_bridge_request_handler_class(
                     "project_root": str(bridge.project_root),
                     "command_cwd": str(getattr(bridge, "command_cwd", bridge.project_root)),
                     "project_name": bridge.project_root.name,
+                    "command_running": bool(exec_status.get("running")),
+                    "running_command": exec_status,
                     "binding": binding_info,
                 },
             )
