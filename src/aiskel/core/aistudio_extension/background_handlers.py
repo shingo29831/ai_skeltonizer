@@ -17,6 +17,7 @@ def build_background_binding_handlers_js() -> str:
         "            if (!res.reachable) {\n"
         "              suppressedAutoBindTabIds.clear();\n"
         "            }\n"
+        "            syncBridgeExecutionState(res.reachable, res.connected ? res.data : null);\n"
         "            res.data = enrichBindingData(res.data, tabIdStr, res.connected);\n"
         "            if (res.connected) {\n"
         "              res.data.is_tab_active = Boolean(tab.active);\n"
@@ -43,6 +44,7 @@ def build_background_binding_handlers_js() -> str:
         "          if (!res.reachable) {\n"
         "            suppressedAutoBindTabIds.clear();\n"
         "          }\n"
+        "          syncBridgeExecutionState(res.reachable, res.connected ? res.data : null);\n"
         "          // 自動紐づけ通信中に明示解除が割り込んだ場合は即座にロールバックして再紐づけを防止\n"
         "          if (isAutoBind && res.connected && res.data && res.data.bound && res.data.tab_id === tabIdStr && suppressedAutoBindTabIds.has(tabIdStr)) {\n"
         "            return bridgeRequest('/api/unbind', 'POST', { tab_id: tabIdStr })\n"
@@ -94,6 +96,7 @@ def build_background_binding_handlers_js() -> str:
         "      const body = message.force ? {} : (currentTabId ? { tab_id: currentTabId } : {});\n"
         "      bridgeRequest('/api/unbind', 'POST', body)\n"
         "        .then((res) => {\n"
+        "          syncBridgeExecutionState(res.reachable, res.connected ? res.data : null);\n"
         "          const didUnbind = Boolean(res.connected && res.data && !res.data.bound);\n"
         "          if (!res.reachable) {\n"
         "            suppressedAutoBindTabIds.clear();\n"
@@ -144,8 +147,10 @@ def build_background_binding_handlers_js() -> str:
         "      const safeTabs = Array.isArray(tabs) ? tabs : [];\n"
         "      bridgeRequest('/api/binding', 'GET')\n"
         "        .then((res) => {\n"
+        "          syncBridgeExecutionState(res.reachable, res.connected ? res.data : null);\n"
+        "          const execution = getMergedExecutionState();\n"
         "          const connected = Boolean(res.connected);\n"
-        "          const binding = connected ? (res.data || {}) : {};\n"
+        "          const binding = connected ? Object.assign({}, res.data || {}, { execution }) : {};\n"
         "          const mapped = safeTabs.map((t) => {\n"
         "            const tabIdStr = t.id != null ? formatTabId(t.id) : '';\n"
         "            return {\n"
@@ -163,10 +168,12 @@ def build_background_binding_handlers_js() -> str:
         "            status: res.status || 0,\n"
         "            error: res.error || '',\n"
         "            binding,\n"
+        "            execution,\n"
         "            tabs: mapped,\n"
         "          });\n"
         "        })\n"
         "        .catch((err) => {\n"
+        "          syncBridgeExecutionState(false, null);\n"
         "          const mapped = safeTabs.map((t) => ({\n"
         "            id: t.id,\n"
         "            tab_id: t.id != null ? formatTabId(t.id) : '',\n"
@@ -175,7 +182,7 @@ def build_background_binding_handlers_js() -> str:
         "            active: Boolean(t.active),\n"
         "            is_bound: false,\n"
         "          }));\n"
-        "          sendResponse({ reachable: false, connected: false, status: 0, error: String(err), binding: {}, tabs: mapped });\n"
+        "          sendResponse({ reachable: false, connected: false, status: 0, error: String(err), binding: {}, execution: getMergedExecutionState(), tabs: mapped });\n"
         "        });\n"
         "    });\n"
         "    return true;\n"
@@ -315,42 +322,33 @@ def build_background_handoff_handlers_js() -> str:
         "        : (message.type === 'AISKEL_CONFIG_HANDOFF' ? '/api/config/handoff' : '/api/handoff'));\n"
 
         "    const payload = Object.assign({}, message.payload || {});\n"
-
         "    const senderTabId = getSenderTabId(sender);\n"
-
         "    if (senderTabId) payload.tab_id = senderTabId;\n"
-
+        "    const finishCommand = beginLocalCommand({\n"
+        "      command: describeHandoffCommand(message.type, payload),\n"
+        "      kind: message.type.toLowerCase(),\n"
+        "      tab_id: senderTabId || '',\n"
+        "    });\n"
         "    bridgeRequest(apiPath, 'POST', payload)\n"
-
         "      .then((res) => {\n"
-
+        "        finishCommand();\n"
         "        const data = res.data || {};\n"
-
         "        const shouldOpenTab = Boolean(\n"
-
         "          res.connected &&\n"
-
         "          data.ok &&\n"
-
         "          data.handoff_id &&\n"
-
         "          (data.next_task_handoff || (!data.skipped && !data.stop_signal_detected && !payload.stop_handoff))\n"
-
         "        );\n"
-
         "        if (!shouldOpenTab) {\n"
-
         "          sendResponse(res);\n"
-
         "          return;\n"
-
         "        }\n"
-
         "        openHandoffInNewTab(data, payload.new_chat_url, sender, sendResponse);\n"
-
         "      })\n"
-
-        "      .catch((err) => sendResponse({ reachable: false, connected: false, status: 0, data: {}, error: String(err) }));\n"
+        "      .catch((err) => {\n"
+        "        finishCommand();\n"
+        "        sendResponse({ reachable: false, connected: false, status: 0, data: {}, error: String(err) });\n"
+        "      });\n"
 
         "    return true;\n"
 
