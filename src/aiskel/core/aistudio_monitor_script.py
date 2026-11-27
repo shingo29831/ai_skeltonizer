@@ -7,6 +7,7 @@ from .aistudio_handoff.script import build_patch_handoff_js
 from .aistudio_monitor_autorun_script import build_monitor_autorun_js
 from .aistudio_monitor_binding_script import build_monitor_binding_js
 from .aistudio_monitor_dom import build_monitor_dom_helpers_js
+from .aistudio_monitor_execution_script import build_monitor_execution_js
 from .aistudio_monitor_lifecycle_script import build_monitor_lifecycle_js
 from .aistudio_tab_ui_script import build_error_notice_ui_js, build_tab_binding_ui_js
 
@@ -24,6 +25,7 @@ def build_monitor_core_js(
     auto_split_js = build_auto_split_js() if binding_transport_snippet else ""
     auto_organize_js = build_auto_organize_js() if binding_transport_snippet else ""
     config_infer_js = build_config_infer_js() if binding_transport_snippet else ""
+    execution_js = build_monitor_execution_js()
     autorun_js = build_monitor_autorun_js()
     lifecycle_js = build_monitor_lifecycle_js()
     binding_js = build_monitor_binding_js()
@@ -117,6 +119,7 @@ def build_monitor_core_js(
         "  let currentRunSeq = 0;\n"
         "  const executedKeys = new Set();\n"
         "  const inFlightKeys = new Set();\n"
+        f"{execution_js}"
         f"{binding_transport_snippet}"
         f"{handoff_transport_snippet}"
         "  const hasBindingTransport = typeof bindingTransport !== 'undefined' && bindingTransport !== null;\n"
@@ -154,6 +157,11 @@ def build_monitor_core_js(
         "    autoSplitCurrentFile: '',\n"
         "    configInferActive: false,\n"
         "    configInferTargetFile: '',\n"
+        "    commandRunning: false,\n"
+        "    commandLabel: '',\n"
+        "    commandDetail: '',\n"
+        "    commandStartedAt: 0,\n"
+        "    commandCount: 0,\n"
         "  };\n"
         "  let bindingUi = null;\n"
         "  let summaryPromptInsertInFlight = false;\n"
@@ -274,9 +282,9 @@ def build_monitor_core_js(
         "    if (!isMonitoringActive()) return;\n"
         "    showErrorPanel(title, detail, copyText);\n"
         "  }\n\n"
-        "  function dispatchCommands(payload, onDone) {\n"
+        "  function dispatchCommands(payload, userOnDone) {\n"
         "    if (!isMonitoringActive()) {\n"
-        "      if (onDone) onDone(false, null);\n"
+        "      if (userOnDone) userOnDone(false, null);\n"
         "      return;\n"
         "    }\n"
         "    if (hasBindingTransport && typeof bindingTransport.getLocalTabId === 'function') {\n"
@@ -285,7 +293,26 @@ def build_monitor_core_js(
         "        payload.tab_id = localTabId;\n"
         "      }\n"
         "    }\n"
+        "    const cmds = Array.isArray(payload && payload.commands) ? payload.commands : [];\n"
+        "    const cmdLabel = cmds.length > 1 ? ('aiskel c 実行中 (' + cmds.length + '件)') : 'aiskel c 実行中';\n"
+        "    const trackId = beginTrackedCommand({\n"
+        "      kind: 'dispatch_commands',\n"
+        "      label: cmdLabel,\n"
+        "      detail: cmds.join(' ; '),\n"
+        "    });\n"
+        "    // send_snippet側のsettled変数と衝突しないよう別名フラグで完了通知を1回に制限\n"
+        "    let dispatchSettled = false;\n"
+        "    const onDone = (succeeded, responseData) => {\n"
+        "      if (dispatchSettled) return;\n"
+        "      dispatchSettled = true;\n"
+        "      endTrackedCommand(trackId);\n"
+        "      if (userOnDone) userOnDone(succeeded, responseData);\n"
+        "    };\n"
+        "    try {\n"
         f"{send_snippet}"
+        "    } catch (err) {\n"
+        "      onDone(false, { error: err && err.message ? String(err.message) : 'コマンド送信に失敗しました' });\n"
+        "    }\n"
         "  }\n\n"
         "  const hasTriggerRunTransport = " + ("true" if trigger_run_snippet else "false") + ";\n"
         "  function dispatchTriggerRun(payload, onDone) {\n"
