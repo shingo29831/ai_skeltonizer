@@ -11,6 +11,11 @@ _FORBIDDEN_SHELL_META_RE = re.compile(r"[;&|`$<>\r\n]")
 _PATCH_START_RE = re.compile(r"^\s*<{4,}(?:\s.*)?$")
 _PATCH_MID_RE = re.compile(r"^\s*={4,}(?:\s.*)?$")
 _PATCH_END_RE = re.compile(r"^\s*>{4,}(?:\s.*)?$")
+_TASK_HANDOFF_OPEN_RE = re.compile(r"<(task_handoff|aiskel_handoff)(?:\s[^>]*)?>", re.IGNORECASE)
+_TASK_HANDOFF_INLINE_RE = re.compile(
+    r"<(task_handoff|aiskel_handoff)(?:\s[^>]*)?>[\s\S]*?</\1>",
+    re.IGNORECASE,
+)
 _ALLOWED_BOOL_FLAGS = {
     "-d",
     "--deps",
@@ -51,6 +56,56 @@ def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
         i += 1
     return excluded
 
+def find_task_handoff_line_indices(
+    lines: List[str],
+    patch_indices: Optional[Set[int]] = None,
+) -> Set[int]:
+    """パッチブロック外で完結する専用引き継ぎXML行を除外対象として特定する。"""
+    excluded: Set[int] = set()
+    blocked = patch_indices or set()
+    total = len(lines)
+    i = 0
+    while i < total:
+        if i in blocked:
+            i += 1
+            continue
+        line = lines[i]
+        pos = 0
+        unclosed_tag: Optional[str] = None
+        while True:
+            match = _TASK_HANDOFF_OPEN_RE.search(line, pos)
+            if not match:
+                break
+            tag_name = match.group(1)
+            close_re = re.compile(rf"</{re.escape(tag_name)}\s*>", re.IGNORECASE)
+            close_match = close_re.search(line, match.end())
+            if close_match:
+                pos = close_match.end()
+                continue
+            unclosed_tag = tag_name
+            break
+        if unclosed_tag is None:
+            stripped = line.strip()
+            if stripped and not _TASK_HANDOFF_INLINE_RE.sub("", stripped).strip():
+                excluded.add(i)
+            i += 1
+            continue
+        close_re = re.compile(rf"</{re.escape(unclosed_tag)}\s*>", re.IGNORECASE)
+        close_idx = -1
+        for j in range(i + 1, total):
+            if j in blocked:
+                continue
+            if close_re.search(lines[j]):
+                close_idx = j
+                break
+        if close_idx != -1:
+            for k in range(i, close_idx + 1):
+                if k not in blocked:
+                    excluded.add(k)
+            i = close_idx + 1
+            continue
+        i += 1
+    return excluded
 
 def _scan_command_tokens(command_line: str, strict: bool) -> List[str]:
     """Windowsバックスラッシュを保持しつつ部分クォートと行末コメントを処理してトークン化する。"""
@@ -153,13 +208,15 @@ def extract_aiskel_copy_commands(text: str) -> List[str]:
     lines = text.splitlines()
     # 閉じ記号のない単独<<<<で後続コマンドが全無視されないよう完結ブロックのみ除外
     patch_indices = _find_valid_patch_line_indices(lines)
+    handoff_indices = find_task_handoff_line_indices(lines, patch_indices)
 
     commands: List[str] = []
     seen: Set[str] = set()
     for idx, raw_line in enumerate(lines):
-        if idx in patch_indices:
+        if idx in patch_indices or idx in handoff_indices:
             continue
-        cleaned = _PROMPT_PREFIX_RE.sub("", raw_line).strip()
+        line_without_inline_xml = _TASK_HANDOFF_INLINE_RE.sub("", raw_line)
+        cleaned = _PROMPT_PREFIX_RE.sub("", line_without_inline_xml).strip()
         if not cleaned or cleaned.startswith("#"):
             continue
         # オプション直後に#コメントのみ続くダミー行が他コマンドを巻き添え失敗させないよう除外
@@ -312,3 +369,67 @@ def build_safe_copy_argv(
     argv.extend(merged_specs)
     display_parts.extend(_format_display_token(spec) for spec in merged_specs)
     return argv, " ".join(display_parts)
+
+def parse_aiskel_copy_placeholder_args(
+    raw_args: str,
+    project_root: Path,
+) -> Tuple[List[str], bool, Optional[int]]:
+    """引き継ぎXML内のaiskel_cプレースホルダー引数を検証・解析し、(specs, with_deps, max_chars)を返す。"""
+    normalized = " ".join((raw_args or "").splitlines()).strip()
+    if not normalized:
+        raise CommandValidationError("aiskel_c プレースホルダーの指定が空です")
+
+    raw_tokens = _scan_command_tokens(normalized, strict=False)
+    if not raw_tokens:
+        raise CommandValidationError(f"対象指定が不足しています: {normalized}")
+
+    tokens: List[str] = []
+    for raw_tok in raw_tokens:
+        # Markdown装飾由来の外周バッククォートのみ許容し、危険なシェル記号は厳密拒否する
+        stripped_tok = raw_tok.strip("`")
+        if not stripped_tok:
+            continue
+        if _FORBIDDEN_SHELL_META_RE.search(stripped_tok):
+            raise CommandValidationError(f"危険なシェル記号を含む指定は展開できません: {normalized}")
+        tokens.append(stripped_tok)
+
+    if len(tokens) >= 2 and tokens[0].lower() in ("aiskel", "skelify") and tokens[1].lower() in (
+        "c",
+        "copy",
+        "cp",
+        "-c",
+        "--copy",
+    ):
+        tokens = tokens[2:]
+
+    specs: List[str] = []
+    with_deps = False
+    max_chars: Optional[int] = None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-d", "--deps", "--dependencies"):
+            with_deps = True
+            i += 1
+        elif tok == "--max-chars":
+            if i + 1 >= len(tokens):
+                raise CommandValidationError("--max-chars の値が指定されていません")
+            max_chars = _parse_positive_int(tokens[i + 1], "--max-chars")
+            i += 2
+        elif tok.startswith("--max-chars="):
+            raw_val = tok.split("=", 1)[1].strip()
+            max_chars = _parse_positive_int(raw_val, "--max-chars")
+            i += 1
+        elif tok.startswith("-"):
+            raise CommandValidationError(f"引き継ぎ展開で許可されていないオプションです: {tok}")
+        elif tok in ("...", "…"):
+            i += 1
+        else:
+            validated = _validate_spec_within_root(tok, project_root)
+            if validated not in specs:
+                specs.append(validated)
+            i += 1
+
+    if not specs:
+        raise CommandValidationError(f"展開対象のファイル指定がありません: {normalized}")
+    return specs, with_deps, max_chars

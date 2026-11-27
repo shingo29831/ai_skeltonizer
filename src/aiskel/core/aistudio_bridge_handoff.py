@@ -17,6 +17,7 @@ from .aistudio_bridge_types import (
 from .aistudio_config_infer import resolve_target_config_file, validate_config_infer_patch
 from .aistudio_discovery_handoff import (
     advance_next_discovery_task_handoff,
+    capture_task_handoff_xml_from_response,
     handle_discovery_handoff,
 )
 from .aistudio_handoff import (
@@ -207,18 +208,12 @@ def run_terminal_auto_apply(
             if hasattr(bridge._handoff_manager, "get_tab_mode")
             else None
         )
-        if hasattr(bridge._handoff_manager, "set_tab_mode"):
-            bridge._handoff_manager.set_tab_mode(req_tab_id, None)
-        bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
-        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
-        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
-        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
-            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
         if (
             not config_infer_target
             and allow_rename is None
             and tab_mode == HandoffKind.DISCOVERY.value
         ):
+            # consume_detected_patch が _tab_lineage を消す前に系譜上の引き継ぎXMLを参照・解放する
             next_task_info = advance_next_discovery_task_handoff(
                 bridge,
                 source_tab_id=req_tab_id,
@@ -232,6 +227,15 @@ def run_terminal_auto_apply(
                     file=sys.stderr,
                     flush=True,
                 )
+        if not next_task_info.get("error") and hasattr(bridge._handoff_manager, "clear_task_handoff_xml"):
+            bridge._handoff_manager.clear_task_handoff_xml(req_tab_id)
+        if hasattr(bridge._handoff_manager, "set_tab_mode"):
+            bridge._handoff_manager.set_tab_mode(req_tab_id, None)
+        bridge._handoff_manager.consume_detected_patch(req_tab_id, target_patch)
+        bridge._handoff_manager.set_tab_organize_policy(req_tab_id, None)
+        bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
+        if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
+            bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
 
     resp_body: Dict[str, object] = {
         "ok": True,
@@ -373,6 +377,14 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
         if config_infer_target and req_tab_id:
             bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, config_infer_target)
 
+        if response_text.strip() and not config_infer_target and not is_organize_mode and allow_rename is None:
+            if current_tab_mode in (None, HandoffKind.DISCOVERY.value):
+                capture_task_handoff_xml_from_response(
+                    bridge,
+                    tab_id=req_tab_id,
+                    response_text=response_text,
+                )
+
         max_tabs = bridge.get_patch_handoff_max_tabs()
         remaining_before = bridge._handoff_manager.get_remaining_auto_tabs(req_tab_id, default_limit=max_tabs)
         if stop_requested:
@@ -407,6 +419,8 @@ def handle_handoff_create(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                         bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
                         if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
                             bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+                        if hasattr(bridge._handoff_manager, "clear_task_handoff_xml"):
+                            bridge._handoff_manager.clear_task_handoff_xml(req_tab_id)
                     if dedup_key:
                         bridge._recent_keys.append(dedup_key)
                 timestamp = datetime.now().strftime("%H:%M:%S")

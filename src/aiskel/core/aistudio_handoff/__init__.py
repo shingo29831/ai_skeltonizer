@@ -3,7 +3,9 @@
 from .manager import PatchHandoffManager
 from .script import build_patch_handoff_js
 from .text import (
+    expand_task_handoff_placeholders,
     extract_discovery_tasks,
+    extract_task_handoff_xml,
     format_handoff_prompt_text,
     format_summary_prompt_text,
     has_applicable_patch_in_text,
@@ -11,6 +13,7 @@ from .text import (
     has_move_patch_in_text,
     has_patch_delimiters_in_text,
     load_project_summary_text,
+    strip_task_handoff_xml,
 )
 from .types import (
     HANDOFF_TTL_SEC,
@@ -32,7 +35,9 @@ __all__ = [
     "PatchHandoffManager",
     "TabHandoffPayload",
     "build_patch_handoff_js",
+    "expand_task_handoff_placeholders",
     "extract_discovery_tasks",
+    "extract_task_handoff_xml",
     "format_handoff_prompt_text",
     "format_summary_prompt_text",
     "has_applicable_patch_in_text",
@@ -40,4 +45,5 @@ __all__ = [
     "has_move_patch_in_text",
     "has_patch_delimiters_in_text",
     "load_project_summary_text",
+    "strip_task_handoff_xml",
 ]

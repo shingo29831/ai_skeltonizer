@@ -18,6 +18,7 @@ from .aistudio_handoff.task_queue import (
 from .aistudio_handoff.text import (
     extract_discovery_tasks,
     extract_original_user_request,
+    extract_task_handoff_xml,
     format_discovery_handoff_text,
 )
 from .aistudio_handoff.types import HandoffKind
@@ -120,6 +121,8 @@ def handle_discovery_handoff(
             )
             bridge._handoff_manager.set_discovery_queue(queue)
             bridge._handoff_manager.set_pending_external_task_handoff(None)
+            if req_tab_id and hasattr(bridge._handoff_manager, "clear_task_handoff_xml"):
+                bridge._handoff_manager.clear_task_handoff_xml(req_tab_id)
             save_pending_task_queue(bridge.project_root, queue, bridge.output_dir)
             plan_lines = queue.build_plan_lines(0)
         else:
@@ -190,6 +193,36 @@ def handle_discovery_handoff(
         "scoped_dependency_count": len(resolution.dependency_files),
         "message": "スコープ限定バンドルと2度目プロンプトを新規タブへ引き継ぎます",
     }
+
+def capture_task_handoff_xml_from_response(
+    bridge: Any,
+    *,
+    tab_id: str,
+    response_text: str,
+) -> str:
+    """AI応答に含まれる専用引き継ぎXMLを抽出し、タブ状態と分割タスクキューへ保存する。"""
+    handoff_xml = extract_task_handoff_xml(response_text)
+    if not handoff_xml:
+        return ""
+    tab_mode = (
+        bridge._handoff_manager.get_tab_mode(tab_id)
+        if tab_id and hasattr(bridge._handoff_manager, "get_tab_mode")
+        else None
+    )
+    if tab_mode not in (None, HandoffKind.DISCOVERY.value):
+        return ""
+    if hasattr(bridge._handoff_manager, "record_task_handoff_xml"):
+        bridge._handoff_manager.record_task_handoff_xml(tab_id, handoff_xml)
+    queue = bridge._handoff_manager.get_discovery_queue()
+    if queue is None:
+        queue = load_pending_task_queue(bridge.project_root, bridge.output_dir)
+        if queue is not None:
+            bridge._handoff_manager.set_discovery_queue(queue)
+    if queue is not None and 0 <= queue.current_index < queue.total_tasks:
+        queue.handoff_contexts[queue.current_index] = handoff_xml
+        queue.updated_at = time.time()
+        save_pending_task_queue(bridge.project_root, queue, bridge.output_dir)
+    return handoff_xml
 
 def _create_task_handoff_record(
     bridge: Any,
@@ -272,6 +305,17 @@ def advance_next_discovery_task_handoff(
 
     next_index_0 = queue.current_index + 1
     prev_outcomes = dict(queue.task_outcomes)
+    prev_contexts = dict(queue.handoff_contexts)
+    if normalized_outcome == "skipped":
+        # スキップ完了時は先行ターンで捕捉済みの引き継ぎXMLを次タスクへ引き渡さない
+        queue.handoff_contexts.pop(queue.current_index, None)
+    elif (
+        queue.current_index not in queue.handoff_contexts
+        and hasattr(bridge._handoff_manager, "get_task_handoff_xml")
+    ):
+        mgr_xml = bridge._handoff_manager.get_task_handoff_xml(source_tab_id)
+        if isinstance(mgr_xml, str) and mgr_xml.strip():
+            queue.handoff_contexts[queue.current_index] = mgr_xml.strip()
     if normalized_outcome != "completed":
         queue.task_outcomes[queue.current_index] = normalized_outcome
     try:
@@ -286,6 +330,7 @@ def advance_next_discovery_task_handoff(
         )
     except (OSError, ValueError, RuntimeError) as e:
         queue.task_outcomes = prev_outcomes
+        queue.handoff_contexts = prev_contexts
         return {
             "has_queue": True,
             "advanced": False,
@@ -296,6 +341,8 @@ def advance_next_discovery_task_handoff(
     queue.current_index = next_index_0
     queue.updated_at = time.time()
     save_pending_task_queue(bridge.project_root, queue, bridge.output_dir)
+    if hasattr(bridge._handoff_manager, "clear_task_handoff_xml"):
+        bridge._handoff_manager.clear_task_handoff_xml(source_tab_id)
 
     task_num = next_index_0 + 1
     total_tasks = queue.total_tasks
@@ -389,6 +436,16 @@ def handle_tasks_advance(bridge: Any, payload: Dict[str, object]) -> Tuple[int, 
                 "all_tasks_completed": False,
                 "no_bound_tab": True,
             }
+        if prev_outcome != "skipped":
+            raw_handoff_source = payload.get("task_handoff_xml")
+            if not isinstance(raw_handoff_source, str) or not raw_handoff_source.strip():
+                raw_handoff_source = payload.get("response_text")
+            if isinstance(raw_handoff_source, str) and raw_handoff_source.strip():
+                capture_task_handoff_xml_from_response(
+                    bridge,
+                    tab_id=clean_tid,
+                    response_text=raw_handoff_source,
+                )
         res = advance_next_discovery_task_handoff(
             bridge,
             source_tab_id=clean_tid,

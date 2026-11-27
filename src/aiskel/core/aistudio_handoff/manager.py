@@ -32,6 +32,7 @@ class PatchHandoffManager:
         self._tab_organize_policies: "OrderedDict[str, bool]" = OrderedDict()
         self._tab_config_infer_targets: "OrderedDict[str, str]" = OrderedDict()
         self._tab_modes: "OrderedDict[str, str]" = OrderedDict()
+        self._tab_handoff_contexts: "OrderedDict[str, str]" = OrderedDict()
         self._discovery_queue: Optional[Any] = None
         self._pending_external_task_handoff: Optional[Dict[str, object]] = None
         self._last_detected_patch: Optional[str] = None
@@ -271,12 +272,54 @@ class PatchHandoffManager:
         with self._lock:
             return self._discovery_queue
 
+    def record_task_handoff_xml(self, tab_id: str, handoff_xml: str) -> None:
+        """指定タブで抽出された次タスク向け引き継ぎXMLを保持する。"""
+        clean_tid = (tab_id or "").strip()
+        clean_xml = (handoff_xml or "").strip()
+        if not clean_xml:
+            return
+        with self._lock:
+            self._tab_handoff_contexts[clean_tid] = clean_xml
+            self._tab_handoff_contexts.move_to_end(clean_tid)
+            while len(self._tab_handoff_contexts) > MAX_TRACKED_AUTO_TABS:
+                self._tab_handoff_contexts.popitem(last=False)
+
+    def get_task_handoff_xml(self, tab_id: str = "") -> Optional[str]:
+        """指定タブ（またはその系譜）に紐づく次タスク向け引き継ぎXMLを返す。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            visited: Set[str] = set()
+            cur = clean_tid
+            while cur and cur not in visited:
+                if cur in self._tab_handoff_contexts:
+                    return self._tab_handoff_contexts[cur]
+                visited.add(cur)
+                cur = self._tab_lineage.get(cur, "")
+            if not clean_tid and "" in self._tab_handoff_contexts:
+                return self._tab_handoff_contexts[""]
+        return None
+
+    def clear_task_handoff_xml(self, tab_id: str = "") -> None:
+        """指定タブ（およびその系譜）に紐づく次タスク向け引き継ぎXMLを解放する。"""
+        clean_tid = (tab_id or "").strip()
+        with self._lock:
+            if not clean_tid:
+                self._tab_handoff_contexts.pop("", None)
+                return
+            visited: Set[str] = set()
+            cur = clean_tid
+            while cur and cur not in visited:
+                visited.add(cur)
+                self._tab_handoff_contexts.pop(cur, None)
+                cur = self._tab_lineage.get(cur, "")
+
     def clear_discovery_queue(self) -> None:
         """保持中の分割Discoveryタスクキューと保留外部引き継ぎをクリアする。"""
         with self._lock:
             self._discovery_queue = None
             self._pending_external_task_handoff = None
             self._tab_no_patch_retries.clear()
+            self._tab_handoff_contexts.clear()
 
     def set_pending_external_task_handoff(self, info: Optional[Dict[str, object]]) -> None:
         """外部CLIからの次タスク起動通知を保持する。"""
@@ -475,9 +518,10 @@ class PatchHandoffManager:
             ):
                 self._set_tab_mode_locked(clean_tid, item.handoff_kind)
                 self._tab_no_patch_retries.pop(clean_tid, None)
-                # 新規タスクタブが過去タスクの旧パッチを保持しないよう初期化する
+                # 新規タスクタブが過去タスクの旧パッチや旧引き継ぎXMLを保持しないよう初期化する
                 if not item.response_text.strip():
                     self._tab_patches.pop(clean_tid, None)
+                    self._tab_handoff_contexts.pop(clean_tid, None)
         if item.allow_rename is not None and (clean_tid := (tab_id or "").strip()):
             self._tab_organize_policies[clean_tid] = bool(item.allow_rename)
             self._tab_organize_policies.move_to_end(clean_tid)

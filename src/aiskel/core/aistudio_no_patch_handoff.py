@@ -6,7 +6,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from .aistudio_command import extract_aiskel_copy_commands
 from .aistudio_config_infer import resolve_target_config_file
-from .aistudio_discovery_handoff import advance_next_discovery_task_handoff
+from .aistudio_discovery_handoff import (
+    advance_next_discovery_task_handoff,
+    capture_task_handoff_xml_from_response,
+)
 from .aistudio_handoff.task_queue import DiscoveryTaskQueue, load_pending_task_queue
 from .aistudio_handoff.text import (
     extract_discovery_tasks,
@@ -147,6 +150,8 @@ def _clear_tab_task_state(bridge: Any, req_tab_id: str) -> None:
     bridge._handoff_manager.set_tab_config_infer_target(req_tab_id, None)
     if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
         bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+    if hasattr(bridge._handoff_manager, "clear_task_handoff_xml"):
+        bridge._handoff_manager.clear_task_handoff_xml(req_tab_id)
 
 def _attach_next_task_fields(resp_body: Dict[str, object], next_info: Dict[str, object]) -> None:
     if next_info.get("advanced"):
@@ -305,6 +310,12 @@ def handle_tasks_no_patch(bridge: Any, payload: Dict[str, object]) -> Tuple[int,
                 and (tab_mode == HandoffKind.DISCOVERY.value or raw_mode in ("no_change", "skip"))
             ):
                 outcome_kind = "skipped" if effective_mode == "skip" else "no_change"
+                if outcome_kind != "skipped" and response_text.strip():
+                    capture_task_handoff_xml_from_response(
+                        bridge,
+                        tab_id=req_tab_id,
+                        response_text=response_text,
+                    )
                 prev_msg = "タスクをスキップしました" if outcome_kind == "skipped" else "変更なし完了（パッチ出力なし）"
                 next_info = advance_next_discovery_task_handoff(
                     bridge,

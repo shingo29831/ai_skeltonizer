@@ -15,7 +15,11 @@ from ...cli_sync import ensure_gitignore_updated
 from ...config import load_two_stage_config_from_meta
 from ..aistudio_prompts import PromptPattern, load_prompt_for_pattern
 from ..scope_builder import build_directory_index_text, build_scoped_bundle_text
-from .text import format_discovery_handoff_text
+from .text import (
+    expand_task_handoff_placeholders,
+    extract_task_handoff_xml,
+    format_discovery_handoff_text,
+)
 from .types import DiscoveryTask
 
 PENDING_TASKS_FILENAME = "pending_tasks.json"
@@ -80,6 +84,7 @@ class DiscoveryTaskQueue:
     created_at: float = 0.0
     updated_at: float = 0.0
     task_outcomes: Dict[int, str] = field(default_factory=dict)
+    handoff_contexts: Dict[int, str] = field(default_factory=dict)
 
     @property
     def total_tasks(self) -> int:
@@ -133,6 +138,8 @@ class DiscoveryTaskQueue:
         }
         if self.task_outcomes:
             data["task_outcomes"] = {str(k): v for k, v in sorted(self.task_outcomes.items())}
+        if self.handoff_contexts:
+            data["handoff_contexts"] = {str(k): v for k, v in sorted(self.handoff_contexts.items())}
         return data
 
     @classmethod
@@ -176,6 +183,18 @@ class DiscoveryTaskQueue:
                     continue
                 if 0 <= idx_key < len(parsed_tasks) and isinstance(v, str) and v in ("completed", "no_change", "skipped"):
                     parsed_outcomes[idx_key] = v
+        parsed_contexts: Dict[int, str] = {}
+        raw_contexts = data.get("handoff_contexts")
+        if isinstance(raw_contexts, dict):
+            for k, v in raw_contexts.items():
+                if isinstance(k, (bool, float)):
+                    continue
+                try:
+                    idx_key = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx_key < len(parsed_tasks) and isinstance(v, str) and v.strip():
+                    parsed_contexts[idx_key] = v
         return cls(
             queue_id=str(data.get("queue_id") or ""),
             project_root=str(data.get("project_root") or ""),
@@ -186,6 +205,7 @@ class DiscoveryTaskQueue:
             created_at=created_at,
             updated_at=updated_at,
             task_outcomes=parsed_outcomes,
+            handoff_contexts=parsed_contexts,
         )
 
 def _get_pending_tasks_candidates(project_root: Path, output_dir: Optional[Path] = None) -> List[Path]:
@@ -335,6 +355,7 @@ def notify_bridge_advance_task(
     session_dir: Optional[Path] = None,
     timeout_sec: float = 5.0,
     reason: Optional[str] = None,
+    task_handoff_xml: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
     """稼働中ローカルブリッジへ次タスク進行をHTTP通知する。"""
     session = load_bridge_session(project_root, session_dir=session_dir)
@@ -347,6 +368,8 @@ def notify_bridge_advance_task(
     payload: Dict[str, object] = {"project_root": str(project_root.resolve())}
     if reason:
         payload["reason"] = reason
+    if isinstance(task_handoff_xml, str) and task_handoff_xml.strip():
+        payload["task_handoff_xml"] = task_handoff_xml.strip()
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
     try:
@@ -379,6 +402,12 @@ def prepare_task_combined_text(
             project_root,
             include_files=two_stage_cfg.index_include_files,
         )
+    raw_prev_handoff = queue.handoff_contexts.get(task_index_0 - 1, "") if task_index_0 > 0 else ""
+    expanded_handoff = (
+        expand_task_handoff_placeholders(raw_prev_handoff, project_root)
+        if raw_prev_handoff.strip()
+        else ""
+    )
     second_stage_prompt = load_prompt_for_pattern(project_root, PromptPattern.DEFAULT)
     combined_text = format_discovery_handoff_text(
         second_stage_prompt,
@@ -389,6 +418,7 @@ def prepare_task_combined_text(
         task_index=task_index_0 + 1,
         total_tasks=queue.total_tasks,
         task_plan_lines=queue.build_plan_lines(task_index_0),
+        prev_task_handoff=expanded_handoff,
     )
     resolved_list: Sequence[str] = resolution.resolved_specs or task.dirs
     target_summary = ", ".join(resolved_list[:4])
@@ -406,6 +436,7 @@ def advance_task_queue_after_cli_apply(
     *,
     clipboard_writer: Optional[Callable[[str], None]] = None,
     session_dir: Optional[Path] = None,
+    task_handoff_xml: Optional[str] = None,
 ) -> bool:
     """CLIのaiskel a成功時に分割タスクキューを次タスクへ進め、ブリッジ通知またはクリップボード保存を行う。"""
     if is_in_bridge_terminal_apply():
@@ -416,7 +447,10 @@ def advance_task_queue_after_cli_apply(
     if queue is None and session is None:
         return False
 
-    bridge_res = notify_bridge_advance_task(project_root, session_dir=session_dir)
+    notify_kwargs: Dict[str, object] = {"session_dir": session_dir}
+    if isinstance(task_handoff_xml, str) and task_handoff_xml.strip():
+        notify_kwargs["task_handoff_xml"] = task_handoff_xml.strip()
+    bridge_res = notify_bridge_advance_task(project_root, **notify_kwargs)
     if bridge_res and bridge_res.get("ok"):
         if bridge_res.get("skipped_bridge_apply"):
             return False
@@ -440,6 +474,11 @@ def advance_task_queue_after_cli_apply(
         clear_pending_task_queue(project_root, output_dir=session_output_dir)
         print(f"\n🎉 分割タスク全 {total} 件が完了しました！", flush=True)
         return True
+
+    if isinstance(task_handoff_xml, str) and task_handoff_xml.strip():
+        extracted_xml = extract_task_handoff_xml(task_handoff_xml)
+        if extracted_xml:
+            queue.handoff_contexts[queue.current_index] = extracted_xml
 
     next_index_0 = queue.current_index + 1
     try:

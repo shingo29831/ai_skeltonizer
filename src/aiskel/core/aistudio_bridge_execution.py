@@ -35,6 +35,8 @@ from .aistudio_command import (
     build_safe_copy_argv,
     extract_aiskel_copy_commands,
 )
+from .aistudio_discovery_handoff import capture_task_handoff_xml_from_response
+from .aistudio_handoff.types import HandoffKind
 
 def normalize_incoming_commands(payload: Dict[str, object]) -> List[str]:
     """受信ペイロードから実行対象となるaiskel cコマンド文字列一覧を抽出・正規化する。"""
@@ -159,6 +161,21 @@ def handle_execute_command(bridge: Any, payload: Dict[str, object]) -> Tuple[int
                 bridge._recent_keys.append(dedup_key)
             if hasattr(bridge._handoff_manager, "reset_no_patch_retries"):
                 bridge._handoff_manager.reset_no_patch_retries(req_tab_id)
+            raw_handoff_source = payload.get("task_handoff_xml")
+            if not isinstance(raw_handoff_source, str) or not raw_handoff_source.strip():
+                raw_handoff_source = payload.get("response_text")
+            if isinstance(raw_handoff_source, str) and raw_handoff_source.strip():
+                tab_mode = (
+                    bridge._handoff_manager.get_tab_mode(req_tab_id)
+                    if req_tab_id and hasattr(bridge._handoff_manager, "get_tab_mode")
+                    else None
+                )
+                if tab_mode in (None, HandoffKind.DISCOVERY.value):
+                    capture_task_handoff_xml_from_response(
+                        bridge,
+                        tab_id=req_tab_id,
+                        response_text=raw_handoff_source,
+                    )
 
         # なぜ必要か: aiskel c失敗時に自動コピーされたエラー内容も成功時同様に貼り付け・自動送信可能にするため
         paste_suppressed = effective_no_focus or effective_no_paste

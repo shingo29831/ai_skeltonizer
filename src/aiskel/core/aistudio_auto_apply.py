@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional, TextIO, Tuple
 
+from .aistudio_handoff.text import strip_task_handoff_xml
+
 DEFAULT_APPLY_ERROR_DETAIL_CHARS = 240
 DEFAULT_CHAT_ERROR_REPORT_CHARS = 4000
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -289,7 +291,8 @@ def _temporary_patch_file(patch_text: str) -> Iterator[Path]:
             prefix="aiskel_auto_apply_",
             delete=False,
         ) as tmp_file:
-            tmp_file.write(patch_text)
+            # 引き継ぎXML内の手順文がパッチヘッダや削除指示として誤解析されるのを防ぐ
+            tmp_file.write(strip_task_handoff_xml(patch_text))
             tmp_path = Path(tmp_file.name)
         yield tmp_path
     finally:

@@ -43,6 +43,7 @@ from .config import (
     load_test_command_from_meta,
 )
 from .core.aistudio_handoff.task_queue import advance_task_queue_after_cli_apply
+from .core.aistudio_handoff.text import extract_task_handoff_xml, strip_task_handoff_xml
 from .core.clipboard import get_clipboard_text, set_clipboard_text
 from .core.patch.applier import apply_patch
 from .core.test_runner import run_static_analysis, run_validation_test
@@ -105,6 +106,11 @@ def handle_apply_command(
     )
     if patch_text is None:
         return 1
+
+    raw_task_handoff_xml = (
+        "" if (is_revert or is_check or is_dry_run) else extract_task_handoff_xml(patch_text)
+    )
+    patch_text = strip_task_handoff_xml(patch_text)
 
     target_file = parsed_args.target.resolve() if parsed_args.target else None
     initial_commit_msg, patch_text = extract_commit_message(patch_text)
@@ -295,5 +301,12 @@ def handle_apply_command(
         and not test_failed
         and (total_success > 0 or total_skipped > 0)
     ):
-        advance_task_queue_after_cli_apply(project_root, clipboard_writer=set_clipboard_text)
+        if raw_task_handoff_xml:
+            advance_task_queue_after_cli_apply(
+                project_root,
+                clipboard_writer=set_clipboard_text,
+                task_handoff_xml=raw_task_handoff_xml,
+            )
+        else:
+            advance_task_queue_after_cli_apply(project_root, clipboard_writer=set_clipboard_text)
     return exit_code

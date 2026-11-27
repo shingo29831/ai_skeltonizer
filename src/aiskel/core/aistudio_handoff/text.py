@@ -4,11 +4,17 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
 
 from ...config import SkeletonConfig, load_bundle_filename_from_meta
+from ..aistudio_command import (
+    CommandValidationError,
+    find_task_handoff_line_indices,
+    parse_aiskel_copy_placeholder_args,
+)
 from ..aistudio_prompts import (
     NO_OUTPUT_STOP_SIGNAL,
     PATCH_HANDOFF_STOP_SIGNAL,
     STOP_SIGNALS,
 )
+from ..code_extractor import DEFAULT_MAX_CHARS, extract_and_format_snippets
 from ..patch.parser import (
     DELIMITER_END,
     DELIMITER_MID,
@@ -48,6 +54,145 @@ _STOP_SIGNAL_TRAILING_RE = re.compile(
 _STOP_SIGNAL_EXAMPLE_HINT_RE = re.compile(
     r"(?:出力してください|出力せよ|記述せよ|ではなく|例[:：])"
 )
+TASK_HANDOFF_TAG = "task_handoff"
+_TASK_HANDOFF_BLOCK_RE = re.compile(
+    r"<(task_handoff|aiskel_handoff)(?:\s[^>]*)?>([\s\S]*?)</\1>",
+    re.IGNORECASE,
+)
+TASK_HANDOFF_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*(?:aiskel_c|aiskel-c|aiskel(?:\s+(?:c|copy|cp|-c|--copy))?)\s*(?::|\s)\s*([\s\S]*?)\s*\}\}",
+    re.IGNORECASE,
+)
+
+def _split_patch_segments(text: str) -> List[Tuple[bool, str]]:
+    lines = text.splitlines(keepends=True)
+    patch_indices = _find_valid_patch_line_indices([ln.rstrip("\r\n") for ln in lines])
+    if not patch_indices:
+        return [(False, text)]
+    segments: List[Tuple[bool, str]] = []
+    buf: List[str] = []
+    current_is_patch: Optional[bool] = None
+    for idx, line in enumerate(lines):
+        is_patch = idx in patch_indices
+        if current_is_patch is None:
+            current_is_patch = is_patch
+        elif is_patch != current_is_patch:
+            segments.append((current_is_patch, "".join(buf)))
+            buf = []
+            current_is_patch = is_patch
+        buf.append(line)
+    if buf and current_is_patch is not None:
+        segments.append((current_is_patch, "".join(buf)))
+    return segments
+
+def strip_task_handoff_xml(text: str) -> str:
+    """有効なパッチブロック外に記述された専用引き継ぎXMLブロックを除去する。"""
+    if not text or ("task_handoff" not in text.lower() and "aiskel_handoff" not in text.lower()):
+        return text
+    parts: List[str] = []
+    for is_patch, segment in _split_patch_segments(text):
+        if is_patch:
+            parts.append(segment)
+        else:
+            parts.append(_TASK_HANDOFF_BLOCK_RE.sub("", segment))
+    return "".join(parts)
+
+def extract_task_handoff_xml(text: str) -> str:
+    """AI応答からパッチブロック外の専用引き継ぎXMLブロックを抽出して正規化する。"""
+    if not text or not text.strip():
+        return ""
+    if "task_handoff" not in text.lower() and "aiskel_handoff" not in text.lower():
+        return ""
+    bodies: List[str] = []
+    seen: Set[str] = set()
+    for is_patch, segment in _split_patch_segments(text):
+        if is_patch:
+            continue
+        for match in _TASK_HANDOFF_BLOCK_RE.finditer(segment):
+            body = (match.group(2) or "").strip()
+            if body and body not in seen:
+                seen.add(body)
+                bodies.append(body)
+    if not bodies:
+        return ""
+    merged = "\n\n".join(bodies)
+    return f"<{TASK_HANDOFF_TAG}>\n{merged}\n</{TASK_HANDOFF_TAG}>"
+
+def _extract_placeholder_snippet(
+    raw_args: str,
+    project_root: Path,
+    *,
+    default_max_chars: int,
+) -> str:
+    try:
+        specs, with_deps, placeholder_max = parse_aiskel_copy_placeholder_args(raw_args, project_root)
+    except CommandValidationError as e:
+        return f"> [aiskel_c 展開エラー: {raw_args.strip()} -> {e}]"
+
+    limit = min(default_max_chars, placeholder_max) if placeholder_max is not None else default_max_chars
+    try:
+        snippet, _, _ = extract_and_format_snippets(
+            specs,
+            project_root,
+            max_chars=limit,
+            with_deps=with_deps,
+        )
+        return snippet
+    except (FileNotFoundError, KeyError, ValueError, OSError) as batch_err:
+        if len(specs) <= 1:
+            return f"> [aiskel_c 展開エラー: {specs[0]} -> {batch_err}]"
+
+    # 複数指定時に一部パスが削除・未作成でも残りの有効コード展開を予算内で継続する
+    parts: List[str] = []
+    remaining = limit
+    for spec in specs:
+        if remaining <= 0:
+            parts.append(f"> [aiskel_c 展開省略: 最大文字数上限到達 ({spec})]")
+            continue
+        try:
+            part, _, _ = extract_and_format_snippets(
+                [spec],
+                project_root,
+                max_chars=remaining,
+                with_deps=with_deps,
+            )
+            parts.append(part)
+            remaining = max(0, remaining - len(part))
+        except (FileNotFoundError, KeyError, ValueError, OSError) as item_err:
+            parts.append(f"> [aiskel_c 展開エラー: {spec} -> {item_err}]")
+    return "\n\n".join(parts)
+
+def expand_task_handoff_placeholders(
+    handoff_xml: str,
+    project_root: Path,
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> str:
+    """保存済み引き継ぎXML内のプレースホルダーを最新ファイル状態からaiskel c相当コードへ展開する。"""
+    raw = (handoff_xml or "").strip()
+    if not raw:
+        return ""
+
+    resolved_root = project_root.resolve()
+    remaining_budget = max_chars
+
+    def _replace_match(match: re.Match[str]) -> str:
+        nonlocal remaining_budget
+        raw_args = match.group(1) or ""
+        if remaining_budget <= 0:
+            return f"> [aiskel_c 展開省略: 最大文字数上限({max_chars:,}文字)到達 ({raw_args.strip()})]"
+        snippet = _extract_placeholder_snippet(
+            raw_args,
+            resolved_root,
+            default_max_chars=remaining_budget,
+        )
+        remaining_budget = max(0, remaining_budget - len(snippet))
+        start_idx, end_idx = match.span()
+        prefix = "\n" if start_idx > 0 and raw[start_idx - 1] != "\n" else ""
+        suffix = "\n" if end_idx < len(raw) and raw[end_idx] != "\n" else ""
+        return f"{prefix}{snippet}{suffix}"
+
+    return TASK_HANDOFF_PLACEHOLDER_RE.sub(_replace_match, raw)
 
 def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
     excluded: Set[int] = set()
@@ -75,8 +220,9 @@ def _find_valid_patch_line_indices(lines: List[str]) -> Set[int]:
     return excluded
 
 def _find_excluded_stop_signal_line_indices(lines: List[str]) -> Set[int]:
-    # パッチ内自己言及やコードブロック内例示による誤停止を防ぐため対象範囲を除外
-    excluded = _find_valid_patch_line_indices(lines)
+    # パッチ内自己言及・コードブロック内例示・引き継ぎXML内言及による誤停止を防ぐため対象範囲を除外
+    patch_indices = _find_valid_patch_line_indices(lines)
+    excluded = set(patch_indices) | find_task_handoff_line_indices(lines, patch_indices)
     active_fence: Optional[Tuple[str, int]] = None
     for idx, line in enumerate(lines):
         if active_fence is not None:
@@ -96,20 +242,22 @@ def _find_excluded_stop_signal_line_indices(lines: List[str]) -> Set[int]:
 
 def has_patch_delimiters_in_text(text: str) -> bool:
     """テキスト内にaiskelパッチ形式（<<<< ==== >>>> の順序ペアとヘッダ/commit構造）が含まれるか判定する。"""
-    if not text or not text.strip() or not has_patch_delimiters(text):
+    cleaned = strip_task_handoff_xml(text)
+    if not cleaned or not cleaned.strip() or not has_patch_delimiters(cleaned):
         return False
-    if not _PATCH_STRUCTURE_HINT_RE.search(text):
+    if not _PATCH_STRUCTURE_HINT_RE.search(cleaned):
         return False
-    return bool(_find_valid_patch_line_indices(text.splitlines()))
+    return bool(_find_valid_patch_line_indices(cleaned.splitlines()))
 
 def has_move_patch_in_text(text: str) -> bool:
     """移動・名前変更ディレクティブのみのパッチブロック(コードブロック内またはcommitタグ付き)が含まれるか判定する。"""
-    if not text or not text.strip() or not is_file_move_patch(text):
+    cleaned = strip_task_handoff_xml(text)
+    if not cleaned or not cleaned.strip() or not is_file_move_patch(cleaned):
         return False
-    if _COMMIT_TAG_OPEN in text:
+    if _COMMIT_TAG_OPEN in cleaned:
         return True
     active_fence: Optional[Tuple[str, int]] = None
-    for line in text.splitlines():
+    for line in cleaned.splitlines():
         if active_fence is not None:
             fence_char, fence_len = active_fence
             stripped = line.strip()
@@ -128,13 +276,14 @@ def has_move_patch_in_text(text: str) -> bool:
 
 def has_delete_patch_in_text(text: str) -> bool:
     """ファイル削除ディレクティブのみのパッチブロック(コードブロック内またはcommitタグ付き)が含まれるか判定する。"""
-    if not text or not text.strip() or not is_file_deletion_patch(text):
+    cleaned = strip_task_handoff_xml(text)
+    if not cleaned or not cleaned.strip() or not is_file_deletion_patch(cleaned):
         return False
-    if _COMMIT_TAG_LINE_RE.search(text):
+    if _COMMIT_TAG_LINE_RE.search(cleaned):
         return True
     active_fence: Optional[Tuple[str, int]] = None
     fence_lines: List[str] = []
-    for line in text.splitlines():
+    for line in cleaned.splitlines():
         if active_fence is not None:
             fence_char, fence_len = active_fence
             stripped = line.strip()
@@ -160,9 +309,10 @@ def has_applicable_patch_in_text(text: str) -> bool:
 
 def has_handoff_stop_signal_in_text(text: str) -> bool:
     """応答テキストのコードブロック・パッチ外に終了合図が含まれるか判定する。"""
-    if not text or not text.strip() or not any(sig in text for sig in STOP_SIGNALS):
+    cleaned = strip_task_handoff_xml(text)
+    if not cleaned or not cleaned.strip() or not any(sig in cleaned for sig in STOP_SIGNALS):
         return False
-    lines = text.splitlines()
+    lines = cleaned.splitlines()
     excluded_indices = _find_excluded_stop_signal_line_indices(lines)
     last_non_empty_line = ""
     for idx, line in enumerate(lines):
@@ -265,8 +415,11 @@ def extract_discovery_tasks(text: str) -> List[DiscoveryTask]:
     """1度目探索応答から(<task>, <dirs>)のペア一覧を実行順で抽出する。"""
     if not text or not text.strip() or has_applicable_patch_in_text(text) or has_handoff_stop_signal_in_text(text):
         return []
+    cleaned = strip_task_handoff_xml(text)
+    if not cleaned or not cleaned.strip():
+        return []
 
-    task_matches = list(_DISCOVERY_TASK_TAG_RE.finditer(text))
+    task_matches = list(_DISCOVERY_TASK_TAG_RE.finditer(cleaned))
     task_spans = [(m.start(), m.end()) for m in task_matches]
     task_events: List[Tuple[int, int, str, str]] = [
         (match.start(), 0, "task", match.group(1).strip())
@@ -274,7 +427,7 @@ def extract_discovery_tasks(text: str) -> List[DiscoveryTask]:
     ]
     outer_dir_events: List[Tuple[int, int, str, str]] = []
     inner_dir_events: List[Tuple[int, int, str, str]] = []
-    for match in _DISCOVERY_DIRS_TAG_RE.finditer(text):
+    for match in _DISCOVERY_DIRS_TAG_RE.finditer(cleaned):
         item = (match.start(), 1, "dirs", match.group(1))
         if any(t_start <= match.start() < t_end for t_start, t_end in task_spans):
             inner_dir_events.append(item)
@@ -350,6 +503,7 @@ def format_discovery_handoff_text(
     task_index: int = 1,
     total_tasks: int = 1,
     task_plan_lines: Optional[Sequence[str]] = None,
+    prev_task_handoff: str = "",
 ) -> str:
     """2度目タブ用のプロンプト・元の要望・整理済みタスク・スコープ限定バンドルを統合する。"""
     sections: List[str] = []
@@ -379,6 +533,8 @@ def format_discovery_handoff_text(
             else "=== 整理済みタスク・確認方針 ==="
         )
         sections.append(f"{task_header}\n{organized_task.strip()}")
+    if prev_task_handoff.strip():
+        sections.append(f"=== 前タスクからの引き継ぎ情報 ===\n{prev_task_handoff.strip()}")
     if missing_specs:
         sections.append(
             "=== 注意（対象外パス） ===\n"
